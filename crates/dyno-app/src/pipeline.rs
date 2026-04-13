@@ -840,7 +840,7 @@ where
         let out_path = out_dir.join(&filename);
         std::fs::copy(path, &out_path)?;
 
-        match dynobox_avb::resign::resign_image(
+        match avbtool_rs::resign::resign_image(
             &out_path,
             &config.key,
             config.algorithm.as_deref(),
@@ -849,10 +849,10 @@ where
             Err(e) => {
                 return Err(e).with_context(|| format!("Failed to resign {}", filename));
             }
-            Ok(dynobox_avb::resign::ResignOutcome::Resigned) => {
+            Ok(avbtool_rs::resign::ResignOutcome::Resigned) => {
                 resigned_count += 1;
             }
-            Ok(dynobox_avb::resign::ResignOutcome::SkippedUnsigned) => {
+            Ok(avbtool_rs::resign::ResignOutcome::SkippedUnsigned) => {
                 skipped_unsigned_count += 1;
             }
         }
@@ -975,8 +975,8 @@ fn collect_resignable_images(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
                 continue;
             }
 
-            if let Ok(img_type) = dynobox_avb::parser::detect_avb_image_type(&path) {
-                if img_type != dynobox_avb::parser::AvbImageType::None {
+            if let Ok(img_type) = avbtool_rs::parser::detect_avb_image_type(&path) {
+                if img_type != avbtool_rs::parser::AvbImageType::None {
                     images.push(path);
                 }
             }
@@ -1094,8 +1094,8 @@ fn copy_avb_top_level_img_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Resul
             continue;
         }
 
-        if let Ok(img_type) = dynobox_avb::parser::detect_avb_image_type(&path) {
-            if img_type != dynobox_avb::parser::AvbImageType::None {
+        if let Ok(img_type) = avbtool_rs::parser::detect_avb_image_type(&path) {
+            if img_type != avbtool_rs::parser::AvbImageType::None {
                 transfers.record(materialize_file_with_fallback(
                     &path,
                     &dst_dir.join(file_name),

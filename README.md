@@ -45,7 +45,6 @@ crates/
   dyno-core/     shared core types
   dyno-super/    super parsing and repack
   dyno-payload/  OTA payload parsing and patch apply
-  dyno-avb/      AVB parse, info, and resign
   dyno-xml/      rawprogram XML parsing
 ```
 

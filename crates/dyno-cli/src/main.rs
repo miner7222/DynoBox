@@ -405,9 +405,9 @@ fn main() -> anyhow::Result<()> {
             }
 
             let report = match format {
-                ReportFormat::Text => dynobox_avb::info::generate_info_report(&input)?,
+                ReportFormat::Text => avbtool_rs::info::generate_info_report(&input)?,
                 ReportFormat::Json => {
-                    let entries = dynobox_avb::info::scan_input(&input)?;
+                    let entries = avbtool_rs::info::scan_input(&input)?;
                     serde_json::to_string_pretty(&entries)?
                 }
             };

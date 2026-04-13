@@ -10,9 +10,9 @@ default-run = "dynobox"
 
 [dependencies]
 anyhow.workspace = true
+avbtool-rs.workspace = true
 clap.workspace = true
 dynobox-app.workspace = true
-dynobox-avb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true

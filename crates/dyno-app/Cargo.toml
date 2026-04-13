@@ -9,7 +9,7 @@ description = "Application-layer command API and progress events for DynoBox"
 
 [dependencies]
 anyhow.workspace = true
-dynobox-avb.workspace = true
+avbtool-rs.workspace = true
 dynobox-core.workspace = true
 dynobox-payload.workspace = true
 dynobox-super.workspace = true

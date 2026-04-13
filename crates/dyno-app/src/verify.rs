@@ -68,15 +68,15 @@ pub fn verify_input(input: &Path) -> anyhow::Result<VerificationReport> {
     }
 
     if report.image_file_count > 0 {
-        let scan_entries = dynobox_avb::info::scan_input(input)?;
+        let scan_entries = avbtool_rs::info::scan_input(input)?;
         report.avb_image_count = scan_entries
             .iter()
-            .filter(|entry| matches!(entry.result, dynobox_avb::info::ScanResult::Avb(_)))
+            .filter(|entry| matches!(entry.result, avbtool_rs::info::ScanResult::Avb(_)))
             .count();
         report
             .failures
             .extend(scan_entries.iter().filter_map(|entry| match &entry.result {
-                dynobox_avb::info::ScanResult::Error(message) => Some(VerificationFailure {
+                avbtool_rs::info::ScanResult::Error(message) => Some(VerificationFailure {
                     kind: VerificationFailureKind::Avb,
                     path: Some(entry.path.clone()),
                     message: message.clone(),
