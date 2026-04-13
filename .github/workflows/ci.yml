@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+          components: rustfmt
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo check
+        run: cargo check --workspace
+
+      - name: cargo test
+        run: cargo test --workspace
+
+  release:
+    name: build release (${{ matrix.artifact_name }})
+    needs: [test]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            artifact_name: dynobox-linux-x86_64
+            binary_path: target/release/dynobox
+          - runner: ubuntu-24.04-arm
+            artifact_name: dynobox-linux-arm64
+            binary_path: target/release/dynobox
+          - runner: windows-latest
+            artifact_name: dynobox-windows-x86_64
+            binary_path: target/release/dynobox.exe
+          - runner: windows-11-arm
+            artifact_name: dynobox-windows-arm64
+            binary_path: target/release/dynobox.exe
+          - runner: macos-15-intel
+            artifact_name: dynobox-macos-x86_64
+            binary_path: target/release/dynobox
+          - runner: macos-15
+            artifact_name: dynobox-macos-arm64
+            binary_path: target/release/dynobox
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Build release binary
+        run: cargo build --release -p dynobox-cli
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.binary_path }}

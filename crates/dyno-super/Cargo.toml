@@ -1,0 +1,20 @@
+[package]
+name = "dynobox-super"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Super image parsing and chunk-planning crate for DynoBox"
+
+[dependencies]
+crc32fast = "1.5.0"
+dynobox-core.workspace = true
+dynobox-xml.workspace = true
+regex = "1.12.3"
+sha2 = "0.11.0"
+tracing.workspace = true
+zerocopy = { version = "0.8.48", features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true

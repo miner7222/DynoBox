@@ -1,0 +1,23 @@
+[package]
+name = "dynobox-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI entry point for the standalone DynoBox Rust workspace"
+default-run = "dynobox"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+dynobox-app.workspace = true
+dynobox-avb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "dynobox"
+path = "src/main.rs"

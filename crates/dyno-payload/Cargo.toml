@@ -1,0 +1,28 @@
+[package]
+name = "dynobox-payload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "OTA payload metadata and patch-planning crate for DynoBox"
+
+[dependencies]
+dynobox-core.workspace = true
+prost = "0.13"
+bytes = "1.5"
+zip = "8.5.1"
+tracing.workspace = true
+bzip2 = "0.6.1"
+xz2 = "0.1.7"
+bsdiff-android = "0.0.2"
+brotli = "8.0.2"
+lz4_flex = "0.13.0"
+bitstream-io = "4.9.0"
+brotli-sys = "0.3.2"
+
+[build-dependencies]
+cc = "1.2.60"
+cmake = "0.1.58"
+prost-build = "0.13"
+protoc-bin-vendored = "3.0.0"

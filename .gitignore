@@ -1,0 +1,17 @@
+/target/
+/.idea/
+/.vscode/
+*.log
+Thumbs.db
+.DS_Store
+
+# Output directories for DynoBox commands
+/output_*/
+
+# Large firmware images
+*.img
+
+# Workspace scratch areas for large local experiments.
+/scratch/
+/artifacts/
+/fixtures/tmp/
