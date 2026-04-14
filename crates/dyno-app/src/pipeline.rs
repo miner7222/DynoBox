@@ -407,14 +407,17 @@ where
         output: request.output.clone(),
     });
 
+    let temp_root = create_pipeline_temp_root(&request.output)?;
+    let effective_input = auto_unpack_if_needed(&request.input, temp_root.path(), events, ops)?;
+    let input_dir = effective_input.as_deref().unwrap_or(&request.input);
+
     if !request.repack {
-        ops.resign_stage(&request.input, &request.output, &request.config, events)?;
+        ops.resign_stage(input_dir, &request.output, &request.config, events)?;
         return ops.verify_stage(&request.output, events);
     }
 
-    let temp_root = create_pipeline_temp_root(&request.output)?;
     let resign_stage_dir = temp_root.path().join("resign_stage");
-    ops.resign_stage(&request.input, &resign_stage_dir, &request.config, events)?;
+    ops.resign_stage(input_dir, &resign_stage_dir, &request.config, events)?;
     ops.repack_pipeline(
         &request.input,
         &resign_stage_dir,
@@ -436,8 +439,76 @@ where
         input: request.input.clone(),
         output: request.output.clone(),
     });
-    ops.repack_stage(&request.input, &request.output, events)?;
+
+    let temp_root = create_pipeline_temp_root(&request.output)?;
+    let effective_input = auto_unpack_if_needed(&request.input, temp_root.path(), events, ops)?;
+    let input_dir = effective_input.as_deref().unwrap_or(&request.input);
+
+    ops.repack_stage(input_dir, &request.output, events)?;
     ops.verify_stage(&request.output, events)
+}
+
+/// Check if the input directory has super chunks but no standalone dynamic
+/// partition files. If so, auto-unpack super into a temp workspace and merge
+/// with original input files. Returns Some(workspace_path) if unpack was
+/// performed, None if not needed.
+fn auto_unpack_if_needed<S, O>(
+    input: &Path,
+    scratch_dir: &Path,
+    events: &mut S,
+    ops: &O,
+) -> anyhow::Result<Option<PathBuf>>
+where
+    S: EventSink,
+    O: PipelineOps + ?Sized,
+{
+    let catalog = match dynobox_xml::XmlCatalog::from_dir(input) {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    let super_group = match catalog.group_by_base_label(true).remove("super") {
+        Some(g) => g,
+        None => return Ok(None),
+    };
+    let records: Vec<_> = super_group.records().into_iter().cloned().collect();
+    let layout = match dynobox_super::parse_super_layout(&records, input) {
+        Ok(l) => l,
+        Err(_) => return Ok(None),
+    };
+    let dynamic_names = layout.dynamic_partition_names();
+    if dynamic_names.is_empty() {
+        return Ok(None);
+    }
+
+    // Check if any standalone dynamic partition file already exists.
+    let has_standalone = dynamic_names.iter().any(|name| {
+        let img = input.join(format!("{name}.img"));
+        img.exists()
+    });
+    if has_standalone {
+        return Ok(None);
+    }
+
+    // No standalone dynamic partition files found — auto-unpack.
+    let unpack_dir = scratch_dir.join("_auto_unpack_super");
+    ops.unpack_stage(input, &unpack_dir, events)?;
+
+    // Merge: copy all non-super original files + unpacked partitions into workspace.
+    let workspace_dir = scratch_dir.join("auto_unpack_workspace");
+    recreate_dir(&workspace_dir)?;
+    copy_all_top_level_files(input, &workspace_dir)?;
+    copy_all_top_level_files(&unpack_dir, &workspace_dir)?;
+
+    message(
+        events,
+        MessageLevel::Info,
+        format!(
+            "Auto-unpacked {} dynamic partitions from super.",
+            dynamic_names.len()
+        ),
+    );
+
+    Ok(Some(workspace_dir))
 }
 
 fn run_apply_preflight<S>(
