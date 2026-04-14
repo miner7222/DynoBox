@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.artifact_name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            artifact_name: dynobox-linux-x86_64
+            binary_path: target/release/dynobox
+          - runner: ubuntu-24.04-arm
+            artifact_name: dynobox-linux-arm64
+            binary_path: target/release/dynobox
+          - runner: windows-latest
+            artifact_name: dynobox-windows-x86_64
+            binary_path: target/release/dynobox.exe
+          - runner: windows-11-arm
+            artifact_name: dynobox-windows-arm64
+            binary_path: target/release/dynobox.exe
+          - runner: macos-15-intel
+            artifact_name: dynobox-macos-x86_64
+            binary_path: target/release/dynobox
+          - runner: macos-15
+            artifact_name: dynobox-macos-arm64
+            binary_path: target/release/dynobox
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.1
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release -p dynobox-cli
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.binary_path }}
+
+  release:
+    name: Create GitHub Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          version="${GITHUB_REF_NAME}"
+          mkdir -p release
+
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            platform="${name#dynobox-}"
+
+            if ls "$dir"*.exe 1>/dev/null 2>&1; then
+              cp "$dir"dynobox.exe "release/dynobox-${version}-${platform}.exe"
+            else
+              cp "$dir"dynobox "release/dynobox-${version}-${platform}"
+            fi
+          done
+
+          ls -la release/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release/*
