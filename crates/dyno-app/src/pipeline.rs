@@ -819,6 +819,10 @@ where
     });
 
     recreate_dir(out_dir)?;
+
+    // Copy ALL input files to output first (preserves non-.img files like .elf, .mbn)
+    copy_all_top_level_files(input, out_dir)?;
+
     let images = collect_resignable_images(input)?;
     let mut resigned_count = 0usize;
     let mut skipped_unsigned_count = 0usize;
@@ -838,7 +842,6 @@ where
         });
 
         let out_path = out_dir.join(&filename);
-        std::fs::copy(path, &out_path)?;
 
         match avbtool_rs::resign::resign_image(
             &out_path,
@@ -946,7 +949,7 @@ where
     });
 
     run_repack_stage(&repack_stage_dir, final_output_dir, events)?;
-    let final_copy_stats = copy_top_level_img_files(image_dir, final_output_dir)?;
+    let final_copy_stats = copy_all_top_level_files(image_dir, final_output_dir)?;
     message(
         events,
         MessageLevel::Info,
@@ -1071,6 +1074,29 @@ fn copy_top_level_img_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<Tr
                     &dst_dir.join(file_name),
                 )?);
             }
+        }
+    }
+    Ok(transfers)
+}
+
+/// Copy ALL top-level files from src_dir to dst_dir, skipping super_*.img chunks.
+fn copy_all_top_level_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<TransferStats> {
+    workspace_prepare_output_dir(dst_dir)?;
+    let mut transfers = TransferStats::default();
+    for entry in std::fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path.file_name().unwrap();
+        let file_name_str = file_name.to_string_lossy();
+        if file_name_str.starts_with("super_") && file_name_str.ends_with(".img") {
+            continue;
+        }
+        let dst = dst_dir.join(file_name);
+        if !dst.exists() {
+            transfers.record(materialize_file_with_fallback(&path, &dst)?);
         }
     }
     Ok(transfers)
