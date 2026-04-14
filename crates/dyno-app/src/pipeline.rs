@@ -1029,6 +1029,34 @@ where
             final_copy_stats.hard_links, final_copy_stats.copies
         ),
     );
+
+    // Remove standalone dynamic partition images from output — they are now
+    // packed inside the super_*.img chunks produced by repack.
+    let catalog = dynobox_xml::XmlCatalog::from_dir(&repack_stage_dir)?;
+    if let Some(super_group) = catalog.group_by_base_label(true).remove("super") {
+        let records: Vec<_> = super_group.records().into_iter().cloned().collect();
+        if let Ok(layout) = dynobox_super::parse_super_layout(&records, &repack_stage_dir) {
+            let mut removed = 0usize;
+            for name in layout.dynamic_partition_names() {
+                let img_path = final_output_dir.join(format!("{name}.img"));
+                if img_path.exists() {
+                    std::fs::remove_file(&img_path)?;
+                    removed += 1;
+                }
+            }
+            if removed > 0 {
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!(
+                        "Cleaned up {} standalone dynamic partition image(s) from output (now inside super).",
+                        removed
+                    ),
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
