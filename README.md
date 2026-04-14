@@ -13,28 +13,32 @@ Pure Rust firmware and OTA toolkit extracted from LTBox.
 ## Current Commands
 
 ```powershell
-dynobox unpack --input <firmware_dir> [--output <dir>] [--resign -k <key>] [--repack]
-dynobox apply --input <firmware_dir> [--output <dir>] [--unpack] [--resign -k <key>] [--repack] <ota1.zip> <ota2.zip> ...
-dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--repack]
+dynobox unpack --input <firmware_dir> [--output <dir>] [resign -k <key>] [repack] [--complete]
+dynobox apply --input <firmware_dir> [--output <dir>] <ota1.zip> ... [resign -k <key>] [repack] [--complete]
+dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [repack]
 dynobox repack --input <image_dir> [--output <dir>]
 dynobox info --input <image_or_dir> [--format text|json] [--output <report.txt>]
 dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt>]
 ```
 
-Pipeline chaining works.
+Pipeline stage keywords (`resign`, `repack`, `unpack`, `complete`) can be written as bare words or with `--` prefix. Both forms work.
 
-- `apply --resign`
-- `apply --repack`
-- `apply --resign --repack`
-- `apply --unpack --resign --repack`
-- `unpack --resign --repack`
-- `resign --repack`
+### Pipeline Example
 
-Intermediate stage folders are temporary and auto-cleaned. Final output directory follows last stage unless `--output` is set.
+```powershell
+dynobox apply --input TB322_ZUXOS_1.5.10.063_Tool\image 063to117.zip 117to183.zip resign --key testkey_rsa4096 repack --output TB322_ZUXOS_1.5.10.183_Resigned
+```
 
-`apply` now runs a preflight scan before patching and a postflight verification pass after final output is written.
-All pipeline commands also support `--progress-format text|jsonl` for machine-readable progress.
-`verify` runs same verification engine directly and exits non-zero when failures are found.
+### Pipeline Behavior
+
+- Stage order is always: **unpack → apply → resign → repack**
+- When the input directory has super chunks but no standalone dynamic partition files, `apply`, `resign`, and `repack` auto-unpack super before proceeding.
+- After repack, standalone dynamic partition images (system.img, vendor.img, etc.) are removed from the final output since they are packed inside the new super chunks.
+- `--complete` copies all remaining input files to the output so it mirrors the original firmware structure.
+- Intermediate stage folders are temporary and auto-cleaned. Final output directory follows last stage unless `--output` is set.
+- `apply` runs a preflight scan before patching and a postflight verification pass after output is written.
+- All pipeline commands support `--progress-format text|jsonl` for machine-readable progress.
+- `verify` runs same verification engine directly and exits non-zero when failures are found.
 
 ## Workspace Layout
 
