@@ -18,7 +18,6 @@ xz2 = "0.1.7"
 bsdiff-android = "0.0.2"
 brotli = "8.0.2"
 lz4_flex = "0.13.0"
-bitstream-io = "4.9.0"
 brotli-sys = "0.3.2"
 
 [build-dependencies]
