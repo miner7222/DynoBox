@@ -92,19 +92,21 @@ enum Commands {
         #[arg(long)]
         repack: bool,
 
-        /// Path to RSA key file or embedded key name used with --resign
-        #[arg(short = 'k', long, requires = "resign")]
+        /// Path to RSA key file or embedded key name used with resign
+        #[arg(short = 'k', long)]
         key: Option<String>,
 
-        /// AVB algorithm used with --resign
-        #[arg(short = 'a', long, requires = "resign")]
+        /// AVB algorithm used with resign
+        #[arg(short = 'a', long)]
         algorithm: Option<String>,
 
-        /// Force signing even when original AVB algorithm is NONE; only valid with --resign
-        #[arg(long, requires = "resign")]
+        /// Force signing even when original AVB algorithm is NONE; only valid with resign
+        #[arg(long)]
         force: bool,
 
-        /// OTA zip files to apply sequentially
+        /// OTA zip files to apply sequentially.
+        /// Pipeline stage keywords (resign, repack, unpack) can also appear here
+        /// as bare words instead of --flags.
         #[arg(required = true)]
         ota_zips: Vec<PathBuf>,
     },
@@ -333,23 +335,40 @@ fn main() -> anyhow::Result<()> {
         Commands::Apply {
             input,
             output,
-            unpack,
-            resign,
-            repack,
+            mut unpack,
+            mut resign,
+            mut repack,
             key,
             algorithm,
             force,
             ota_zips,
         } => {
+            // Extract bare pipeline keywords from positional args.
+            // Users can write `apply ota1.zip resign repack` instead of
+            // `apply ota1.zip --resign --repack`.
+            let mut real_zips = Vec::new();
+            for arg in &ota_zips {
+                match arg.to_string_lossy().to_lowercase().as_str() {
+                    "resign" => resign = true,
+                    "repack" => repack = true,
+                    "unpack" => unpack = true,
+                    _ => real_zips.push(arg.clone()),
+                }
+            }
+
+            if real_zips.is_empty() {
+                anyhow::bail!("No OTA zip files provided.");
+            }
+
             if resign && key.is_none() {
-                anyhow::bail!("`apply --resign` requires `--key`.");
+                anyhow::bail!("`apply resign` requires `--key`.");
             }
 
             let out_dir = resolve_output_dir(output, default_output_name_for_apply(resign, repack));
             let request = ApplyRequest {
                 input,
                 output: out_dir,
-                ota_zips,
+                ota_zips: real_zips,
                 force_unpack: unpack,
                 resign: make_resign_config(key, algorithm, force),
                 repack,
