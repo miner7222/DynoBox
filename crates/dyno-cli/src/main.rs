@@ -69,6 +69,10 @@ enum Commands {
         /// Force signing even when original AVB algorithm is NONE; only valid with --resign
         #[arg(long, requires = "resign")]
         force: bool,
+
+        /// Copy all input files to output so it mirrors the original firmware structure
+        #[arg(long)]
+        complete: bool,
     },
     /// Apply one or more OTA zip packages
     Apply {
@@ -103,6 +107,10 @@ enum Commands {
         /// Force signing even when original AVB algorithm is NONE; only valid with resign
         #[arg(long)]
         force: bool,
+
+        /// Copy all input files to output so it mirrors the original firmware structure
+        #[arg(long)]
+        complete: bool,
 
         /// OTA zip files to apply sequentially.
         /// Pipeline stage keywords (resign, repack, unpack) can also appear here
@@ -314,6 +322,7 @@ fn main() -> anyhow::Result<()> {
             key,
             algorithm,
             force,
+            complete,
         } => {
             if resign && key.is_none() {
                 anyhow::bail!("`unpack --resign` requires `--key`.");
@@ -326,6 +335,7 @@ fn main() -> anyhow::Result<()> {
                 output: out_dir,
                 resign: make_resign_config(key, algorithm, force),
                 repack,
+                complete,
             };
             match cli.progress_format {
                 ProgressFormat::Text => run_unpack(&request, &mut text_sink),
@@ -341,6 +351,7 @@ fn main() -> anyhow::Result<()> {
             key,
             algorithm,
             force,
+            mut complete,
             ota_zips,
         } => {
             // Extract bare pipeline keywords from positional args.
@@ -352,6 +363,7 @@ fn main() -> anyhow::Result<()> {
                     "resign" => resign = true,
                     "repack" => repack = true,
                     "unpack" => unpack = true,
+                    "complete" => complete = true,
                     _ => real_zips.push(arg.clone()),
                 }
             }
@@ -372,6 +384,7 @@ fn main() -> anyhow::Result<()> {
                 force_unpack: unpack,
                 resign: make_resign_config(key, algorithm, force),
                 repack,
+                complete,
             };
             match cli.progress_format {
                 ProgressFormat::Text => run_apply(&request, &mut text_sink),

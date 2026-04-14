@@ -20,6 +20,7 @@ pub struct UnpackRequest {
     pub output: PathBuf,
     pub resign: Option<ResignConfig>,
     pub repack: bool,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +31,7 @@ pub struct ApplyRequest {
     pub force_unpack: bool,
     pub resign: Option<ResignConfig>,
     pub repack: bool,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,6 +337,10 @@ where
         )?;
     }
 
+    if request.complete {
+        complete_output_from_input(&request.input, &request.output, events)?;
+    }
+
     ops.verify_stage(&request.output, events)?;
 
     Ok(())
@@ -389,6 +395,10 @@ where
             temp_root.path(),
             events,
         )?;
+    }
+
+    if request.complete {
+        complete_output_from_input(&request.input, &request.output, events)?;
     }
 
     ops.verify_stage(&request.output, events)?;
@@ -1263,6 +1273,44 @@ fn materialize_file_with_fallback(
     }
 }
 
+/// Copy all files from input directory to output that are not already present,
+/// so the output mirrors the original firmware structure.
+fn complete_output_from_input<S>(
+    input: &Path,
+    output: &Path,
+    events: &mut S,
+) -> anyhow::Result<()>
+where
+    S: EventSink + ?Sized,
+{
+    workspace_prepare_output_dir(output)?;
+    let mut copied = 0usize;
+    for entry in std::fs::read_dir(input)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path.file_name().unwrap();
+        let dst = output.join(file_name);
+        if !dst.exists() {
+            materialize_file_with_fallback(&path, &dst)?;
+            copied += 1;
+        }
+    }
+    if copied > 0 {
+        message(
+            events,
+            MessageLevel::Info,
+            format!(
+                "--complete: copied {} additional file(s) from input to output.",
+                copied
+            ),
+        );
+    }
+    Ok(())
+}
+
 fn move_file_across_drives(src: &Path, dst: &Path) -> anyhow::Result<()> {
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
@@ -1444,6 +1492,7 @@ mod tests {
             force_unpack: false,
             resign: None,
             repack: false,
+            complete: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
@@ -1476,6 +1525,7 @@ mod tests {
             force_unpack: false,
             resign: Some(sample_resign_config()),
             repack: false,
+            complete: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
@@ -1509,6 +1559,7 @@ mod tests {
             force_unpack: false,
             resign: None,
             repack: true,
+            complete: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
@@ -1542,6 +1593,7 @@ mod tests {
             force_unpack: true,
             resign: Some(sample_resign_config()),
             repack: true,
+            complete: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
