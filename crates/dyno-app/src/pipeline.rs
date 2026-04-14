@@ -790,7 +790,7 @@ where
                 &temp_new,
                 metadata.block_size,
             )?;
-            std::fs::rename(temp_new, out_path)?;
+            move_file_across_drives(&temp_new, &out_path)?;
         }
     }
 
@@ -1135,6 +1135,20 @@ fn materialize_file_with_fallback(
             std::fs::copy(src, dst)?;
             Ok(FileMaterializationMethod::Copy)
         }
+    }
+}
+
+fn move_file_across_drives(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(17) || e.raw_os_error() == Some(0x11) => {
+            // OS error 17 (EXDEV / ERROR_NOT_SAME_DEVICE): cross-drive rename.
+            // Fall back to copy + delete.
+            std::fs::copy(src, dst)?;
+            std::fs::remove_file(src)?;
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
     }
 }
 
