@@ -1275,11 +1275,7 @@ fn materialize_file_with_fallback(
 
 /// Copy all files from input directory to output that are not already present,
 /// so the output mirrors the original firmware structure.
-fn complete_output_from_input<S>(
-    input: &Path,
-    output: &Path,
-    events: &mut S,
-) -> anyhow::Result<()>
+fn complete_output_from_input<S>(input: &Path, output: &Path, events: &mut S) -> anyhow::Result<()>
 where
     S: EventSink + ?Sized,
 {
