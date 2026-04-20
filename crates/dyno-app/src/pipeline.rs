@@ -7,6 +7,8 @@ use tempfile::TempDir;
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, StageKind};
 use crate::verify::run_verify_stage;
 
+const PARTITION_IMAGE_EXTENSION_FALLBACK: [&str; 5] = ["img", "bin", "elf", "melf", "mbn"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResignConfig {
     pub key: String,
@@ -688,18 +690,6 @@ where
     recreate_dir(out_dir)?;
 
     let catalog = dynobox_xml::XmlCatalog::from_dir(input)?;
-    let resolve_filename = |partition_name: &str| {
-        if let Some(record) = catalog.find_partition(partition_name) {
-            if record.filename.is_empty() {
-                format!("{}.img", partition_name)
-            } else {
-                record.filename.clone()
-            }
-        } else {
-            format!("{}.img", partition_name)
-        }
-    };
-
     let super_group = catalog.group_by_base_label(true).remove("super");
     let super_layout = if let Some(group) = super_group {
         let records: Vec<_> = group.records().into_iter().cloned().collect();
@@ -741,7 +731,10 @@ where
             let missing_dynamic_count = layout
                 .dynamic_partition_names()
                 .into_iter()
-                .filter(|name| !input.join(resolve_filename(name)).exists())
+                .filter(|name| {
+                    let candidates = resolve_partition_source_candidates(&catalog, name);
+                    find_existing_filename_in_dir(input, &candidates).is_none()
+                })
                 .count();
             if missing_dynamic_count > 0 {
                 message(
@@ -798,8 +791,16 @@ where
                 item: p_info.name.clone(),
             });
 
-            let filename = resolve_filename(&p_info.name);
-            let out_path = out_dir.join(&filename);
+            let candidate_filenames = resolve_partition_source_candidates(&catalog, &p_info.name);
+            let mut filename = find_existing_filename_in_dir(out_dir, &candidate_filenames)
+                .or_else(|| find_existing_filename_in_dir(input, &candidate_filenames))
+                .unwrap_or_else(|| {
+                    candidate_filenames
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| format!("{}.img", p_info.name))
+                });
+            let mut out_path = out_dir.join(&filename);
             let mut src_path = out_dir.join(&filename);
             let cached_dynamic_path = super_layout.as_ref().and_then(|layout| {
                 layout
@@ -810,6 +811,8 @@ where
             if !src_path.exists() && force_unpack {
                 if let Some(cached_path) = &cached_dynamic_path {
                     if cached_path.exists() {
+                        filename = format!("{}.img", p_info.name);
+                        out_path = out_dir.join(&filename);
                         src_path = cached_path.clone();
                     }
                 }
@@ -850,9 +853,13 @@ where
                                 Some(&[p_info.name.clone()]),
                             )?;
                             if let Some(path) = extracted.get(&p_info.name) {
+                                filename = format!("{}.img", p_info.name);
+                                out_path = out_dir.join(&filename);
                                 src_path = path.clone();
                             }
                         } else {
+                            filename = format!("{}.img", p_info.name);
+                            out_path = out_dir.join(&filename);
                             src_path = cached_path;
                         }
                     }
@@ -884,6 +891,33 @@ where
         stage: StageKind::Apply,
     });
     Ok(())
+}
+
+fn resolve_partition_source_candidates(
+    catalog: &dynobox_xml::XmlCatalog,
+    partition_name: &str,
+) -> Vec<String> {
+    if let Some(record) = catalog.find_partition(partition_name) {
+        let filename = record.filename.trim();
+        if !filename.is_empty() {
+            return vec![filename.to_string()];
+        }
+    }
+
+    PARTITION_IMAGE_EXTENSION_FALLBACK
+        .iter()
+        .map(|ext| format!("{partition_name}.{ext}"))
+        .collect()
+}
+
+fn find_existing_filename_in_dir(dir: &Path, candidates: &[String]) -> Option<String> {
+    candidates.iter().find_map(|name| {
+        if dir.join(name).exists() {
+            Some(name.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn run_resign_stage<S>(
@@ -1608,6 +1642,74 @@ mod tests {
         );
         assert!(output.exists());
         assert_no_stage_dirs(temp.path());
+    }
+
+    #[test]
+    fn resolve_partition_source_candidates_uses_extension_fallback_when_filename_is_empty() {
+        let temp = tempdir().unwrap();
+        let rawprogram_path = temp.path().join("rawprogram4.xml");
+        fs::write(
+            &rawprogram_path,
+            r#"<?xml version="1.0"?>
+<data>
+  <program label="qweslicstore_a" filename="" />
+</data>"#,
+        )
+        .unwrap();
+
+        let catalog = dynobox_xml::XmlCatalog::from_dir(temp.path()).unwrap();
+        let candidates = resolve_partition_source_candidates(&catalog, "qweslicstore");
+        assert_eq!(
+            candidates,
+            vec![
+                "qweslicstore.img",
+                "qweslicstore.bin",
+                "qweslicstore.elf",
+                "qweslicstore.melf",
+                "qweslicstore.mbn",
+            ]
+        );
+    }
+
+    #[test]
+    fn find_existing_filename_in_dir_prefers_fallback_priority_order() {
+        let temp = tempdir().unwrap();
+        let rawprogram_path = temp.path().join("rawprogram4.xml");
+        fs::write(
+            &rawprogram_path,
+            r#"<?xml version="1.0"?>
+<data>
+  <program label="qweslicstore_a" filename="" />
+</data>"#,
+        )
+        .unwrap();
+        fs::write(temp.path().join("qweslicstore.elf"), b"elf").unwrap();
+        fs::write(temp.path().join("qweslicstore.bin"), b"bin").unwrap();
+
+        let catalog = dynobox_xml::XmlCatalog::from_dir(temp.path()).unwrap();
+        let candidates = resolve_partition_source_candidates(&catalog, "qweslicstore");
+        assert_eq!(
+            find_existing_filename_in_dir(temp.path(), &candidates),
+            Some("qweslicstore.bin".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_partition_source_candidates_respects_xml_filename_when_present() {
+        let temp = tempdir().unwrap();
+        let rawprogram_path = temp.path().join("rawprogram4.xml");
+        fs::write(
+            &rawprogram_path,
+            r#"<?xml version="1.0"?>
+<data>
+  <program label="qweslicstore_a" filename="qweslicstore.bin" />
+</data>"#,
+        )
+        .unwrap();
+
+        let catalog = dynobox_xml::XmlCatalog::from_dir(temp.path()).unwrap();
+        let candidates = resolve_partition_source_candidates(&catalog, "qweslicstore");
+        assert_eq!(candidates, vec!["qweslicstore.bin"]);
     }
 
     fn sample_resign_config() -> ResignConfig {
