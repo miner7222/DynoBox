@@ -21,12 +21,12 @@ dynobox info --input <image_or_dir> [--format text|json] [--output <report.txt>]
 dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt>]
 ```
 
-Pipeline stage keywords (`resign`, `repack`, `unpack`, `complete`) can be written as bare words or with `--` prefix. Both forms work.
+Pipeline stage keywords (`unpack`, `resign`, `repack`) can be written as bare words or with `--` prefix. Both forms work.
 
 ### Pipeline Example
 
 ```powershell
-dynobox apply --input TB322_ZUXOS_1.5.10.063_Tool\image 063to117.zip 117to183.zip resign --key testkey_rsa4096 repack --output TB322_ZUXOS_1.5.10.183_Resigned
+dynobox apply --input TB322_ZUXOS_1.5.10.063_Tool\image 063to117.zip 117to183.zip resign --key testkey_rsa4096 repack --output TB322_ZUXOS_1.5.10.183_Resigned --complete
 ```
 
 ### Pipeline Behavior

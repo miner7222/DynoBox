@@ -113,7 +113,7 @@ enum Commands {
         complete: bool,
 
         /// OTA zip files to apply sequentially.
-        /// Pipeline stage keywords (resign, repack, unpack) can also appear here
+        /// Pipeline stage keywords (unpack, resign, repack) can also appear here
         /// as bare words instead of --flags.
         #[arg(required = true)]
         ota_zips: Vec<PathBuf>,
@@ -198,6 +198,25 @@ fn resolve_output_dir(output: Option<PathBuf>, default_name: &str) -> PathBuf {
             .unwrap_or_default()
             .join(default_name)
     })
+}
+
+fn parse_apply_positional_args(
+    ota_zips: &[PathBuf],
+    unpack: &mut bool,
+    resign: &mut bool,
+    repack: &mut bool,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let mut real_zips = Vec::new();
+    for arg in ota_zips {
+        match arg.to_string_lossy().to_lowercase().as_str() {
+            "resign" => *resign = true,
+            "repack" => *repack = true,
+            "unpack" => *unpack = true,
+            "complete" => anyhow::bail!("`complete` must be passed as `--complete`."),
+            _ => real_zips.push(arg.clone()),
+        }
+    }
+    Ok(real_zips)
 }
 
 fn resolve_info_output_path(output: Option<PathBuf>, format: ReportFormat) -> Option<PathBuf> {
@@ -351,22 +370,14 @@ fn main() -> anyhow::Result<()> {
             key,
             algorithm,
             force,
-            mut complete,
+            complete,
             ota_zips,
         } => {
             // Extract bare pipeline keywords from positional args.
             // Users can write `apply ota1.zip resign repack` instead of
             // `apply ota1.zip --resign --repack`.
-            let mut real_zips = Vec::new();
-            for arg in &ota_zips {
-                match arg.to_string_lossy().to_lowercase().as_str() {
-                    "resign" => resign = true,
-                    "repack" => repack = true,
-                    "unpack" => unpack = true,
-                    "complete" => complete = true,
-                    _ => real_zips.push(arg.clone()),
-                }
-            }
+            let real_zips =
+                parse_apply_positional_args(&ota_zips, &mut unpack, &mut resign, &mut repack)?;
 
             if real_zips.is_empty() {
                 anyhow::bail!("No OTA zip files provided.");
@@ -491,5 +502,48 @@ fn main() -> anyhow::Result<()> {
 
             dynobox_app::ensure_verification_clean(&report)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_apply_positional_args;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parse_apply_positional_args_accepts_bare_pipeline_keywords() {
+        let ota_zips = vec![
+            PathBuf::from("update1.zip"),
+            PathBuf::from("resign"),
+            PathBuf::from("repack"),
+            PathBuf::from("unpack"),
+            PathBuf::from("update2.zip"),
+        ];
+        let mut unpack = false;
+        let mut resign = false;
+        let mut repack = false;
+
+        let real = parse_apply_positional_args(&ota_zips, &mut unpack, &mut resign, &mut repack)
+            .expect("expected positional parse to succeed");
+
+        assert!(unpack);
+        assert!(resign);
+        assert!(repack);
+        assert_eq!(
+            real,
+            vec![PathBuf::from("update1.zip"), PathBuf::from("update2.zip")]
+        );
+    }
+
+    #[test]
+    fn parse_apply_positional_args_rejects_bare_complete_keyword() {
+        let ota_zips = vec![PathBuf::from("update1.zip"), PathBuf::from("complete")];
+        let mut unpack = false;
+        let mut resign = false;
+        let mut repack = false;
+
+        let err = parse_apply_positional_args(&ota_zips, &mut unpack, &mut resign, &mut repack)
+            .expect_err("bare complete must be rejected");
+        assert!(err.to_string().contains("`--complete`"));
     }
 }
