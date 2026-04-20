@@ -23,14 +23,14 @@ dynobox-super = { path = "crates/dyno-super" }
 dynobox-payload = { path = "crates/dyno-payload" }
 dynobox-xml = { path = "crates/dyno-xml" }
 avbtool-rs = { git = "https://github.com/miner7222/avbtool-rs", tag = "0.1.0" }
-anyhow = "1.0.95"
-clap = { version = "4.5.28", features = ["derive"] }
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-thiserror = "2.0.11"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.138"
-tempfile = "3.16.0"
+anyhow = "1.0.102"
+clap = { version = "4.6.1", features = ["derive"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+tempfile = "3.27.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
