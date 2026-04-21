@@ -244,13 +244,19 @@ pub fn serialize_metadata(layout: &SuperLayout) -> Result<Vec<u8>> {
 
     blob.resize(layout.geometry.metadata_max_size as usize, 0);
 
-    // Build the full super-prefix (Geometry + slots)
+    // Build the full super-prefix (LP_PARTITION_RESERVED_BYTES + Geometry x2 + slots).
+    //
+    // Per AOSP `include/liblp/metadata_format.h`, a super image begins with 4096
+    // zero-filled reserved bytes, then primary geometry at 4096, backup geometry
+    // at 8192, then the metadata slots. Omitting the reserved prefix produces a
+    // super image that's 4096 bytes short of what OEM tooling emits.
     let mut full_prefix = Vec::new();
     let geom_bytes = geometry.as_bytes();
-    full_prefix.extend_from_slice(geom_bytes);
     full_prefix.resize(4096, 0);
     full_prefix.extend_from_slice(geom_bytes);
     full_prefix.resize(8192, 0);
+    full_prefix.extend_from_slice(geom_bytes);
+    full_prefix.resize(12288, 0);
 
     // Primary and Backup slots
     for _ in 0..layout.geometry.metadata_slot_count * 2 {
