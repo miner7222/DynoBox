@@ -140,17 +140,18 @@ pub fn serialize_metadata(layout: &SuperLayout) -> Result<Vec<u8>> {
         let len = std::cmp::min(bytes.len(), 35);
         name[..len].copy_from_slice(&bytes[..len]);
 
-        // first_logical_sector needs to be calculated if not set,
-        // but here we usually take from existing layout
-        // In lpmake it's LP_PARTITION_RESERVED_BYTES + LP_METADATA_GEOMETRY_SIZE * 2 + metadata_max_size * metadata_slot_count * 2
-        let first_logical_sector = (4096
+        // first_logical_sector is the first sector after metadata,
+        // aligned up to `alignment` per AOSP lpmake convention.
+        let alignment: u64 = 1048576;
+        let metadata_end_bytes = 4096
             + 4096 * 2
-            + (layout.geometry.metadata_max_size * layout.geometry.metadata_slot_count * 2) as u64)
-            / 512;
+            + (layout.geometry.metadata_max_size * layout.geometry.metadata_slot_count * 2) as u64;
+        let aligned_bytes = (metadata_end_bytes + alignment - 1) & !(alignment - 1);
+        let first_logical_sector = aligned_bytes / 512;
 
         block_devices_raw.push(LpMetadataBlockDeviceRaw {
             first_logical_sector,
-            alignment: 1048576, // Default 1MiB
+            alignment: alignment as u32,
             alignment_offset: 0,
             size: d.size,
             partition_name: name,
