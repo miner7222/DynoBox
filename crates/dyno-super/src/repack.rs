@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::builder::serialize_metadata;
-use crate::metadata::{LP_TARGET_TYPE_LINEAR, LP_TARGET_TYPE_ZERO, SuperExtent, SuperLayout};
+use crate::metadata::{LP_TARGET_TYPE_LINEAR, SuperExtent, SuperLayout};
 use dynobox_core::error::{DynoError, Result};
 
 #[derive(Debug, Clone)]
@@ -33,12 +33,7 @@ pub fn repack_super_image(
 
     for partition in &mut new_layout.partitions {
         if partition.slot_suffix() == Some("b") {
-            partition.extents = vec![SuperExtent {
-                num_sectors: 0,
-                target_type: LP_TARGET_TYPE_ZERO,
-                target_data: 0,
-                target_source: 0,
-            }];
+            partition.extents = Vec::new();
             continue;
         }
 
