@@ -791,6 +791,52 @@ where
                 item: p_info.name.clone(),
             });
 
+            let split_fragments = find_split_source_fragments(&catalog, &p_info.name);
+            if !split_fragments.is_empty() && p_info.old_size > 0 {
+                let all_present = split_fragments
+                    .iter()
+                    .all(|f| input.join(&f.filename).exists() || out_dir.join(&f.filename).exists());
+                if all_present {
+                    message(
+                        events,
+                        MessageLevel::Info,
+                        format!(
+                            "Reconstructing split source for {} from {} fragment(s).",
+                            p_info.name,
+                            split_fragments.len()
+                        ),
+                    );
+                    let src_base = if split_fragments
+                        .iter()
+                        .all(|f| out_dir.join(&f.filename).exists())
+                    {
+                        out_dir
+                    } else {
+                        input
+                    };
+                    let recon_src = working_dir
+                        .join(format!("{}_split_src.img", p_info.name));
+                    reconstruct_split_source(
+                        &split_fragments,
+                        src_base,
+                        p_info.old_size,
+                        &recon_src,
+                    )?;
+                    let temp_new = working_dir.join(format!("{}_new.img", p_info.name));
+                    dynobox_payload::apply_partition_payload(
+                        &payload_path,
+                        &p_info.name,
+                        &recon_src,
+                        &temp_new,
+                        metadata.block_size,
+                    )?;
+                    split_new_image_to_fragments(&temp_new, &split_fragments, out_dir)?;
+                    let _ = std::fs::remove_file(&recon_src);
+                    let _ = std::fs::remove_file(&temp_new);
+                    continue;
+                }
+            }
+
             let candidate_filenames = resolve_partition_source_candidates(&catalog, &p_info.name);
             let mut filename = find_existing_filename_in_dir(out_dir, &candidate_filenames)
                 .or_else(|| find_existing_filename_in_dir(input, &candidate_filenames))
@@ -887,9 +933,36 @@ where
             stage: StageKind::AutoUnpack,
         });
     }
+
+    copy_rawprogram_xml_files(input, out_dir)?;
+
     events.emit(ProgressEvent::StageCompleted {
         stage: StageKind::Apply,
     });
+    Ok(())
+}
+
+fn copy_rawprogram_xml_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<()> {
+    if let Ok(entries) = std::fs::read_dir(src_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let lower = name.to_lowercase();
+            if lower.starts_with("rawprogram") && lower.ends_with(".xml") {
+                let dst = dst_dir.join(&name);
+                if !dst.exists() {
+                    std::fs::copy(&path, &dst)
+                        .with_context(|| format!("copying {} to output", name))?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -918,6 +991,172 @@ fn find_existing_filename_in_dir(dir: &Path, candidates: &[String]) -> Option<St
             None
         }
     })
+}
+
+#[derive(Debug, Clone)]
+struct SplitFragment {
+    filename: String,
+    offset: u64,
+    size: u64,
+}
+
+fn find_split_source_fragments(
+    catalog: &dynobox_xml::XmlCatalog,
+    partition_name: &str,
+) -> Vec<SplitFragment> {
+    let normalized = partition_name.to_lowercase();
+    let matches: Vec<_> = catalog
+        .records()
+        .iter()
+        .filter(|r| r.base_label().to_lowercase() == normalized)
+        .collect();
+    if matches.is_empty() {
+        return Vec::new();
+    }
+    let slot_a: Vec<_> = matches
+        .iter()
+        .copied()
+        .filter(|r| r.slot_suffix() == Some("a"))
+        .collect();
+    let slot_none: Vec<_> = matches
+        .iter()
+        .copied()
+        .filter(|r| r.slot_suffix().is_none())
+        .collect();
+    let selected = if !slot_a.is_empty() {
+        slot_a
+    } else if !slot_none.is_empty() {
+        slot_none
+    } else {
+        matches.iter().copied().collect()
+    };
+    let mut parsed: Vec<(String, u64, u64, u64)> = selected
+        .into_iter()
+        .filter(|r| !r.filename.trim().is_empty())
+        .filter_map(|r| {
+            let start = r.start_sector.as_ref()?.parse::<u64>().ok()?;
+            let num = r.num_sectors.as_ref()?.parse::<u64>().ok()?;
+            let sec_size = r
+                .sector_size_bytes
+                .as_ref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(4096);
+            Some((r.filename.clone(), start, num, sec_size))
+        })
+        .collect();
+    parsed.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    let mut seen = std::collections::HashSet::new();
+    parsed.retain(|(name, start, _, _)| seen.insert((name.clone(), *start)));
+    if parsed.len() < 2 {
+        return Vec::new();
+    }
+    let base_sector = parsed.first().map(|(_, s, _, _)| *s).unwrap_or(0);
+    parsed
+        .into_iter()
+        .map(|(name, start, num, sec_size)| SplitFragment {
+            filename: name,
+            offset: (start - base_sector) * sec_size,
+            size: num * sec_size,
+        })
+        .collect()
+}
+
+fn reconstruct_split_source(
+    fragments: &[SplitFragment],
+    input: &Path,
+    partition_size: u64,
+    dest: &Path,
+) -> anyhow::Result<()> {
+    use std::fs::{File, OpenOptions};
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(dest)
+        .with_context(|| format!("creating reconstructed source {}", dest.display()))?;
+    out.set_len(partition_size)?;
+
+    for frag in fragments {
+        let src_path = input.join(&frag.filename);
+        if !src_path.exists() {
+            continue;
+        }
+        let frag_end = frag.offset.saturating_add(frag.size);
+        if frag_end > partition_size {
+            anyhow::bail!(
+                "Split fragment {} extends past partition size ({} > {}).",
+                frag.filename,
+                frag_end,
+                partition_size
+            );
+        }
+        let mut src = File::open(&src_path)
+            .with_context(|| format!("opening split fragment {}", src_path.display()))?;
+        let src_len = src.metadata()?.len();
+        let to_copy = std::cmp::min(src_len, frag.size);
+        out.seek(SeekFrom::Start(frag.offset))?;
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut remaining = to_copy;
+        while remaining > 0 {
+            let chunk = std::cmp::min(remaining as usize, buf.len());
+            src.read_exact(&mut buf[..chunk])?;
+            out.write_all(&buf[..chunk])?;
+            remaining -= chunk as u64;
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+fn split_new_image_to_fragments(
+    new_image: &Path,
+    fragments: &[SplitFragment],
+    out_dir: &Path,
+) -> anyhow::Result<()> {
+    use std::fs::{File, OpenOptions};
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    std::fs::create_dir_all(out_dir)?;
+    let mut src = File::open(new_image)
+        .with_context(|| format!("opening new image {}", new_image.display()))?;
+    let src_len = src.metadata()?.len();
+
+    for frag in fragments {
+        let frag_end = frag.offset.saturating_add(frag.size);
+        if frag_end > src_len {
+            anyhow::bail!(
+                "Split fragment {} range {}..{} exceeds new image size {}.",
+                frag.filename,
+                frag.offset,
+                frag_end,
+                src_len
+            );
+        }
+        let dst_path = out_dir.join(&frag.filename);
+        let mut dst = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&dst_path)
+            .with_context(|| format!("creating fragment output {}", dst_path.display()))?;
+        src.seek(SeekFrom::Start(frag.offset))?;
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut remaining = frag.size;
+        while remaining > 0 {
+            let chunk = std::cmp::min(remaining as usize, buf.len());
+            src.read_exact(&mut buf[..chunk])?;
+            dst.write_all(&buf[..chunk])?;
+            remaining -= chunk as u64;
+        }
+        dst.flush()?;
+    }
+    Ok(())
 }
 
 fn run_resign_stage<S>(
@@ -1106,6 +1345,7 @@ where
 
 fn collect_resignable_images(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut images = Vec::new();
+    let split_fragments = collect_split_fragment_filenames(input);
     if let Ok(entries) = std::fs::read_dir(input) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1120,6 +1360,9 @@ fn collect_resignable_images(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
             if file_name.starts_with("super_") {
                 continue;
             }
+            if split_fragments.contains(file_name) {
+                continue;
+            }
 
             if let Ok(img_type) = avbtool_rs::parser::detect_avb_image_type(&path) {
                 if img_type != avbtool_rs::parser::AvbImageType::None {
@@ -1130,6 +1373,8 @@ fn collect_resignable_images(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
     }
     Ok(images)
 }
+
+use crate::verify::collect_split_fragment_filenames;
 
 fn prepare_repack_stage(
     base_input_dir: &Path,

@@ -69,6 +69,7 @@ pub fn verify_input(input: &Path) -> anyhow::Result<VerificationReport> {
 
     if report.image_file_count > 0 {
         let scan_entries = avbtool_rs::info::scan_input(input)?;
+        let split_fragment_names = collect_split_fragment_filenames(input);
         report.avb_image_count = scan_entries
             .iter()
             .filter(|entry| matches!(entry.result, avbtool_rs::info::ScanResult::Avb(_)))
@@ -76,11 +77,22 @@ pub fn verify_input(input: &Path) -> anyhow::Result<VerificationReport> {
         report
             .failures
             .extend(scan_entries.iter().filter_map(|entry| match &entry.result {
-                avbtool_rs::info::ScanResult::Error(message) => Some(VerificationFailure {
-                    kind: VerificationFailureKind::Avb,
-                    path: Some(entry.path.clone()),
-                    message: message.clone(),
-                }),
+                avbtool_rs::info::ScanResult::Error(message) => {
+                    let name = entry
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
+                    if split_fragment_names.contains(&name) {
+                        return None;
+                    }
+                    Some(VerificationFailure {
+                        kind: VerificationFailureKind::Avb,
+                        path: Some(entry.path.clone()),
+                        message: message.clone(),
+                    })
+                }
                 _ => None,
             }));
     }
@@ -252,6 +264,46 @@ where
         stage: StageKind::Verify,
     });
     Ok(())
+}
+
+pub fn collect_split_fragment_filenames(input: &Path) -> std::collections::HashSet<String> {
+    use std::collections::{HashMap, HashSet};
+    let mut result = HashSet::new();
+    let catalog = match dynobox_xml::XmlCatalog::from_dir(input) {
+        Ok(c) => c,
+        Err(_) => return result,
+    };
+    let mut by_label: HashMap<String, Vec<&dynobox_xml::PartitionRecord>> = HashMap::new();
+    for record in catalog.records() {
+        if record.filename.trim().is_empty() {
+            continue;
+        }
+        by_label
+            .entry(record.label.to_lowercase())
+            .or_default()
+            .push(record);
+    }
+    for (_label, records) in by_label {
+        let mut unique_files: HashSet<String> = HashSet::new();
+        for r in &records {
+            unique_files.insert(r.filename.clone());
+        }
+        if unique_files.len() >= 2 {
+            for name in unique_files {
+                result.insert(name);
+            }
+            if let Some(first) = records.first() {
+                let base = first.base_label();
+                if !base.is_empty() {
+                    result.insert(format!("{}.img", base));
+                    result.insert(format!("{}.bin", base));
+                    result.insert(format!("{}_a.img", base));
+                    result.insert(format!("{}_b.img", base));
+                }
+            }
+        }
+    }
+    result
 }
 
 fn count_image_files(input: &Path) -> anyhow::Result<usize> {
