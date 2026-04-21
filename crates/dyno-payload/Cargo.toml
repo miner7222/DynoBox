@@ -19,6 +19,7 @@ bsdiff-android = "0.0.2"
 brotli = "8.0.2"
 lz4_flex = "0.13.0"
 brotli-sys = "0.3.2"
+sha2 = "0.11.0"
 
 [build-dependencies]
 cc = "1.2.60"

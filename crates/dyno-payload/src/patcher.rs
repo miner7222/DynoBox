@@ -429,7 +429,103 @@ pub fn apply_partition_payload(
         patcher.apply_operation(op, &blob, src_file.as_mut(), &mut dst_file)?;
     }
 
+    regenerate_verity_hash_tree(p_manifest, &mut dst_file, block_size)?;
+
     Ok(())
+}
+
+fn regenerate_verity_hash_tree(
+    p_manifest: &crate::payload::proto::PartitionUpdate,
+    dst_file: &mut File,
+    block_size: u32,
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+
+    let (data_ext, tree_ext) = match (
+        p_manifest.hash_tree_data_extent.as_ref(),
+        p_manifest.hash_tree_extent.as_ref(),
+    ) {
+        (Some(d), Some(t)) => (d, t),
+        _ => return Ok(()),
+    };
+    let algo = p_manifest.hash_tree_algorithm.as_deref().unwrap_or("");
+    if !algo.eq_ignore_ascii_case("sha256") {
+        return Err(DynoError::UnsupportedOperation(format!(
+            "Unsupported hash_tree_algorithm: {}",
+            algo
+        )));
+    }
+    let salt: &[u8] = p_manifest
+        .hash_tree_salt
+        .as_deref()
+        .unwrap_or(&[]);
+
+    let bs = block_size as u64;
+    let data_start = data_ext.start_block.unwrap_or(0);
+    let data_num = data_ext.num_blocks.unwrap_or(0);
+    let tree_start = tree_ext.start_block.unwrap_or(0);
+    let tree_num = tree_ext.num_blocks.unwrap_or(0);
+    if data_num == 0 || tree_num == 0 {
+        return Ok(());
+    }
+
+    let hash_size: u64 = 32;
+    let hashes_per_block = bs / hash_size;
+
+    let mut levels: Vec<Vec<u8>> = Vec::new();
+    let mut level0 = Vec::with_capacity((data_num * hash_size) as usize);
+    let mut buf = vec![0u8; bs as usize];
+    for i in 0..data_num {
+        dst_file.seek(SeekFrom::Start((data_start + i) * bs))?;
+        dst_file.read_exact(&mut buf)?;
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(&buf);
+        level0.extend_from_slice(&hasher.finalize());
+    }
+    pad_to_block_multiple(&mut level0, bs as usize);
+    levels.push(level0);
+
+    loop {
+        let prev = levels.last().unwrap();
+        let prev_blocks = prev.len() as u64 / bs;
+        if prev_blocks <= 1 {
+            break;
+        }
+        let mut next = Vec::with_capacity(((prev_blocks + hashes_per_block - 1) / hashes_per_block * bs) as usize);
+        for bi in 0..prev_blocks {
+            let start = (bi * bs) as usize;
+            let end = start + bs as usize;
+            let mut hasher = Sha256::new();
+            hasher.update(salt);
+            hasher.update(&prev[start..end]);
+            next.extend_from_slice(&hasher.finalize());
+        }
+        pad_to_block_multiple(&mut next, bs as usize);
+        levels.push(next);
+    }
+
+    let total_tree_blocks: u64 = levels.iter().map(|l| (l.len() as u64) / bs).sum();
+    if total_tree_blocks != tree_num {
+        return Err(DynoError::Tool(format!(
+            "Hash tree block count mismatch: computed {} vs manifest {}",
+            total_tree_blocks, tree_num
+        )));
+    }
+
+    dst_file.seek(SeekFrom::Start(tree_start * bs))?;
+    for level in levels.iter().rev() {
+        dst_file.write_all(level)?;
+    }
+    dst_file.flush()?;
+    Ok(())
+}
+
+fn pad_to_block_multiple(buf: &mut Vec<u8>, block_size: usize) {
+    let rem = buf.len() % block_size;
+    if rem != 0 {
+        buf.resize(buf.len() + (block_size - rem), 0);
+    }
 }
 
 #[cfg(test)]
