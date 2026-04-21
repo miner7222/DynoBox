@@ -925,6 +925,7 @@ where
                 metadata.block_size,
             )?;
             move_file_across_drives(&temp_new, &out_path)?;
+            trim_trailing_zero_padding(&out_path, input.join(&filename).as_path())?;
         }
     }
 
@@ -1156,6 +1157,36 @@ fn split_new_image_to_fragments(
         }
         dst.flush()?;
     }
+    Ok(())
+}
+
+fn trim_trailing_zero_padding(out_path: &Path, input_file: &Path) -> anyhow::Result<()> {
+    use std::fs::{File, OpenOptions};
+    use std::io::{Read, Seek, SeekFrom};
+
+    if !input_file.exists() {
+        return Ok(());
+    }
+    let target_len = std::fs::metadata(input_file)?.len();
+    let out_meta = std::fs::metadata(out_path)?;
+    if target_len >= out_meta.len() {
+        return Ok(());
+    }
+    let mut f = File::open(out_path)?;
+    f.seek(SeekFrom::Start(target_len))?;
+    let mut remaining = out_meta.len() - target_len;
+    let mut buf = vec![0u8; 1024 * 1024];
+    while remaining > 0 {
+        let chunk = std::cmp::min(remaining as usize, buf.len());
+        f.read_exact(&mut buf[..chunk])?;
+        if buf[..chunk].iter().any(|b| *b != 0) {
+            return Ok(());
+        }
+        remaining -= chunk as u64;
+    }
+    drop(f);
+    let writer = OpenOptions::new().write(true).open(out_path)?;
+    writer.set_len(target_len)?;
     Ok(())
 }
 
