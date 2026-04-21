@@ -360,6 +360,21 @@ pub fn parse_super_layout(
 
     let usable = dedupe_super_records(&usable);
 
+    // Drop records whose file is not physically present on disk. Lenovo OEM
+    // images ship a sparse whole-super placeholder (e.g. `super.img`,
+    // sparse="true") in rawprogram0.xml alongside the real split chunks
+    // (`super_N.img`) declared in rawprogram_unsparse0.xml; only the split
+    // chunks actually exist.
+    let usable: Vec<_> = usable
+        .into_iter()
+        .filter(|r| image_dir.join(&r.filename).exists())
+        .collect();
+    if usable.is_empty() {
+        return Err(DynoError::MissingFile(
+            "no super chunk files were found on disk".into(),
+        ));
+    }
+
     let first_sector_size_bytes = usable[0]
         .sector_size_bytes
         .clone()
