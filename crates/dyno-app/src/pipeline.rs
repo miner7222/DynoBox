@@ -14,6 +14,10 @@ pub struct ResignConfig {
     pub key: String,
     pub algorithm: Option<String>,
     pub force: bool,
+    /// Unix timestamp to write into rollback_index of boot.img and vbmeta_system.img.
+    /// When set, only those two images are processed; others are left untouched.
+    /// The new value must be less than or equal to each image's current rollback_index.
+    pub rollback_index: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1190,6 +1194,8 @@ fn trim_trailing_zero_padding(out_path: &Path, input_file: &Path) -> anyhow::Res
     Ok(())
 }
 
+const ROLLBACK_TARGETS: &[&str] = &["boot.img", "vbmeta_system.img"];
+
 fn run_resign_stage<S>(
     input: &Path,
     out_dir: &Path,
@@ -1208,7 +1214,49 @@ where
     // Copy ALL input files to output first (preserves non-.img files like .elf, .mbn)
     copy_all_top_level_files(input, out_dir)?;
 
-    let images = collect_resignable_images(input)?;
+    let all_images = collect_resignable_images(input)?;
+    let images: Vec<PathBuf> = match config.rollback_index {
+        Some(_) => all_images
+            .into_iter()
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| ROLLBACK_TARGETS.contains(&n))
+                    .unwrap_or(false)
+            })
+            .collect(),
+        None => all_images,
+    };
+
+    if let Some(new_ri) = config.rollback_index {
+        if images.is_empty() {
+            return Err(anyhow::anyhow!(
+                "--rollback requested but none of {:?} were found under {}",
+                ROLLBACK_TARGETS,
+                input.display()
+            ));
+        }
+        // Safety check: new rollback_index must be <= each target image's current value.
+        for path in &images {
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            let current_ri = read_rollback_index(path).with_context(|| {
+                format!("Failed to read rollback_index from {}", filename)
+            })?;
+            if new_ri > current_ri {
+                return Err(anyhow::anyhow!(
+                    "Refusing --rollback for {}: requested rollback_index {} exceeds original {}. \
+                     The new value must be less than or equal to the original.",
+                    filename,
+                    new_ri,
+                    current_ri
+                ));
+            }
+        }
+    }
+
     let mut resigned_count = 0usize;
     let mut skipped_unsigned_count = 0usize;
 
@@ -1228,12 +1276,24 @@ where
 
         let out_path = out_dir.join(&filename);
 
-        match avbtool_rs::resign::resign_image(
-            &out_path,
-            &config.key,
-            config.algorithm.as_deref(),
-            config.force,
-        ) {
+        let result = match config.rollback_index {
+            Some(ri) => avbtool_rs::resign::resign_image_with_options(
+                &out_path,
+                &config.key,
+                config.algorithm.as_deref(),
+                config.force,
+                Some(ri),
+                false,
+            ),
+            None => avbtool_rs::resign::resign_image(
+                &out_path,
+                &config.key,
+                config.algorithm.as_deref(),
+                config.force,
+            ),
+        };
+
+        match result {
             Err(e) => {
                 return Err(e).with_context(|| format!("Failed to resign {}", filename));
             }
@@ -1244,20 +1304,104 @@ where
                 skipped_unsigned_count += 1;
             }
         }
+
+        if let Some(expected_ri) = config.rollback_index {
+            let actual_ri = read_rollback_index(&out_path).with_context(|| {
+                format!("Failed to re-read rollback_index from {}", filename)
+            })?;
+            if actual_ri != expected_ri {
+                return Err(anyhow::anyhow!(
+                    "Post-resign verification failed for {}: rollback_index is {} but expected {}",
+                    filename,
+                    actual_ri,
+                    expected_ri
+                ));
+            }
+        }
     }
 
-    message(
-        events,
-        MessageLevel::Info,
-        format!(
-            "Resign complete. Re-signed {} images, skipped {} unsigned AVB images.",
-            resigned_count, skipped_unsigned_count
-        ),
-    );
+    if let Some(ri) = config.rollback_index {
+        message(
+            events,
+            MessageLevel::Info,
+            format!(
+                "rollback index reset to {} ({} images re-signed: {})",
+                format_unix_timestamp_utc(ri),
+                resigned_count,
+                images
+                    .iter()
+                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        );
+    } else {
+        message(
+            events,
+            MessageLevel::Info,
+            format!(
+                "Resign complete. Re-signed {} images, skipped {} unsigned AVB images.",
+                resigned_count, skipped_unsigned_count
+            ),
+        );
+    }
     events.emit(ProgressEvent::StageCompleted {
         stage: StageKind::Resign,
     });
     Ok(())
+}
+
+fn read_rollback_index(path: &Path) -> anyhow::Result<u64> {
+    let entries = avbtool_rs::info::scan_input(path)?;
+    let entry = entries
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("No AVB scan entry for {}", path.display()))?;
+    match entry.result {
+        avbtool_rs::info::ScanResult::Avb(info) => Ok(info.header.rollback_index),
+        avbtool_rs::info::ScanResult::None => {
+            Err(anyhow::anyhow!("{} is not an AVB image", path.display()))
+        }
+        avbtool_rs::info::ScanResult::Error(msg) => Err(anyhow::anyhow!(
+            "Failed to parse AVB metadata in {}: {}",
+            path.display(),
+            msg
+        )),
+    }
+}
+
+/// Format a Unix timestamp as e.g. `Thu Feb 26 02:40:50 UTC 2026`.
+/// Uses Howard Hinnant's civil-from-days algorithm for year/month/day.
+fn format_unix_timestamp_utc(ts: u64) -> String {
+    let days = (ts / 86_400) as i64;
+    let sod = ts % 86_400;
+    let hour = sod / 3600;
+    let minute = (sod % 3600) / 60;
+    let second = sod % 60;
+
+    // 1970-01-01 was a Thursday (weekday index 4 when Sun=0).
+    let wday_idx = ((days + 4).rem_euclid(7)) as usize;
+    let weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][wday_idx];
+
+    // civil_from_days: shift epoch from 1970-03-01 so March is month 0.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let year = if m <= 2 { y + 1 } else { y };
+
+    let month = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][(m - 1) as usize];
+
+    format!(
+        "{weekday} {month} {d:2} {hour:02}:{minute:02}:{second:02} UTC {year}"
+    )
 }
 
 fn run_repack_stage<S>(input: &Path, out_dir: &Path, events: &mut S) -> anyhow::Result<()>
@@ -1993,7 +2137,21 @@ mod tests {
             key: "testkey_rsa2048".to_string(),
             algorithm: Some("SHA256_RSA2048".to_string()),
             force: false,
+            rollback_index: None,
         }
+    }
+
+    #[test]
+    fn format_unix_timestamp_utc_matches_ctime_example() {
+        // `date -u -d @1772073650` → Thu Feb 26 02:40:50 UTC 2026
+        let s = format_unix_timestamp_utc(1_772_073_650);
+        assert_eq!(s, "Thu Feb 26 02:40:50 UTC 2026");
+    }
+
+    #[test]
+    fn format_unix_timestamp_utc_epoch() {
+        let s = format_unix_timestamp_utc(0);
+        assert_eq!(s, "Thu Jan  1 00:00:00 UTC 1970");
     }
 
     fn assert_no_stage_dirs(parent: &Path) {

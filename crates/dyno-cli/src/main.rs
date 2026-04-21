@@ -70,6 +70,11 @@ enum Commands {
         #[arg(long, requires = "resign")]
         force: bool,
 
+        /// Reset rollback_index of boot.img and vbmeta_system.img to this Unix timestamp
+        /// (must be <= each image's current rollback_index). Other images are skipped.
+        #[arg(long, value_name = "UNIX_TIMESTAMP", requires = "resign")]
+        rollback: Option<u64>,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -108,6 +113,11 @@ enum Commands {
         #[arg(long)]
         force: bool,
 
+        /// Reset rollback_index of boot.img and vbmeta_system.img to this Unix timestamp
+        /// (must be <= each image's current rollback_index). Other images are skipped.
+        #[arg(long, value_name = "UNIX_TIMESTAMP")]
+        rollback: Option<u64>,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -139,6 +149,11 @@ enum Commands {
         /// Force signing even when original AVB algorithm is NONE
         #[arg(long)]
         force: bool,
+
+        /// Reset rollback_index of boot.img and vbmeta_system.img to this Unix timestamp
+        /// (must be <= each image's current rollback_index). Other images are skipped.
+        #[arg(long, value_name = "UNIX_TIMESTAMP")]
+        rollback: Option<u64>,
 
         /// Repack dynamic partitions back into super after resign
         #[arg(long)]
@@ -250,11 +265,13 @@ fn make_resign_config(
     key: Option<String>,
     algorithm: Option<String>,
     force: bool,
+    rollback_index: Option<u64>,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
         key,
         algorithm,
         force,
+        rollback_index,
     })
 }
 
@@ -341,6 +358,7 @@ fn main() -> anyhow::Result<()> {
             key,
             algorithm,
             force,
+            rollback,
             complete,
         } => {
             if resign && key.is_none() {
@@ -352,7 +370,7 @@ fn main() -> anyhow::Result<()> {
             let request = UnpackRequest {
                 input,
                 output: out_dir,
-                resign: make_resign_config(key, algorithm, force),
+                resign: make_resign_config(key, algorithm, force, rollback),
                 repack,
                 complete,
             };
@@ -370,6 +388,7 @@ fn main() -> anyhow::Result<()> {
             key,
             algorithm,
             force,
+            rollback,
             complete,
             ota_zips,
         } => {
@@ -393,7 +412,7 @@ fn main() -> anyhow::Result<()> {
                 output: out_dir,
                 ota_zips: real_zips,
                 force_unpack: unpack,
-                resign: make_resign_config(key, algorithm, force),
+                resign: make_resign_config(key, algorithm, force, rollback),
                 repack,
                 complete,
             };
@@ -408,6 +427,7 @@ fn main() -> anyhow::Result<()> {
             key,
             algorithm,
             force,
+            rollback,
             repack,
         } => {
             let out_dir = resolve_output_dir(output, default_output_name_for_resign(repack));
@@ -418,6 +438,7 @@ fn main() -> anyhow::Result<()> {
                     key,
                     algorithm,
                     force,
+                    rollback_index: rollback,
                 },
                 repack,
             };
