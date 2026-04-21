@@ -297,18 +297,22 @@ where
         output: request.output.clone(),
     });
 
+    let temp_root = create_pipeline_temp_root(&request.output)?;
+    let decrypted_input =
+        auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
+    let input_dir = decrypted_input.as_deref().unwrap_or(&request.input);
+
     if request.resign.is_none() && !request.repack {
-        ops.unpack_stage(&request.input, &request.output, events)?;
+        ops.unpack_stage(input_dir, &request.output, events)?;
         return ops.verify_stage(&request.output, events);
     }
 
-    let temp_root = create_pipeline_temp_root(&request.output)?;
     let unpack_stage_dir = temp_root.path().join("unpack_stage");
-    ops.unpack_stage(&request.input, &unpack_stage_dir, events)?;
+    ops.unpack_stage(input_dir, &unpack_stage_dir, events)?;
 
     let image_stage_dir = temp_root.path().join("image_stage");
     let prep_stats = ops.prepare_image_workspace_from_unpack(
-        &request.input,
+        input_dir,
         &unpack_stage_dir,
         &image_stage_dir,
     )?;
@@ -365,6 +369,9 @@ where
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
     ops.apply_preflight(&request.ota_zips, temp_root.path(), events)?;
+    let decrypted_input =
+        auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
+    let input_dir = decrypted_input.as_deref().unwrap_or(&request.input);
     let pipeline_mode = request.resign.is_some() || request.repack;
     let apply_out_dir = if pipeline_mode {
         temp_root.path().join("apply_stage")
@@ -373,7 +380,7 @@ where
     };
 
     ops.apply_stage(
-        &request.input,
+        input_dir,
         &apply_out_dir,
         &request.ota_zips,
         request.force_unpack,
@@ -395,7 +402,7 @@ where
 
     if request.repack {
         ops.repack_pipeline(
-            &request.input,
+            input_dir,
             &current_image_dir,
             &request.output,
             temp_root.path(),
@@ -404,7 +411,7 @@ where
     }
 
     if request.complete {
-        complete_output_from_input(&request.input, &request.output, events)?;
+        complete_output_from_input(input_dir, &request.output, events)?;
     }
 
     ops.verify_stage(&request.output, events)?;
@@ -424,8 +431,11 @@ where
     });
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
-    let effective_input = auto_unpack_if_needed(&request.input, temp_root.path(), events, ops)?;
-    let input_dir = effective_input.as_deref().unwrap_or(&request.input);
+    let decrypted_input =
+        auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
+    let decrypted_dir = decrypted_input.as_deref().unwrap_or(&request.input);
+    let effective_input = auto_unpack_if_needed(decrypted_dir, temp_root.path(), events, ops)?;
+    let input_dir = effective_input.as_deref().unwrap_or(decrypted_dir);
 
     if !request.repack {
         ops.resign_stage(input_dir, &request.output, &request.config, events)?;
@@ -435,7 +445,7 @@ where
     let resign_stage_dir = temp_root.path().join("resign_stage");
     ops.resign_stage(input_dir, &resign_stage_dir, &request.config, events)?;
     ops.repack_pipeline(
-        &request.input,
+        decrypted_dir,
         &resign_stage_dir,
         &request.output,
         temp_root.path(),
@@ -457,8 +467,11 @@ where
     });
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
-    let effective_input = auto_unpack_if_needed(&request.input, temp_root.path(), events, ops)?;
-    let input_dir = effective_input.as_deref().unwrap_or(&request.input);
+    let decrypted_input =
+        auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
+    let decrypted_dir = decrypted_input.as_deref().unwrap_or(&request.input);
+    let effective_input = auto_unpack_if_needed(decrypted_dir, temp_root.path(), events, ops)?;
+    let input_dir = effective_input.as_deref().unwrap_or(decrypted_dir);
 
     ops.repack_stage(input_dir, &request.output, events)?;
     ops.verify_stage(&request.output, events)
@@ -522,6 +535,84 @@ where
             "Auto-unpacked {} dynamic partitions from super.",
             dynamic_names.len()
         ),
+    );
+
+    Ok(Some(workspace_dir))
+}
+
+/// If the input directory has no `rawprogram*.xml` but has `*.x` encrypted
+/// files, decrypt each `.x` → `.xml` into a scratch workspace (with all other
+/// input files hardlinked) and return the workspace path. Returns None when
+/// no decryption is needed.
+fn auto_decrypt_xml_if_needed<S>(
+    input: &Path,
+    scratch_dir: &Path,
+    events: &mut S,
+) -> anyhow::Result<Option<PathBuf>>
+where
+    S: EventSink,
+{
+    let mut has_xml = false;
+    let mut x_files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(input)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let lower = name.to_ascii_lowercase();
+        if lower.starts_with("rawprogram") && lower.ends_with(".xml") {
+            has_xml = true;
+        }
+        if lower.ends_with(".x") {
+            x_files.push(path);
+        }
+    }
+
+    if has_xml || x_files.is_empty() {
+        return Ok(None);
+    }
+
+    let workspace_dir = scratch_dir.join("_auto_decrypt_xml");
+    recreate_dir(&workspace_dir)?;
+
+    for entry in std::fs::read_dir(input)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path.file_name().unwrap();
+        let lower = file_name.to_string_lossy().to_ascii_lowercase();
+        if lower.ends_with(".x") {
+            continue;
+        }
+        materialize_file_with_fallback(&path, &workspace_dir.join(file_name))?;
+    }
+
+    let mut decrypted = 0usize;
+    for x_path in &x_files {
+        let stem = x_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if stem.is_empty() {
+            continue;
+        }
+        let out = workspace_dir.join(format!("{stem}.xml"));
+        dynobox_xml::decrypt_file(x_path, &out)
+            .with_context(|| format!("failed to decrypt {}", x_path.display()))?;
+        decrypted += 1;
+    }
+
+    message(
+        events,
+        MessageLevel::Info,
+        format!("Auto-decrypted {decrypted} .x file(s) to .xml."),
     );
 
     Ok(Some(workspace_dir))
@@ -1642,7 +1733,8 @@ fn copy_top_level_img_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<Tr
     Ok(transfers)
 }
 
-/// Copy ALL top-level files from src_dir to dst_dir, skipping super_*.img chunks.
+/// Copy ALL top-level files from src_dir to dst_dir, skipping super_*.img chunks
+/// and encrypted .x sources (those are consumed by auto-decrypt).
 fn copy_all_top_level_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<TransferStats> {
     workspace_prepare_output_dir(dst_dir)?;
     let mut transfers = TransferStats::default();
@@ -1655,6 +1747,9 @@ fn copy_all_top_level_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<Tr
         let file_name = path.file_name().unwrap();
         let file_name_str = file_name.to_string_lossy();
         if file_name_str.starts_with("super_") && file_name_str.ends_with(".img") {
+            continue;
+        }
+        if file_name_str.to_ascii_lowercase().ends_with(".x") {
             continue;
         }
         let dst = dst_dir.join(file_name);
@@ -1742,6 +1837,13 @@ where
             continue;
         }
         let file_name = path.file_name().unwrap();
+        if file_name
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .ends_with(".x")
+        {
+            continue;
+        }
         let dst = output.join(file_name);
         if !dst.exists() {
             materialize_file_with_fallback(&path, &dst)?;

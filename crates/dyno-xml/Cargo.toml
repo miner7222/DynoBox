@@ -11,6 +11,10 @@ description = "rawprogram XML support crate for DynoBox"
 dynobox-core.workspace = true
 quick-xml = { version = "0.39.2", features = ["serialize", "serde"] }
 serde.workspace = true
+aes.workspace = true
+cbc.workspace = true
+sha2.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

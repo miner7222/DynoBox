@@ -1,9 +1,11 @@
 pub mod catalog;
+pub mod crypto;
 
 #[cfg(test)]
 mod catalog_tests;
 
 pub use catalog::{PartitionGroup, PartitionRecord, XmlCatalog};
+pub use crypto::decrypt_file;
 
 pub fn component_scope() -> &'static str {
     "rawprogram XML discovery, parsing, and rewrite helpers"
