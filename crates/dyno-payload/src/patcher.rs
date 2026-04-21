@@ -383,20 +383,39 @@ pub fn apply_partition_payload(
         None
     };
 
+    let new_size = p_manifest
+        .new_partition_info
+        .as_ref()
+        .unwrap()
+        .size
+        .unwrap();
+
     let mut dst_file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(new_image)?;
 
-    dst_file.set_len(
-        p_manifest
-            .new_partition_info
-            .as_ref()
-            .unwrap()
-            .size
-            .unwrap(),
-    )?;
+    dst_file.set_len(new_size)?;
+
+    if let Some(src) = src_file.as_mut() {
+        let src_len = src.metadata()?.len();
+        let copy_len = std::cmp::min(src_len, new_size);
+        if copy_len > 0 {
+            src.seek(SeekFrom::Start(0))?;
+            dst_file.seek(SeekFrom::Start(0))?;
+            let mut buf = vec![0u8; 1024 * 1024];
+            let mut remaining = copy_len;
+            while remaining > 0 {
+                let chunk = std::cmp::min(remaining as usize, buf.len());
+                src.read_exact(&mut buf[..chunk])?;
+                dst_file.write_all(&buf[..chunk])?;
+                remaining -= chunk as u64;
+            }
+            dst_file.flush()?;
+        }
+    }
 
     let patcher = Patcher::new(block_size);
 
