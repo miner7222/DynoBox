@@ -78,13 +78,14 @@ pub fn decrypt_file(input: &Path, output: &Path) -> Result<u64> {
         )));
     }
     let original_size = original_size_i64 as u64;
-    let body_end: usize = 16usize
-        .checked_add(usize::try_from(original_size).map_err(|_| {
-            DynoError::Tool(format!("original_size {original_size} exceeds usize"))
-        })?)
-        .ok_or_else(|| {
-            DynoError::Tool(format!("Header arithmetic overflow (size={original_size})"))
-        })?;
+    let body_end: usize =
+        16usize
+            .checked_add(usize::try_from(original_size).map_err(|_| {
+                DynoError::Tool(format!("original_size {original_size} exceeds usize"))
+            })?)
+            .ok_or_else(|| {
+                DynoError::Tool(format!("Header arithmetic overflow (size={original_size})"))
+            })?;
     let hash_end: usize = body_end
         .checked_add(32)
         .ok_or_else(|| DynoError::Tool("Trailing SHA offset overflow".into()))?;

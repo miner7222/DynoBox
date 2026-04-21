@@ -298,8 +298,7 @@ where
     });
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
-    let decrypted_input =
-        auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
+    let decrypted_input = auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
     let input_dir = decrypted_input.as_deref().unwrap_or(&request.input);
 
     if request.resign.is_none() && !request.repack {
@@ -311,11 +310,8 @@ where
     ops.unpack_stage(input_dir, &unpack_stage_dir, events)?;
 
     let image_stage_dir = temp_root.path().join("image_stage");
-    let prep_stats = ops.prepare_image_workspace_from_unpack(
-        input_dir,
-        &unpack_stage_dir,
-        &image_stage_dir,
-    )?;
+    let prep_stats =
+        ops.prepare_image_workspace_from_unpack(input_dir, &unpack_stage_dir, &image_stage_dir)?;
     message(
         events,
         MessageLevel::Info,
@@ -369,8 +365,7 @@ where
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
     ops.apply_preflight(&request.ota_zips, temp_root.path(), events)?;
-    let decrypted_input =
-        auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
+    let decrypted_input = auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
     let input_dir = decrypted_input.as_deref().unwrap_or(&request.input);
     let pipeline_mode = request.resign.is_some() || request.repack;
     let apply_out_dir = if pipeline_mode {
@@ -431,8 +426,7 @@ where
     });
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
-    let decrypted_input =
-        auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
+    let decrypted_input = auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
     let decrypted_dir = decrypted_input.as_deref().unwrap_or(&request.input);
     let effective_input = auto_unpack_if_needed(decrypted_dir, temp_root.path(), events, ops)?;
     let input_dir = effective_input.as_deref().unwrap_or(decrypted_dir);
@@ -467,8 +461,7 @@ where
     });
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
-    let decrypted_input =
-        auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
+    let decrypted_input = auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
     let decrypted_dir = decrypted_input.as_deref().unwrap_or(&request.input);
     let effective_input = auto_unpack_if_needed(decrypted_dir, temp_root.path(), events, ops)?;
     let input_dir = effective_input.as_deref().unwrap_or(decrypted_dir);
@@ -888,9 +881,9 @@ where
 
             let split_fragments = find_split_source_fragments(&catalog, &p_info.name);
             if !split_fragments.is_empty() && p_info.old_size > 0 {
-                let all_present = split_fragments
-                    .iter()
-                    .all(|f| input.join(&f.filename).exists() || out_dir.join(&f.filename).exists());
+                let all_present = split_fragments.iter().all(|f| {
+                    input.join(&f.filename).exists() || out_dir.join(&f.filename).exists()
+                });
                 if all_present {
                     message(
                         events,
@@ -909,8 +902,7 @@ where
                     } else {
                         input
                     };
-                    let recon_src = working_dir
-                        .join(format!("{}_split_src.img", p_info.name));
+                    let recon_src = working_dir.join(format!("{}_split_src.img", p_info.name));
                     reconstruct_split_source(
                         &split_fragments,
                         src_base,
@@ -1333,9 +1325,8 @@ where
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
-            let current_ri = read_rollback_index(path).with_context(|| {
-                format!("Failed to read rollback_index from {}", filename)
-            })?;
+            let current_ri = read_rollback_index(path)
+                .with_context(|| format!("Failed to read rollback_index from {}", filename))?;
             if new_ri > current_ri {
                 return Err(anyhow::anyhow!(
                     "Refusing --rollback for {}: requested rollback_index {} exceeds original {}. \
@@ -1397,9 +1388,8 @@ where
         }
 
         if let Some(expected_ri) = config.rollback_index {
-            let actual_ri = read_rollback_index(&out_path).with_context(|| {
-                format!("Failed to re-read rollback_index from {}", filename)
-            })?;
+            let actual_ri = read_rollback_index(&out_path)
+                .with_context(|| format!("Failed to re-read rollback_index from {}", filename))?;
             if actual_ri != expected_ri {
                 return Err(anyhow::anyhow!(
                     "Post-resign verification failed for {}: rollback_index is {} but expected {}",
@@ -1490,9 +1480,7 @@ fn format_unix_timestamp_utc(ts: u64) -> String {
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ][(m - 1) as usize];
 
-    format!(
-        "{weekday} {month} {d:2} {hour:02}:{minute:02}:{second:02} UTC {year}"
-    )
+    format!("{weekday} {month} {d:2} {hour:02}:{minute:02}:{second:02} UTC {year}")
 }
 
 fn run_repack_stage<S>(input: &Path, out_dir: &Path, events: &mut S) -> anyhow::Result<()>

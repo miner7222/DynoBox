@@ -455,10 +455,7 @@ fn regenerate_verity_hash_tree(
             algo
         )));
     }
-    let salt: &[u8] = p_manifest
-        .hash_tree_salt
-        .as_deref()
-        .unwrap_or(&[]);
+    let salt: &[u8] = p_manifest.hash_tree_salt.as_deref().unwrap_or(&[]);
 
     let bs = block_size as u64;
     let data_start = data_ext.start_block.unwrap_or(0);
@@ -492,7 +489,9 @@ fn regenerate_verity_hash_tree(
         if prev_blocks <= 1 {
             break;
         }
-        let mut next = Vec::with_capacity(((prev_blocks + hashes_per_block - 1) / hashes_per_block * bs) as usize);
+        let mut next = Vec::with_capacity(
+            ((prev_blocks + hashes_per_block - 1) / hashes_per_block * bs) as usize,
+        );
         for bi in 0..prev_blocks {
             let start = (bi * bs) as usize;
             let end = start + bs as usize;
