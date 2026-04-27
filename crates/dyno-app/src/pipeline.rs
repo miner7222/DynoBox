@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use tempfile::TempDir;
 
+use crate::boot_spl::{
+    BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
+};
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, StageKind};
 use crate::verify::run_verify_stage;
 
@@ -18,6 +21,10 @@ pub struct ResignConfig {
     /// When set, only those two images are processed; others are left untouched.
     /// The new value must be less than or equal to each image's current rollback_index.
     pub rollback_index: Option<u64>,
+    /// New `com.android.build.boot.security_patch` value (YYYY-MM-DD) for boot.img.
+    /// The image is re-signed regardless; the property is only rewritten when
+    /// the requested date is strictly newer than the existing one.
+    pub boot_spl: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1292,6 +1299,10 @@ where
         stage: StageKind::Resign,
     });
 
+    if let Some(spl) = config.boot_spl.as_deref() {
+        validate_spl_format(spl)?;
+    }
+
     recreate_dir(out_dir)?;
 
     // Copy ALL input files to output first (preserves non-.img files like .elf, .mbn)
@@ -1339,6 +1350,53 @@ where
         }
     }
 
+    let mut boot_spl_applied: Option<(String, String)> = None;
+    if let Some(new_spl) = config.boot_spl.as_deref() {
+        let boot_image_in_images = images.iter().any(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == "boot.img")
+                .unwrap_or(false)
+        });
+        if !boot_image_in_images {
+            return Err(anyhow::anyhow!(
+                "--boot-spl requested but boot.img was not found under {}",
+                input.display()
+            ));
+        }
+        let boot_out_path = out_dir.join("boot.img");
+        ensure_local_inode(&boot_out_path)?;
+        match patch_security_patch(&boot_out_path, new_spl)? {
+            BootSplPatchOutcome::Patched { old, new } => {
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!(
+                        "boot.img {} bumped from {} to {}",
+                        BOOT_SPL_PROPERTY, old, new
+                    ),
+                );
+                boot_spl_applied = Some((old, new));
+            }
+            BootSplPatchOutcome::SkippedNotNewer { old, requested } => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    format!(
+                        "boot.img {} not bumped: requested {} is not newer than current {}; re-signing without SPL change",
+                        BOOT_SPL_PROPERTY, requested, old
+                    ),
+                );
+            }
+            BootSplPatchOutcome::NotFound => {
+                return Err(anyhow::anyhow!(
+                    "boot.img has no {} property descriptor; cannot apply --boot-spl",
+                    BOOT_SPL_PROPERTY
+                ));
+            }
+        }
+    }
+
     let mut resigned_count = 0usize;
     let mut skipped_unsigned_count = 0usize;
 
@@ -1357,6 +1415,10 @@ where
         });
 
         let out_path = out_dir.join(&filename);
+        // boot.img may have already been re-inoded by the SPL patch above; that
+        // is a no-op (we copy the already-fresh inode to a new one). All other
+        // images go through this guard so the resign write hits a private inode.
+        ensure_local_inode(&out_path)?;
 
         let result = match config.rollback_index {
             Some(ri) => avbtool_rs::resign::resign_image_with_options(
@@ -1397,6 +1459,25 @@ where
                     actual_ri,
                     expected_ri
                 ));
+            }
+        }
+
+        if let Some((_, ref expected_spl)) = boot_spl_applied {
+            if filename == "boot.img" {
+                let actual = crate::boot_spl::read_security_patch(&out_path)
+                    .with_context(|| format!("Failed to re-read boot SPL from {}", filename))?;
+                match actual.as_deref() {
+                    Some(value) if value == expected_spl => {}
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "Post-resign verification failed for {}: {} is {:?} but expected {:?}",
+                            filename,
+                            BOOT_SPL_PROPERTY,
+                            other,
+                            expected_spl
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1782,6 +1863,25 @@ fn workspace_prepare_output_dir(dir: &Path) -> anyhow::Result<()> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
     }
+    Ok(())
+}
+
+/// Replace `path` with a freshly-allocated inode that holds the same content,
+/// breaking any hard-link relationship with the source it was materialized
+/// from. Required before any in-place modification (resign / boot SPL patch),
+/// because [`materialize_file_with_fallback`] hard-links by default and a
+/// naive write through an O_RDWR handle would corrupt the original input.
+fn ensure_local_inode(path: &Path) -> anyhow::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".relink_tmp");
+    let tmp_path = std::path::PathBuf::from(tmp);
+    if tmp_path.exists() {
+        std::fs::remove_file(&tmp_path)?;
+    }
+    std::fs::copy(path, &tmp_path)
+        .with_context(|| format!("Failed to break hard link on {}", path.display()))?;
+    std::fs::remove_file(path)?;
+    std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
 
@@ -2228,6 +2328,7 @@ mod tests {
             algorithm: Some("SHA256_RSA2048".to_string()),
             force: false,
             rollback_index: None,
+            boot_spl: None,
         }
     }
 

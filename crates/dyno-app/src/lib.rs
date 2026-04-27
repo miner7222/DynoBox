@@ -1,3 +1,4 @@
+pub mod boot_spl;
 pub mod events;
 pub mod pipeline;
 pub mod verify;
