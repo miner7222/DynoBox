@@ -11,7 +11,7 @@ description = "OTA payload metadata and patch-planning crate for DynoBox"
 dynobox-core.workspace = true
 prost = "0.14"
 bytes = "1.11"
-zip = "8.5.1"
+zip = "8.6.0"
 tracing.workspace = true
 bzip2 = "0.6.1"
 xz2 = "0.1.7"
@@ -22,7 +22,7 @@ brotli-sys = "0.3.2"
 sha2 = "0.11.0"
 
 [build-dependencies]
-cc = "1.2.60"
+cc = "1.2.61"
 cmake = "0.1.58"
 prost-build = "0.14"
 protoc-bin-vendored = "3.2.0"

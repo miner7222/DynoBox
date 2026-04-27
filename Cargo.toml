@@ -22,7 +22,7 @@ dynobox-core = { path = "crates/dyno-core" }
 dynobox-super = { path = "crates/dyno-super" }
 dynobox-payload = { path = "crates/dyno-payload" }
 dynobox-xml = { path = "crates/dyno-xml" }
-avbtool-rs = { git = "https://github.com/miner7222/avbtool-rs", tag = "v0.1.1" }
+avbtool-rs = { git = "https://github.com/miner7222/avbtool-rs" }
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
 tracing = "0.1.44"
