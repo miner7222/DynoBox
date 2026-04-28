@@ -1,30 +1,38 @@
 //! Patch vendor.img security_patch + propagate to vbmeta.img.
 //!
-//! Locates `ro.vendor.build.security_patch=` inside vendor.img's data area
-//! by streaming byte scan and overwrites the 10-byte date that follows.
-//! Because vendor.img is dm-verity protected, the data-area edit is followed
-//! by:
-//!   1. Re-emitting the dm-verity hash tree from the modified data and
-//!      writing it back at `tree_offset` in vendor.img.
-//!   2. Patching the AVB Hashtree descriptor's `root_digest` and the AVB
-//!      Property descriptor's `com.android.build.vendor.security_patch` value
-//!      in vendor.img's footer. vendor.img is `algorithm = NONE`, so there is
-//!      no signature to invalidate; the descriptor body is rewritten in
-//!      place and stays length-stable (32-byte digest, 10-byte date).
-//!   3. Patching the same fields in vbmeta.img (which carries vendor's
-//!      Hashtree descriptor and the matching property). vbmeta.img is signed,
-//!      so the regular resign loop is expected to re-sign it after this
-//!      module returns; the in-place edit pre-loads the new bytes that the
-//!      signature will then cover.
+//! Walks the ext4 filesystem inside `vendor.img` to locate `/build.prop`,
+//! resolves the disk byte range that backs the
+//! `ro.vendor.build.security_patch=` line through the inode's extent
+//! tree, and overwrites the 10-byte date in place. Going through the
+//! ext4 reader (rather than a blind `memchr` scan over the partition
+//! image) is what makes the rewrite hit the live data block instead of
+//! whichever stale fragment in unallocated space happens to share the
+//! same string.
 //!
-//! FEC blocks are intentionally left untouched: dm-verity validates against
-//! the new `root_digest` only, and FEC is consulted only as a recovery code
-//! for damaged blocks. A stale FEC region does not break boot.
+//! After the data-area edit:
+//!   1. Re-emit the dm-verity hash tree from the modified data and write
+//!      it back at `tree_offset` in vendor.img.
+//!   2. Patch the AVB Hashtree descriptor's `root_digest` and the AVB
+//!      Property descriptor's `com.android.build.vendor.security_patch`
+//!      value in vendor.img's footer. vendor.img is `algorithm = NONE`,
+//!      so the descriptor body is rewritten in place and stays
+//!      length-stable (32-byte digest, 10-byte date) — no signature to
+//!      invalidate.
+//!   3. Patch the same fields in vbmeta.img (which carries vendor's
+//!      Hashtree descriptor and the matching property). vbmeta.img is
+//!      signed, so the regular resign loop re-signs it after this
+//!      module returns; the in-place edit pre-loads the new bytes the
+//!      fresh signature then covers.
+//!
+//! FEC blocks are intentionally left untouched: dm-verity validates
+//! against the new `root_digest` only, and FEC is consulted as a recovery
+//! code for damaged blocks. A stale FEC region does not break boot.
 
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crate::ext4_reader::{Ext4Volume, Inode};
 use anyhow::{Context, Result, anyhow};
 use avbtool_rs::footer::{calc_hash_level_offsets, generate_hash_tree};
 use avbtool_rs::parser::{
@@ -35,8 +43,6 @@ use memchr::memmem;
 
 pub const VENDOR_SPL_PROPERTY: &str = "com.android.build.vendor.security_patch";
 
-const BUILD_PROP_KEY: &[u8] = b"ro.vendor.build.security_patch=";
-
 const DESCRIPTOR_HEADER_SIZE: usize = 16;
 const PROPERTY_DESCRIPTOR_SIZE: usize = 32;
 const HASHTREE_DESCRIPTOR_FIXED_SIZE: usize = 180;
@@ -44,7 +50,6 @@ const DESCRIPTOR_TAG_PROPERTY: u64 = 0;
 const DESCRIPTOR_TAG_HASHTREE: u64 = 1;
 
 const SHA256_DIGEST_SIZE: usize = 32;
-const SCAN_CHUNK: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VendorSplOutcome {
@@ -112,24 +117,8 @@ pub fn apply_vendor_spl(
         });
     }
 
-    // 2. Locate ro.vendor.build.security_patch= inside vendor.img data area.
-    let Some((build_prop_value_offset, current_build_prop)) =
-        find_build_prop_security_patch(vendor_image)?
-    else {
-        return Err(anyhow!(
-            "vendor.img has no `ro.vendor.build.security_patch=` entry in its build.prop region"
-        ));
-    };
-    if current_build_prop.len() != new_spl.len() {
-        return Err(anyhow!(
-            "Cannot patch /vendor/build.prop SPL in place: existing value {:?} ({} bytes) does not match new value length ({} bytes)",
-            current_build_prop,
-            current_build_prop.len(),
-            new_spl.len()
-        ));
-    }
-
-    // 3. Read hashtree descriptor params (need them before we mutate the data).
+    // 2. Read hashtree descriptor params (need image_size for the rebuild
+    //    and the salt/algorithm for verity regeneration after).
     let hashtree = read_vendor_hashtree_params(vendor_image)?
         .ok_or_else(|| anyhow!("vendor.img has no Hashtree descriptor for partition `vendor`"))?;
     let old_root_digest = hashtree.root_digest.clone();
@@ -141,10 +130,14 @@ pub fn apply_vendor_spl(
         ));
     }
 
-    // 4. Patch build.prop SPL bytes in the data area.
-    write_at_offset(vendor_image, build_prop_value_offset, new_spl.as_bytes())?;
+    // 3. Walk vendor.img as an ext4 filesystem, resolve `/build.prop`'s
+    //    disk-byte range via the inode extent tree, and overwrite the
+    //    SPL value in place. A blind partition-wide `memchr` scan would
+    //    happily land on a stale copy of the same string in unallocated
+    //    space and leave the live build.prop unchanged.
+    patch_build_prop_spl_via_ext4(vendor_image, new_spl)?;
 
-    // 5. Regenerate dm-verity hash tree from the modified data and write it
+    // 4. Regenerate dm-verity hash tree from the modified data and write it
     //    back at `tree_offset`. avbtool-rs::generate_hash_tree returns the
     //    root digest plus the full level-packed tree blob.
     let new_root_digest = regenerate_hashtree(vendor_image, &hashtree)?;
@@ -155,10 +148,10 @@ pub fn apply_vendor_spl(
         ));
     }
 
-    // 6. Patch vendor.img footer descriptors (NONE algorithm: no signature).
+    // 5. Patch vendor.img footer descriptors (NONE algorithm: no signature).
     patch_vendor_image_descriptors(vendor_image, new_spl, &new_root_digest)?;
 
-    // 7. Patch vbmeta.img descriptors. The signed blob is left with a stale
+    // 6. Patch vbmeta.img descriptors. The signed blob is left with a stale
     //    signature that the resign stage will refresh.
     patch_vbmeta_vendor_descriptors(vbmeta_image, new_spl, &new_root_digest)?;
 
@@ -168,6 +161,148 @@ pub fn apply_vendor_spl(
         old_root_digest: hex_encode(&old_root_digest),
         new_root_digest: hex_encode(&new_root_digest),
     })
+}
+
+/// Walk vendor.img as an ext4 filesystem, locate `/build.prop`, and
+/// rewrite the value of the `ro.vendor.build.security_patch` line in
+/// place. The lookup goes through the inode extent tree — ext4-aware —
+/// so the byte rewrite always lands on the file's live data block(s),
+/// never on a stale copy of the same string left over in an
+/// unallocated block.
+fn patch_build_prop_spl_via_ext4(vendor_image: &Path, new_spl: &str) -> Result<()> {
+    let mut volume = open_ext4_volume(vendor_image)?;
+    let inode = lookup_inode_at_path(&mut volume, &["build.prop"])?
+        .ok_or_else(|| anyhow!("vendor.img has no /build.prop"))?;
+    if !inode.is_file() {
+        return Err(anyhow!("vendor.img /build.prop is not a regular file"));
+    }
+    let content = inode
+        .open_read(&mut volume)
+        .map_err(|e| anyhow!("Failed to read /build.prop from vendor.img: {e}"))?;
+
+    let needle = b"ro.vendor.build.security_patch=";
+    let pos = memmem::find(&content, needle)
+        .ok_or_else(|| anyhow!("vendor /build.prop has no ro.vendor.build.security_patch= line"))?;
+    let value_start = pos + needle.len();
+    let mut value_end = value_start;
+    while value_end < content.len() && content[value_end] != b'\n' && content[value_end] != b'\r' {
+        value_end += 1;
+    }
+    let value_len = value_end - value_start;
+    if value_len != new_spl.len() {
+        return Err(anyhow!(
+            "vendor /build.prop SPL value is {} bytes; cannot in-place replace with {} bytes (only same-length YYYY-MM-DD substitutions are supported)",
+            value_len,
+            new_spl.len()
+        ));
+    }
+
+    let block_size = volume.block_size;
+    let extents = inode
+        .extent_mapping(&mut volume)
+        .map_err(|e| anyhow!("Failed to walk /build.prop extent tree: {e}"))?;
+    if extents.is_empty() {
+        return Err(anyhow!(
+            "vendor /build.prop has no extents (likely inline data not yet supported here)"
+        ));
+    }
+
+    let new_bytes = new_spl.as_bytes();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(vendor_image)
+        .with_context(|| {
+            format!(
+                "Failed to open {} for build.prop patch",
+                vendor_image.display()
+            )
+        })?;
+
+    // Walk byte-by-byte across the extents, writing each new SPL byte at
+    // its mapped on-disk position. The needle is small (10 bytes) so the
+    // loop is trivially cheap; doing it per-byte keeps the code correct
+    // even when the value happens to straddle an extent boundary.
+    for (i, byte) in new_bytes.iter().enumerate() {
+        let file_offset = (value_start + i) as u64;
+        let disk_offset =
+            map_file_offset_to_disk(&extents, file_offset, block_size).ok_or_else(|| {
+                anyhow!(
+                    "Could not map /build.prop file offset {} to a disk block (extent gap?)",
+                    file_offset
+                )
+            })?;
+        file.seek(SeekFrom::Start(disk_offset))?;
+        file.write_all(std::slice::from_ref(byte))?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+fn open_ext4_volume(image_path: &Path) -> Result<Ext4Volume<BufReader<File>>> {
+    let file = File::open(image_path).with_context(|| {
+        format!(
+            "Failed to open {} for ext4 navigation",
+            image_path.display()
+        )
+    })?;
+    let reader = BufReader::new(file);
+    Ext4Volume::new(reader)
+        .map_err(|e| anyhow!("Failed to parse ext4 superblock on vendor.img: {e}"))
+}
+
+/// Walk an absolute path under the ext4 root and return the matching
+/// inode, or `None` if any component is missing.
+fn lookup_inode_at_path<R: Read + Seek>(
+    volume: &mut Ext4Volume<R>,
+    components: &[&str],
+) -> Result<Option<Inode>> {
+    let mut current = volume
+        .root()
+        .map_err(|e| anyhow!("Failed to read ext4 root inode: {e}"))?;
+    for name in components {
+        if !current.is_dir() {
+            return Ok(None);
+        }
+        let entries = current
+            .open_dir(volume)
+            .map_err(|e| anyhow!("Failed to read directory while resolving {:?}: {e}", name))?;
+        let next_idx = entries
+            .into_iter()
+            .find(|(entry_name, _, _)| entry_name == name)
+            .map(|(_, idx, _)| idx);
+        let Some(idx) = next_idx else {
+            return Ok(None);
+        };
+        current = volume
+            .get_inode(idx)
+            .map_err(|e| anyhow!("Failed to read inode {} for {:?}: {e}", idx, name))?;
+    }
+    Ok(Some(current))
+}
+
+/// Map a file-relative byte offset to the absolute on-disk byte offset
+/// using the supplied `(file_block_idx, disk_block_idx, block_count, is_unwritten)`
+/// extent table. Returns `None` if the offset falls into a hole or an
+/// `is_unwritten` (logically-zero) extent — in either case there's no
+/// concrete disk byte to patch.
+fn map_file_offset_to_disk(
+    extents: &[(u64, u64, u64, bool)],
+    file_offset: u64,
+    block_size: u64,
+) -> Option<u64> {
+    let block_index = file_offset / block_size;
+    let intra_block = file_offset % block_size;
+    for &(file_block, disk_block, count, is_unwritten) in extents {
+        if block_index >= file_block && block_index < file_block + count {
+            if is_unwritten {
+                return None;
+            }
+            let disk_block_for_offset = disk_block + (block_index - file_block);
+            return Some(disk_block_for_offset * block_size + intra_block);
+        }
+    }
+    None
 }
 
 /// Read the current `com.android.build.vendor.security_patch` from
@@ -185,68 +320,6 @@ pub fn read_vendor_avb_property(vendor_image: &Path) -> Result<Option<String>> {
         Ok(Some(value))
     } else {
         Ok(None)
-    }
-}
-
-/// Stream-scan `vendor.img` for `ro.vendor.build.security_patch=YYYY-MM-DD`
-/// and return `(file_offset_of_value, current_value)`.
-fn find_build_prop_security_patch(vendor_image: &Path) -> Result<Option<(u64, String)>> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(vendor_image)
-        .with_context(|| {
-            format!(
-                "Failed to open {} for build.prop scan",
-                vendor_image.display()
-            )
-        })?;
-    let file_size = file.metadata()?.len();
-
-    let needle = BUILD_PROP_KEY;
-    // Need access to needle.len() + 10 bytes after a match (date), so keep
-    // an overlap region between chunks of `needle.len() + 10 - 1` bytes.
-    let overlap = needle.len() + 10 - 1;
-    let mut buf = vec![0u8; SCAN_CHUNK + overlap];
-    let mut chunk_start: u64 = 0;
-
-    loop {
-        if chunk_start >= file_size {
-            return Ok(None);
-        }
-        let to_read =
-            std::cmp::min(buf.len() as u64, file_size.saturating_sub(chunk_start)) as usize;
-        file.seek(SeekFrom::Start(chunk_start))?;
-        file.read_exact(&mut buf[..to_read])?;
-
-        if let Some(pos) = memmem::find(&buf[..to_read], needle) {
-            let value_start_in_chunk = pos + needle.len();
-            if value_start_in_chunk + 10 > to_read {
-                // Not enough bytes for the date in this chunk — slide the
-                // window so the match plus its date is fully contained next
-                // iteration.
-                if to_read < buf.len() {
-                    return Ok(None);
-                }
-                chunk_start += pos as u64;
-                continue;
-            }
-            let value_bytes = &buf[value_start_in_chunk..value_start_in_chunk + 10];
-            let value = std::str::from_utf8(value_bytes)
-                .with_context(|| {
-                    format!(
-                        "Build.prop value at offset {} is not UTF-8",
-                        chunk_start + value_start_in_chunk as u64
-                    )
-                })?
-                .to_string();
-            let absolute_value_offset = chunk_start + value_start_in_chunk as u64;
-            return Ok(Some((absolute_value_offset, value)));
-        }
-
-        if to_read < buf.len() {
-            return Ok(None);
-        }
-        chunk_start += (SCAN_CHUNK) as u64;
     }
 }
 
@@ -482,18 +555,6 @@ fn patch_vbmeta_vendor_descriptors(
     file.write_all(new_spl.as_bytes())?;
     file.seek(SeekFrom::Start(digest_file_offset))?;
     file.write_all(new_root_digest)?;
-    file.flush()?;
-    Ok(())
-}
-
-fn write_at_offset(image_path: &Path, offset: u64, bytes: &[u8]) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image_path)
-        .with_context(|| format!("Failed to open {} for in-place write", image_path.display()))?;
-    file.seek(SeekFrom::Start(offset))?;
-    file.write_all(bytes)?;
     file.flush()?;
     Ok(())
 }

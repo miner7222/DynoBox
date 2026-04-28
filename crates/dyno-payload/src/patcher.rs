@@ -45,7 +45,7 @@ impl Patcher {
                 self.write_extents(target_file, &op.dst_extents, &decompressed)?;
             }
             Type::ReplaceXz => {
-                let mut decompressor = xz2::read::XzDecoder::new(payload_data);
+                let mut decompressor = liblzma::read::XzDecoder::new(payload_data);
                 let mut decompressed = Vec::new();
                 decompressor.read_to_end(&mut decompressed)?;
                 self.write_extents(target_file, &op.dst_extents, &decompressed)?;

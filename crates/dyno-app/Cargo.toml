@@ -17,3 +17,5 @@ dynobox-xml.workspace = true
 memchr.workspace = true
 tempfile.workspace = true
 serde.workspace = true
+thiserror.workspace = true
+zerocopy = { version = "0.8", features = ["derive"] }
