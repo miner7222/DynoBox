@@ -107,8 +107,8 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "avbtool-rs"
-version = "0.1.1"
-source = "git+https://github.com/miner7222/avbtool-rs#41fdc7c2178f98093bc3fd03b8843a5b4832c87c"
+version = "0.1.2"
+source = "git+https://github.com/miner7222/avbtool-rs#55394ce64e6b74b942805a884b469213913b0b60"
 dependencies = [
  "anyhow",
  "blake2",
