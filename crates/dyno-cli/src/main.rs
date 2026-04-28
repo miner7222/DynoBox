@@ -1,13 +1,16 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use dynobox_app::events::ProgressUnit;
 use dynobox_app::{
     ApplyRequest, CommandKind, MessageLevel, ProgressEvent, RepackRequest, ResignConfig,
     ResignRequest, StageKind, UnpackRequest, default_output_name_for_apply,
     default_output_name_for_resign, default_output_name_for_unpack, render_verification_report,
     run_apply, run_repack, run_resign, run_unpack, verify_input,
 };
+use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::{Level, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
@@ -377,6 +380,11 @@ fn log_event(event: ProgressEvent) {
         } => {
             info!("{} {}/{}: {}", stage_name(stage), current, total, item);
         }
+        // ItemProgress is consumed by the indicatif renderer in
+        // `build_text_sink`; in the bare `log_event` path used by tests and
+        // non-interactive callers we deliberately drop it (a tracing line per
+        // 1% would flood the log).
+        ProgressEvent::ItemProgress { .. } => {}
         ProgressEvent::Message { level, text } => match level {
             MessageLevel::Info => info!("{text}"),
             MessageLevel::Warning => warn!("{text}"),
@@ -392,6 +400,142 @@ fn print_json_line<T: Serialize>(value: &T) -> anyhow::Result<()> {
     Ok(())
 }
 
+const SPINNER_TICK_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn unit_label(unit: ProgressUnit) -> &'static str {
+    match unit {
+        ProgressUnit::Bytes => "bytes",
+        ProgressUnit::Ops => "ops",
+        ProgressUnit::Blocks => "blocks",
+    }
+}
+
+/// Build a text-mode sink that wraps `log_event` with an indicatif progress
+/// surface. Slow operations during `unpack`/`apply`/`resign` (super partition
+/// extraction, OTA payload apply on multi-GB partitions, dm-verity hash tree
+/// regeneration during `--vendor-spl`) emit no log lines while they run, so
+/// the gap between two `ItemStarted` events can stretch for tens of seconds
+/// and look frozen on the terminal.
+///
+/// Behavior:
+///   * `StageStarted` / `ItemStarted` → finish any active bar, log the line,
+///     then attach a fresh auto-ticking spinner so the user sees the work is
+///     alive even before any byte-level progress arrives.
+///   * `ItemProgress` → upgrade the spinner to a determinate progress bar
+///     the first time progress arrives for that item, then update its
+///     position. The bar template shows `[wide_bar] done/total (eta)`.
+///   * Other events → finish the active bar before printing so the next
+///     `tracing::info!` line lands on a clean row.
+///
+/// The bar/spinner is suppressed when stderr is not a terminal
+/// (`--progress-format jsonl`, redirected/piped invocations, CI).
+fn build_text_sink() -> impl FnMut(ProgressEvent) {
+    use std::io::IsTerminal;
+
+    let interactive = std::io::stderr().is_terminal();
+    let mut active_bar: Option<ProgressBar> = None;
+    let mut active_item: Option<String> = None;
+    let mut bar_is_determinate = false;
+
+    move |event: ProgressEvent| match &event {
+        ProgressEvent::ItemProgress {
+            item,
+            done,
+            total,
+            unit,
+            ..
+        } => {
+            if !interactive {
+                return;
+            }
+            let total = *total;
+            let done = *done;
+            let unit_str = unit_label(*unit);
+
+            let upgrade = !bar_is_determinate || active_item.as_deref() != Some(item.as_str());
+            if upgrade {
+                if let Some(pb) = active_bar.take() {
+                    pb.finish_and_clear();
+                }
+                let pb = if total == 0 {
+                    let pb = ProgressBar::new_spinner();
+                    pb.set_style(
+                        ProgressStyle::with_template("    {spinner:.cyan} {msg} ({elapsed})")
+                            .expect("static spinner template parses")
+                            .tick_strings(SPINNER_TICK_FRAMES),
+                    );
+                    pb.enable_steady_tick(Duration::from_millis(120));
+                    pb
+                } else {
+                    // For Bytes-flavored progress (the OTA apply weighted-bytes
+                    // metric is bytes-like even though it mixes data_length
+                    // with a fraction of dst_bytes), use indicatif's
+                    // `{decimal_bytes}/{decimal_total_bytes}` formatter so the
+                    // numbers render as `120 MB / 1.4 GB` rather than the raw
+                    // 12-digit integers a `{pos}/{len}` template would print.
+                    // Other units fall back to plain integer counts with the
+                    // unit label appended.
+                    let template = match unit {
+                        ProgressUnit::Bytes => {
+                            "    {spinner:.cyan} {msg} [{wide_bar:.cyan/blue}] {decimal_bytes}/{decimal_total_bytes} ({elapsed}, ETA {eta})".to_string()
+                        }
+                        _ => format!(
+                            "    {{spinner:.cyan}} {{msg}} [{{wide_bar:.cyan/blue}}] {{pos}}/{{len}} {} ({{elapsed}}, ETA {{eta}})",
+                            unit_str
+                        ),
+                    };
+                    let pb = ProgressBar::new(total);
+                    let style = ProgressStyle::with_template(&template)
+                        .expect("dynamic bar template parses")
+                        .tick_strings(SPINNER_TICK_FRAMES)
+                        .progress_chars("##-");
+                    pb.set_style(style);
+                    pb.enable_steady_tick(Duration::from_millis(200));
+                    pb
+                };
+                pb.set_message(item.clone());
+                active_bar = Some(pb);
+                active_item = Some(item.clone());
+                bar_is_determinate = total > 0;
+            }
+            if let Some(pb) = active_bar.as_ref() {
+                if total > 0 {
+                    pb.set_length(total);
+                    pb.set_position(done);
+                }
+            }
+        }
+        other => {
+            if let Some(pb) = active_bar.take() {
+                pb.finish_and_clear();
+            }
+            bar_is_determinate = false;
+            active_item = None;
+            let starts_work = matches!(
+                other,
+                ProgressEvent::ItemStarted { .. } | ProgressEvent::StageStarted { .. }
+            );
+            let item_label = match other {
+                ProgressEvent::ItemStarted { item, .. } => Some(item.clone()),
+                _ => None,
+            };
+            log_event(event);
+            if interactive && starts_work {
+                let pb = ProgressBar::new_spinner();
+                pb.set_style(
+                    ProgressStyle::with_template("    {spinner:.cyan} {msg} ({elapsed})")
+                        .expect("static spinner template parses")
+                        .tick_strings(SPINNER_TICK_FRAMES),
+                );
+                pb.set_message(item_label.clone().unwrap_or_else(|| "working…".into()));
+                pb.enable_steady_tick(Duration::from_millis(120));
+                active_bar = Some(pb);
+                active_item = item_label;
+            }
+        }
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
@@ -399,7 +543,7 @@ fn main() -> anyhow::Result<()> {
         setup_logging();
     }
 
-    let mut text_sink = log_event;
+    let mut text_sink = build_text_sink();
     let mut jsonl_sink = |event: ProgressEvent| {
         let _ = print_json_line(&event);
     };

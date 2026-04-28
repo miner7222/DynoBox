@@ -347,12 +347,55 @@ fn unsupported(name: &str, detail_name: &str, reason: &str) -> OperationSupportI
     }
 }
 
+/// Type-erased progress callback called incrementally during
+/// [`apply_partition_payload_with_progress`]. Receives `(done, total)`
+/// weighted byte counts (see [`operation_progress_weight`] for the
+/// weighting scheme). Invoked once at start with `done = 0` and after
+/// every applied operation. Callers that don't need progress can use
+/// the legacy [`apply_partition_payload`] entry point.
+pub type ApplyProgressCallback<'a> = &'a mut dyn FnMut(u64, u64);
+
+/// Weight assigned to a single install operation for progress reporting.
+/// `data_length` (compressed patch bytes) approximates CPU-bound work for
+/// REPLACE / *_BSDIFF / PUFFDIFF; `dst_bytes / 32` gives a small share to
+/// SOURCE_COPY / ZERO ops so the bar still advances during fast write-only
+/// phases and partitions made entirely of those ops still produce a
+/// non-zero total weight.
+fn operation_progress_weight(op: &crate::payload::proto::InstallOperation, block_size: u32) -> u64 {
+    let data_length = op.data_length.unwrap_or(0);
+    let dst_blocks: u64 = op
+        .dst_extents
+        .iter()
+        .map(|e| e.num_blocks.unwrap_or(0))
+        .sum();
+    let dst_bytes = dst_blocks.saturating_mul(block_size as u64);
+    data_length.saturating_add(dst_bytes / 32)
+}
+
 pub fn apply_partition_payload(
     payload_path: &Path,
     partition_name: &str,
     old_image: &Path,
     new_image: &Path,
     block_size: u32,
+) -> Result<()> {
+    apply_partition_payload_with_progress(
+        payload_path,
+        partition_name,
+        old_image,
+        new_image,
+        block_size,
+        None,
+    )
+}
+
+pub fn apply_partition_payload_with_progress(
+    payload_path: &Path,
+    partition_name: &str,
+    old_image: &Path,
+    new_image: &Path,
+    block_size: u32,
+    mut progress: Option<ApplyProgressCallback>,
 ) -> Result<()> {
     use crate::payload::parse_payload_metadata;
     use prost::Message;
@@ -419,7 +462,34 @@ pub fn apply_partition_payload(
 
     let patcher = Patcher::new(block_size);
 
-    for op in &p_manifest.operations {
+    // Counting raw operations would advance the bar in lockstep with the
+    // operation count, but that ignores how lopsided OTA work actually is:
+    // SOURCE_COPY / ZERO ops typically make up the vast majority of the
+    // operation list while consuming almost no CPU, and BROTLI_BSDIFF /
+    // PUFFDIFF ops make up the long tail of the list while consuming
+    // virtually all of the runtime. The bar would race to ~80 % during
+    // SOURCE_COPY and then stall for tens of seconds during the diff tail.
+    //
+    // Weight each op by `data_length + dst_bytes / 32`:
+    //   * `data_length` is the size of the compressed patch blob the op
+    //     consumes from the payload, which dominates the runtime of every
+    //     diff / replace op (decompress + apply work).
+    //   * `dst_bytes / 32` gives SOURCE_COPY / ZERO ops a small but
+    //     non-zero share so the bar still moves while the partition is
+    //     being seeded, and so partitions that contain no diff ops at all
+    //     do not divide by zero.
+    let total_weight: u64 = p_manifest
+        .operations
+        .iter()
+        .map(|op| operation_progress_weight(op, block_size))
+        .sum();
+    let mut done_weight: u64 = 0;
+
+    if let Some(cb) = progress.as_deref_mut() {
+        cb(0, total_weight);
+    }
+
+    for op in p_manifest.operations.iter() {
         let mut blob = vec![0u8; op.data_length.unwrap_or(0) as usize];
         if !blob.is_empty() {
             payload_file.seek(SeekFrom::Start(data_offset + op.data_offset.unwrap_or(0)))?;
@@ -427,6 +497,11 @@ pub fn apply_partition_payload(
         }
 
         patcher.apply_operation(op, &blob, src_file.as_mut(), &mut dst_file)?;
+
+        done_weight = done_weight.saturating_add(operation_progress_weight(op, block_size));
+        if let Some(cb) = progress.as_deref_mut() {
+            cb(done_weight, total_weight);
+        }
     }
 
     regenerate_verity_hash_tree(p_manifest, &mut dst_file, block_size)?;

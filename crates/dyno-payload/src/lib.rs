@@ -2,7 +2,10 @@ pub mod patcher;
 pub mod payload;
 pub mod puffin;
 
-pub use patcher::{OperationSupportInfo, apply_partition_payload, inspect_operation_support};
+pub use patcher::{
+    ApplyProgressCallback, OperationSupportInfo, apply_partition_payload,
+    apply_partition_payload_with_progress, inspect_operation_support,
+};
 pub use payload::{
     PayloadMetadata, PayloadPartitionInfo, PayloadPreflightReport, UnsupportedOperation,
     extract_payload, inspect_payload, parse_payload_metadata,

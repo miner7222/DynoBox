@@ -7,7 +7,7 @@ use tempfile::TempDir;
 use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
 };
-use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, StageKind};
+use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
 use crate::vendor_spl::{
     VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl,
     validate_spl_format as validate_vendor_spl_format,
@@ -777,6 +777,56 @@ where
     Ok(())
 }
 
+/// Run [`dynobox_payload::apply_partition_payload_with_progress`] and forward
+/// its per-op progress through `events` as throttled
+/// [`ProgressEvent::ItemProgress`] events. Emits when the integer percentage
+/// changes (~100 events per partition) plus a final `done == total` event,
+/// so the CLI bar advances smoothly without spamming tracing output.
+fn apply_payload_with_event_progress<S>(
+    events: &mut S,
+    stage: StageKind,
+    item: &str,
+    payload_path: &Path,
+    old_image: &Path,
+    new_image: &Path,
+    block_size: u32,
+) -> anyhow::Result<()>
+where
+    S: EventSink + ?Sized,
+{
+    let mut last_emitted_pct: i32 = -1;
+    let mut last_emitted_done: u64 = u64::MAX;
+    let mut callback = |done: u64, total: u64| {
+        let pct = if total == 0 {
+            100
+        } else {
+            ((done * 100) / total) as i32
+        };
+        let final_tick = total > 0 && done == total;
+        if pct == last_emitted_pct && !final_tick && last_emitted_done != u64::MAX {
+            return;
+        }
+        last_emitted_pct = pct;
+        last_emitted_done = done;
+        events.emit(ProgressEvent::ItemProgress {
+            stage,
+            item: item.to_string(),
+            done,
+            total,
+            unit: ProgressUnit::Bytes,
+        });
+    };
+    dynobox_payload::apply_partition_payload_with_progress(
+        payload_path,
+        item,
+        old_image,
+        new_image,
+        block_size,
+        Some(&mut callback),
+    )?;
+    Ok(())
+}
+
 fn run_apply_stage<S>(
     input: &Path,
     out_dir: &Path,
@@ -927,9 +977,11 @@ where
                         &recon_src,
                     )?;
                     let temp_new = working_dir.join(format!("{}_new.img", p_info.name));
-                    dynobox_payload::apply_partition_payload(
-                        &payload_path,
+                    apply_payload_with_event_progress(
+                        events,
+                        StageKind::Apply,
                         &p_info.name,
+                        &payload_path,
                         &recon_src,
                         &temp_new,
                         metadata.block_size,
@@ -1021,9 +1073,11 @@ where
             }
 
             let temp_new = working_dir.join(format!("{}_new.img", p_info.name));
-            dynobox_payload::apply_partition_payload(
-                &payload_path,
+            apply_payload_with_event_progress(
+                events,
+                StageKind::Apply,
                 &p_info.name,
+                &payload_path,
                 &src_path,
                 &temp_new,
                 metadata.block_size,

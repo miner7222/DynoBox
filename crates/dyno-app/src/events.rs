@@ -28,6 +28,15 @@ pub enum MessageLevel {
     Warning,
 }
 
+/// Unit attached to a [`ProgressEvent::ItemProgress`] payload so the renderer
+/// can pick a sensible label ("ops", "blocks", "bytes").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ProgressUnit {
+    Bytes,
+    Ops,
+    Blocks,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ProgressEvent {
     CommandStarted {
@@ -46,6 +55,18 @@ pub enum ProgressEvent {
         current: usize,
         total: usize,
         item: String,
+    },
+    /// Granular progress within the most recently started item. `done` and
+    /// `total` are in the same `unit`. Emitted incrementally during long
+    /// running stages (OTA payload apply, dm-verity hash tree regen, FEC
+    /// regen) so the CLI can render a real progress bar instead of an
+    /// undifferentiated spinner.
+    ItemProgress {
+        stage: StageKind,
+        item: String,
+        done: u64,
+        total: u64,
+        unit: ProgressUnit,
     },
     Message {
         level: MessageLevel,

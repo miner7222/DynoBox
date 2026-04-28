@@ -13,6 +13,7 @@ anyhow.workspace = true
 avbtool-rs.workspace = true
 clap.workspace = true
 dynobox-app.workspace = true
+indicatif.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
