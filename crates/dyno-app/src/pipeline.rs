@@ -8,6 +8,10 @@ use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
 };
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, StageKind};
+use crate::vendor_spl::{
+    VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl,
+    validate_spl_format as validate_vendor_spl_format,
+};
 use crate::verify::run_verify_stage;
 
 const PARTITION_IMAGE_EXTENSION_FALLBACK: [&str; 5] = ["img", "bin", "elf", "melf", "mbn"];
@@ -25,6 +29,12 @@ pub struct ResignConfig {
     /// The image is re-signed regardless; the property is only rewritten when
     /// the requested date is strictly newer than the existing one.
     pub boot_spl: Option<String>,
+    /// New `com.android.build.vendor.security_patch` value (YYYY-MM-DD) for
+    /// vendor.img. Triggers an offline byte patch on `/vendor/build.prop`,
+    /// dm-verity hash tree regeneration, and a propagation pass into vbmeta.img
+    /// so the resign loop signs over the new bytes. Skipped (warn-only) when
+    /// the requested date is not strictly newer than the existing value.
+    pub vendor_spl: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1302,6 +1312,9 @@ where
     if let Some(spl) = config.boot_spl.as_deref() {
         validate_spl_format(spl)?;
     }
+    if let Some(spl) = config.vendor_spl.as_deref() {
+        validate_vendor_spl_format(spl)?;
+    }
 
     recreate_dir(out_dir)?;
 
@@ -1309,7 +1322,7 @@ where
     copy_all_top_level_files(input, out_dir)?;
 
     let all_images = collect_resignable_images(input)?;
-    let images: Vec<PathBuf> = match config.rollback_index {
+    let mut images: Vec<PathBuf> = match config.rollback_index {
         Some(_) => all_images
             .into_iter()
             .filter(|p| {
@@ -1346,6 +1359,78 @@ where
                     new_ri,
                     current_ri
                 ));
+            }
+        }
+    }
+
+    let mut vendor_spl_applied: Option<(String, String, String)> = None;
+    if let Some(new_spl) = config.vendor_spl.as_deref() {
+        let vendor_path = out_dir.join("vendor.img");
+        let vbmeta_path = out_dir.join("vbmeta.img");
+        if !vendor_path.exists() {
+            return Err(anyhow::anyhow!(
+                "--vendor-spl requested but vendor.img was not found under {}",
+                out_dir.display()
+            ));
+        }
+        if !vbmeta_path.exists() {
+            return Err(anyhow::anyhow!(
+                "--vendor-spl requested but vbmeta.img was not found under {}",
+                out_dir.display()
+            ));
+        }
+        ensure_local_inode(&vendor_path)?;
+        ensure_local_inode(&vbmeta_path)?;
+        match apply_vendor_spl(&vendor_path, &vbmeta_path, new_spl)? {
+            VendorSplOutcome::Patched {
+                old,
+                new,
+                old_root_digest,
+                new_root_digest,
+            } => {
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!(
+                        "vendor.img {} bumped from {} to {} (build.prop + AVB property + dm-verity root digest {} -> {})",
+                        VENDOR_SPL_PROPERTY,
+                        old,
+                        new,
+                        &old_root_digest[..16.min(old_root_digest.len())],
+                        &new_root_digest[..16.min(new_root_digest.len())]
+                    ),
+                );
+                vendor_spl_applied = Some((old, new, new_root_digest));
+            }
+            VendorSplOutcome::SkippedNotNewer { old, requested } => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    format!(
+                        "vendor.img {} not bumped: requested {} is not newer than current {}; re-signing without SPL change",
+                        VENDOR_SPL_PROPERTY, requested, old
+                    ),
+                );
+            }
+            VendorSplOutcome::NotFound => {
+                return Err(anyhow::anyhow!(
+                    "vendor.img has no {} property descriptor; cannot apply --vendor-spl",
+                    VENDOR_SPL_PROPERTY
+                ));
+            }
+        }
+        // The vbmeta.img patch above leaves a stale signature behind; make
+        // sure the resign loop will pick it up below even if a future caller
+        // tries to combine --vendor-spl with another filter.
+        if vendor_spl_applied.is_some() {
+            let already_listed = images.iter().any(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n == "vbmeta.img")
+                    .unwrap_or(false)
+            });
+            if !already_listed {
+                images.push(vbmeta_path.clone());
             }
         }
     }
@@ -1473,6 +1558,25 @@ where
                             "Post-resign verification failed for {}: {} is {:?} but expected {:?}",
                             filename,
                             BOOT_SPL_PROPERTY,
+                            other,
+                            expected_spl
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some((_, ref expected_spl, _)) = vendor_spl_applied {
+            if filename == "vbmeta.img" {
+                let actual = crate::vendor_spl::read_vendor_avb_property(&out_path)
+                    .with_context(|| format!("Failed to re-read vendor SPL from {}", filename))?;
+                match actual.as_deref() {
+                    Some(value) if value == expected_spl => {}
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "Post-resign verification failed for {}: {} is {:?} but expected {:?}",
+                            filename,
+                            VENDOR_SPL_PROPERTY,
                             other,
                             expected_spl
                         ));
@@ -1700,13 +1804,30 @@ fn collect_resignable_images(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
             }
 
             if let Ok(img_type) = avbtool_rs::parser::detect_avb_image_type(&path) {
-                if img_type != avbtool_rs::parser::AvbImageType::None {
+                if img_type != avbtool_rs::parser::AvbImageType::None
+                    && image_has_parseable_descriptors(&path)
+                {
                     images.push(path);
                 }
             }
         }
     }
     Ok(images)
+}
+
+/// Probe `path` with the AVB info scanner. Some images carry a footer magic
+/// but malformed descriptors (notably recovery.img produced by certain Lenovo
+/// OTA payloads); the resign code cannot walk those and would abort the whole
+/// stage. Skip them at collection time so the stage can still process the
+/// rest of the image set.
+fn image_has_parseable_descriptors(path: &Path) -> bool {
+    match avbtool_rs::info::scan_input(path) {
+        Ok(entries) => entries
+            .into_iter()
+            .next()
+            .is_some_and(|entry| matches!(entry.result, avbtool_rs::info::ScanResult::Avb(_))),
+        Err(_) => false,
+    }
 }
 
 use crate::verify::collect_split_fragment_filenames;
@@ -2329,6 +2450,7 @@ mod tests {
             force: false,
             rollback_index: None,
             boot_spl: None,
+            vendor_spl: None,
         }
     }
 

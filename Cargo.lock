@@ -496,6 +496,7 @@ dependencies = [
  "dynobox-payload",
  "dynobox-super",
  "dynobox-xml",
+ "memchr",
  "serde",
  "tempfile",
 ]

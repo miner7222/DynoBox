@@ -1,6 +1,7 @@
 pub mod boot_spl;
 pub mod events;
 pub mod pipeline;
+pub mod vendor_spl;
 pub mod verify;
 
 pub use events::{CommandKind, EventSink, MessageLevel, NoopEventSink, ProgressEvent, StageKind};

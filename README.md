@@ -9,14 +9,14 @@ Pure Rust firmware and OTA toolkit extracted from LTBox.
 - re-sign AVB images with test keys
 - repack dynamic partitions back into split `super_*.img`
 - scan AVB metadata from one image or a whole directory
-- bump boot security patch level
+- bump boot & vendor security patch level
 
 ## Current Commands
 
 ```powershell
-dynobox unpack --input <firmware_dir> [--output <dir>] [resign -k <key>] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [repack] [--complete]
-dynobox apply --input <firmware_dir> [--output <dir>] <ota1.zip> ... [resign -k <key>] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [repack] [--complete]
-dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [repack]
+dynobox unpack --input <firmware_dir> [--output <dir>] [resign -k <key>] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [repack] [--complete]
+dynobox apply --input <firmware_dir> [--output <dir>] <ota1.zip> ... [resign -k <key>] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [repack] [--complete]
+dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [repack]
 dynobox repack --input <image_dir> [--output <dir>]
 dynobox info --input <image_or_dir> [--format text|json] [--output <report.txt>]
 dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt>]

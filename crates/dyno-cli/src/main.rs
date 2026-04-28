@@ -81,6 +81,13 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_boot_spl, requires = "resign")]
         boot_spl: Option<String>,
 
+        /// Bump vendor.img `com.android.build.vendor.security_patch` to this
+        /// YYYY-MM-DD date during resign. Patches `/vendor/build.prop`,
+        /// regenerates the dm-verity hash tree, and propagates the new value
+        /// and root digest into vbmeta.img so the resign loop signs over them.
+        #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl, requires = "resign")]
+        vendor_spl: Option<String>,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -130,6 +137,13 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_boot_spl)]
         boot_spl: Option<String>,
 
+        /// Bump vendor.img `com.android.build.vendor.security_patch` to this
+        /// YYYY-MM-DD date during resign. Patches `/vendor/build.prop`,
+        /// regenerates the dm-verity hash tree, and propagates the new value
+        /// and root digest into vbmeta.img so the resign loop signs over them.
+        #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl)]
+        vendor_spl: Option<String>,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -172,6 +186,13 @@ enum Commands {
         /// only rewritten when the requested date is strictly newer than the current.
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_boot_spl)]
         boot_spl: Option<String>,
+
+        /// Bump vendor.img `com.android.build.vendor.security_patch` to this
+        /// YYYY-MM-DD date during resign. Patches `/vendor/build.prop`,
+        /// regenerates the dm-verity hash tree, and propagates the new value
+        /// and root digest into vbmeta.img so the resign loop signs over them.
+        #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl)]
+        vendor_spl: Option<String>,
 
         /// Repack dynamic partitions back into super after resign
         #[arg(long)]
@@ -285,6 +306,7 @@ fn make_resign_config(
     force: bool,
     rollback_index: Option<u64>,
     boot_spl: Option<String>,
+    vendor_spl: Option<String>,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
         key,
@@ -292,11 +314,18 @@ fn make_resign_config(
         force,
         rollback_index,
         boot_spl,
+        vendor_spl,
     })
 }
 
 fn parse_boot_spl(value: &str) -> Result<String, String> {
     dynobox_app::boot_spl::validate_spl_format(value)
+        .map(|_| value.to_string())
+        .map_err(|e| e.to_string())
+}
+
+fn parse_vendor_spl(value: &str) -> Result<String, String> {
+    dynobox_app::vendor_spl::validate_spl_format(value)
         .map(|_| value.to_string())
         .map_err(|e| e.to_string())
 }
@@ -386,6 +415,7 @@ fn main() -> anyhow::Result<()> {
             force,
             rollback,
             boot_spl,
+            vendor_spl,
             complete,
         } => {
             if resign && key.is_none() {
@@ -397,7 +427,7 @@ fn main() -> anyhow::Result<()> {
             let request = UnpackRequest {
                 input,
                 output: out_dir,
-                resign: make_resign_config(key, algorithm, force, rollback, boot_spl),
+                resign: make_resign_config(key, algorithm, force, rollback, boot_spl, vendor_spl),
                 repack,
                 complete,
             };
@@ -417,6 +447,7 @@ fn main() -> anyhow::Result<()> {
             force,
             rollback,
             boot_spl,
+            vendor_spl,
             complete,
             ota_zips,
         } => {
@@ -440,7 +471,7 @@ fn main() -> anyhow::Result<()> {
                 output: out_dir,
                 ota_zips: real_zips,
                 force_unpack: unpack,
-                resign: make_resign_config(key, algorithm, force, rollback, boot_spl),
+                resign: make_resign_config(key, algorithm, force, rollback, boot_spl, vendor_spl),
                 repack,
                 complete,
             };
@@ -457,6 +488,7 @@ fn main() -> anyhow::Result<()> {
             force,
             rollback,
             boot_spl,
+            vendor_spl,
             repack,
         } => {
             let out_dir = resolve_output_dir(output, default_output_name_for_resign(repack));
@@ -469,6 +501,7 @@ fn main() -> anyhow::Result<()> {
                     force,
                     rollback_index: rollback,
                     boot_spl,
+                    vendor_spl,
                 },
                 repack,
             };
