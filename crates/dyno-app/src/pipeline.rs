@@ -1052,7 +1052,7 @@ where
                             let extracted = dynobox_super::extract_partition_images(
                                 layout,
                                 &auto_unpack_dir,
-                                Some(&[p_info.name.clone()]),
+                                Some(std::slice::from_ref(&p_info.name)),
                             )?;
                             if let Some(path) = extracted.get(&p_info.name) {
                                 filename = format!("{}.img", p_info.name);
@@ -1187,7 +1187,7 @@ fn find_split_source_fragments(
     } else if !slot_none.is_empty() {
         slot_none
     } else {
-        matches.iter().copied().collect()
+        matches.to_vec()
     };
     let mut parsed: Vec<(String, u64, u64, u64)> = selected
         .into_iter()

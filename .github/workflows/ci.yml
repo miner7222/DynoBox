@@ -1,14 +1,68 @@
 name: CI
 
+# Doc-only churn does not exercise any of the rust gates below, so paths-ignore
+# skips runs whose entire diff is markdown / vault / license edits. Keeps the
+# CI cost down without losing real signal.
+
+concurrency:
+  group: ci-${{ github.ref_name }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'ObsidianVault/**'
+      - 'LICENSE'
   pull_request:
+    paths-ignore:
+      - '*.md'
+      - '**/*.md'
+      - 'ObsidianVault/**'
+      - 'LICENSE'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
 
 jobs:
+  fmt-clippy:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (toolchain pinned by rust-toolchain.toml)
+        # `dtolnay/rust-toolchain` always installs whatever its `toolchain:`
+        # input resolves to and attaches `components:` to THAT toolchain —
+        # independent of `rust-toolchain.toml`. Cargo then switches to the
+        # toml's pinned channel and finds no components there. rustup is
+        # preinstalled on ubuntu-latest, `rustup show` triggers the
+        # toml-driven install, then `component add` lands on the active
+        # pinned toolchain.
+        run: |
+          rustup show
+          rustup component add rustfmt clippy
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fmt-clippy
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   test:
     name: test (${{ matrix.os }})
+    needs: fmt-clippy
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -22,22 +76,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.94.1
-          components: rustfmt
+      - name: Install Rust (toolchain pinned by rust-toolchain.toml)
+        run: rustup show
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.os }}
 
-      - name: cargo fmt
-        run: cargo fmt --all --check
-
-      - name: cargo check
-        run: cargo check --workspace
-
-      - name: cargo test
+      - name: cargo test --workspace
         run: cargo test --workspace
 
   release:

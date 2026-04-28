@@ -222,7 +222,7 @@ fn find_property_descriptor(
             let value_len = u64::from_be_bytes(body[24..32].try_into().unwrap()) as usize;
             let key_start = PROPERTY_DESCRIPTOR_SIZE;
             let value_start = key_start + key_len + 1;
-            if body.len() >= value_start + value_len + 1 {
+            if body.len() > value_start + value_len {
                 let key_bytes = &body[key_start..key_start + key_len];
                 if key_bytes == target_key.as_bytes() {
                     let current_value =

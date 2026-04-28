@@ -19,3 +19,6 @@ tempfile.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 zerocopy = { version = "0.8", features = ["derive"] }
+
+[lints]
+workspace = true

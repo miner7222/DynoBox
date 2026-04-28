@@ -1,3 +1,9 @@
+// `set_var` is `unsafe` since Rust 1.95; no other thread is running during a
+// build script's `main`, so calling it here is sound. The workspace's
+// `unsafe_code = "forbid"` lint applies to runtime code only, but build
+// scripts inherit the same workspace lints, so opt this single block out.
+#![allow(unsafe_code)]
+
 fn main() {
     // Compile Protobuf for Rust
     unsafe {

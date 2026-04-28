@@ -26,3 +26,6 @@ cc = "1.2.61"
 cmake = "0.1.58"
 prost-build = "0.14"
 protoc-bin-vendored = "3.2.0"
+
+[lints]
+workspace = true

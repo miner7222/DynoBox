@@ -61,6 +61,7 @@ impl Patcher {
                 })?;
                 self.copy_extents(src_fd, target_file, &op.src_extents, &op.dst_extents)?;
             }
+            #[allow(deprecated)]
             Type::SourceBsdiff | Type::Bsdiff | Type::BrotliBsdiff => {
                 let src_fd = source_file.ok_or_else(|| {
                     DynoError::Tool("Source file required for BSDIFF operation".into())
@@ -293,6 +294,7 @@ pub fn inspect_operation_support(
         Type::Zero => supported("ZERO"),
         Type::SourceCopy => supported("SOURCE_COPY"),
         Type::SourceBsdiff => supported("SOURCE_BSDIFF"),
+        #[allow(deprecated)]
         Type::Bsdiff => supported("BSDIFF"),
         Type::BrotliBsdiff => supported("BROTLI_BSDIFF"),
         Type::Lz4diffBsdiff => supported("LZ4DIFF_BSDIFF"),

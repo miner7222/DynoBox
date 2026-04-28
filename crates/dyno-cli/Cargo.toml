@@ -22,3 +22,6 @@ tracing-subscriber.workspace = true
 [[bin]]
 name = "dynobox"
 path = "src/main.rs"
+
+[lints]
+workspace = true

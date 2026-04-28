@@ -9,3 +9,6 @@ description = "Shared orchestration and workspace types for the DynoBox Rust wor
 
 [dependencies]
 thiserror.workspace = true
+
+[lints]
+workspace = true
