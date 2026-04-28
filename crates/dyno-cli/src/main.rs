@@ -70,8 +70,8 @@ enum Commands {
         #[arg(long, requires = "resign")]
         force: bool,
 
-        /// Reset rollback_index of boot.img and vbmeta_system.img to this Unix timestamp
-        /// (must be <= each image's current rollback_index). Other images are skipped.
+        /// Override AVB rollback_index of boot.img and vbmeta_system.img with this Unix timestamp.
+        /// A confirmation prompt shows old/new dates in UTC; answering n (or non-interactive stdin) skips the rollback rewrite and the rest of the resign stage runs normally.
         #[arg(long, value_name = "UNIX_TIMESTAMP", requires = "resign")]
         rollback: Option<u64>,
 
@@ -126,8 +126,8 @@ enum Commands {
         #[arg(long)]
         force: bool,
 
-        /// Reset rollback_index of boot.img and vbmeta_system.img to this Unix timestamp
-        /// (must be <= each image's current rollback_index). Other images are skipped.
+        /// Override AVB rollback_index of boot.img and vbmeta_system.img with this Unix timestamp.
+        /// A confirmation prompt shows old/new dates in UTC; answering n (or non-interactive stdin) skips the rollback rewrite and the rest of the resign stage runs normally.
         #[arg(long, value_name = "UNIX_TIMESTAMP")]
         rollback: Option<u64>,
 
@@ -176,8 +176,8 @@ enum Commands {
         #[arg(long)]
         force: bool,
 
-        /// Reset rollback_index of boot.img and vbmeta_system.img to this Unix timestamp
-        /// (must be <= each image's current rollback_index). Other images are skipped.
+        /// Override AVB rollback_index of boot.img and vbmeta_system.img with this Unix timestamp.
+        /// A confirmation prompt shows old/new dates in UTC; answering n (or non-interactive stdin) skips the rollback rewrite and the rest of the resign stage runs normally.
         #[arg(long, value_name = "UNIX_TIMESTAMP")]
         rollback: Option<u64>,
 

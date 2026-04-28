@@ -10,6 +10,7 @@ Pure Rust firmware and OTA toolkit extracted from LTBox.
 - repack dynamic partitions back into split `super_*.img`
 - scan AVB metadata from one image or a whole directory
 - bump boot & vendor security patch level
+- modify AVB rollback_index
 
 ## Current Commands
 
@@ -40,15 +41,6 @@ dynobox apply --input TB322_ZUXOS_1.5.10.063_Tool\image 063to117.zip 117to183.zi
 - `apply` runs a preflight scan before patching and a postflight verification pass after output is written.
 - All pipeline commands support `--progress-format text|jsonl` for machine-readable progress.
 - `verify` runs same verification engine directly and exits non-zero when failures are found.
-
-### Rollback Index Reset
-
-`--rollback <unix_ts>` restricts the resign stage to `boot.img` and `vbmeta_system.img` only, rewrites each image's AVB `rollback_index` to the supplied Unix timestamp, and re-signs with the provided key. The new value must be less than or equal to each target image's current `rollback_index`; a higher value is rejected with an error message and no changes are written. The completion message shows the timestamp in `Thu Feb 26 02:40:50 UTC 2026` form.
-
-```powershell
-dynobox resign --input <image_dir> --output <dir> --key testkey_rsa4096 --rollback 1700000000
-dynobox apply --input <firmware_dir> <ota.zip> resign --key testkey_rsa4096 --rollback 1700000000 --output <dir>
-```
 
 ## Workspace Layout
 

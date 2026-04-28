@@ -1322,45 +1322,72 @@ where
     copy_all_top_level_files(input, out_dir)?;
 
     let all_images = collect_resignable_images(input)?;
-    let mut images: Vec<PathBuf> = match config.rollback_index {
-        Some(_) => all_images
-            .into_iter()
+
+    // Resolve --rollback. The flag's purpose is to override the AVB
+    // rollback_index on boot.img / vbmeta_system.img so an older firmware can
+    // be installed on a device whose anti-rollback counter has already been
+    // raised; either lowering or raising the value is a legitimate operation.
+    // Show the old/new pair in UTC date form and ask the user to confirm
+    // before any image is touched. Answering `n` (or running on a
+    // non-interactive stdin, e.g. `--progress-format jsonl`) skips the
+    // rollback override; the rest of the resign stage continues normally and
+    // every resignable image is re-signed without rollback rewrites.
+    let mut effective_rollback: Option<u64> = None;
+    let mut images: Vec<PathBuf>;
+    if let Some(new_ri) = config.rollback_index {
+        let filtered: Vec<PathBuf> = all_images
+            .iter()
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
                     .map(|n| ROLLBACK_TARGETS.contains(&n))
                     .unwrap_or(false)
             })
-            .collect(),
-        None => all_images,
-    };
-
-    if let Some(new_ri) = config.rollback_index {
-        if images.is_empty() {
+            .cloned()
+            .collect();
+        if filtered.is_empty() {
             return Err(anyhow::anyhow!(
                 "--rollback requested but none of {:?} were found under {}",
                 ROLLBACK_TARGETS,
                 input.display()
             ));
         }
-        // Safety check: new rollback_index must be <= each target image's current value.
-        for path in &images {
+        let mut current_ris: Vec<(PathBuf, u64)> = Vec::with_capacity(filtered.len());
+        for path in &filtered {
             let filename = path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
             let current_ri = read_rollback_index(path)
                 .with_context(|| format!("Failed to read rollback_index from {}", filename))?;
-            if new_ri > current_ri {
-                return Err(anyhow::anyhow!(
-                    "Refusing --rollback for {}: requested rollback_index {} exceeds original {}. \
-                     The new value must be less than or equal to the original.",
-                    filename,
-                    new_ri,
-                    current_ri
-                ));
+            current_ris.push((path.clone(), current_ri));
+        }
+        match confirm_rollback_change(&current_ris, new_ri)? {
+            RollbackConfirmation::Accepted => {
+                effective_rollback = Some(new_ri);
+                images = filtered;
+            }
+            RollbackConfirmation::DeclinedByUser => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    "rollback index reset declined by user; continuing without rollback override (all resignable images will be re-signed normally).".to_string(),
+                );
+                effective_rollback = None;
+                images = all_images;
+            }
+            RollbackConfirmation::SkippedNonInteractive => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    "rollback index reset skipped because stdin is not a terminal (cannot prompt); continuing without rollback override.".to_string(),
+                );
+                effective_rollback = None;
+                images = all_images;
             }
         }
+    } else {
+        images = all_images;
     }
 
     let mut vendor_spl_applied: Option<(String, String, String)> = None;
@@ -1505,7 +1532,7 @@ where
         // images go through this guard so the resign write hits a private inode.
         ensure_local_inode(&out_path)?;
 
-        let result = match config.rollback_index {
+        let result = match effective_rollback {
             Some(ri) => avbtool_rs::resign::resign_image_with_options(
                 &out_path,
                 &config.key,
@@ -1534,7 +1561,7 @@ where
             }
         }
 
-        if let Some(expected_ri) = config.rollback_index {
+        if let Some(expected_ri) = effective_rollback {
             let actual_ri = read_rollback_index(&out_path)
                 .with_context(|| format!("Failed to re-read rollback_index from {}", filename))?;
             if actual_ri != expected_ri {
@@ -1586,7 +1613,7 @@ where
         }
     }
 
-    if let Some(ri) = config.rollback_index {
+    if let Some(ri) = effective_rollback {
         message(
             events,
             MessageLevel::Info,
@@ -1666,6 +1693,64 @@ fn format_unix_timestamp_utc(ts: u64) -> String {
     ][(m - 1) as usize];
 
     format!("{weekday} {month} {d:2} {hour:02}:{minute:02}:{second:02} UTC {year}")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollbackConfirmation {
+    Accepted,
+    DeclinedByUser,
+    SkippedNonInteractive,
+}
+
+/// Print the current and requested AVB `rollback_index` for each target image
+/// in UTC date form and prompt the operator with `[y/N]`. Skips automatically
+/// (returns `SkippedNonInteractive`) when stdin is not a terminal — typical
+/// for `--progress-format jsonl` and CI invocations — so the rest of the
+/// pipeline can keep running without blocking on a prompt nobody can answer.
+fn confirm_rollback_change(
+    current_ris: &[(PathBuf, u64)],
+    new_ri: u64,
+) -> anyhow::Result<RollbackConfirmation> {
+    use std::io::{IsTerminal, Write};
+
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    writeln!(handle, "About to rewrite AVB rollback_index:")?;
+    for (path, current_ri) in current_ris {
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        writeln!(
+            handle,
+            "  {filename}: {current_ri} ({}) -> {new_ri} ({})",
+            format_unix_timestamp_utc(*current_ri),
+            format_unix_timestamp_utc(new_ri),
+        )?;
+    }
+    write!(handle, "Proceed with rollback rewrite? [y/N] ")?;
+    handle.flush()?;
+    drop(handle);
+
+    if !std::io::stdin().is_terminal() {
+        let stdout = std::io::stdout();
+        let mut handle = stdout.lock();
+        writeln!(
+            handle,
+            "(stdin is not a terminal — skipping rollback rewrite)"
+        )?;
+        handle.flush()?;
+        return Ok(RollbackConfirmation::SkippedNonInteractive);
+    }
+
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    let trimmed = answer.trim().to_ascii_lowercase();
+    if trimmed == "y" || trimmed == "yes" {
+        Ok(RollbackConfirmation::Accepted)
+    } else {
+        Ok(RollbackConfirmation::DeclinedByUser)
+    }
 }
 
 fn run_repack_stage<S>(input: &Path, out_dir: &Path, events: &mut S) -> anyhow::Result<()>
