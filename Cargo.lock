@@ -500,7 +500,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-app"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "avbtool-rs",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "avbtool-rs",
@@ -532,14 +532,14 @@ dependencies = [
 
 [[package]]
 name = "dynobox-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "dynobox-payload"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "brotli",
  "brotli-sys",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-super"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "crc32fast",
  "dynobox-core",
@@ -575,7 +575,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-xml"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "aes",
  "cbc",
