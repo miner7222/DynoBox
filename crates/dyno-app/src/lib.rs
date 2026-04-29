@@ -1,3 +1,4 @@
+pub mod avb_descriptor;
 pub mod boot_spl;
 pub mod events;
 pub mod ext4_reader;

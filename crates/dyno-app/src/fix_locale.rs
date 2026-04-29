@@ -45,23 +45,16 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use avbtool_rs::footer::{calc_hash_level_offsets, generate_hash_tree};
-use avbtool_rs::parser::{
-    AVB_FOOTER_SIZE, AVB_VBMETA_IMAGE_HEADER_SIZE, AvbFooter, AvbImageType, AvbVBMetaHeader,
-    detect_avb_image_type,
-};
 use memchr::memmem;
 
+use crate::avb_descriptor::{
+    SHA256_DIGEST_SIZE, hex_encode, patch_hashtree_root_digest, read_hashtree_params,
+    regenerate_hashtree,
+};
 use crate::ext4_reader::{Ext4Volume, Inode};
 
 const ANTI_CROSS_SELL_STRING: &str = "ZuiAntiCrossSell";
 const FRAMEWORK_JAR_PATH: &[&str] = &["system", "framework", "framework.jar"];
-
-const DESCRIPTOR_HEADER_SIZE: usize = 16;
-const HASHTREE_DESCRIPTOR_FIXED_SIZE: usize = 180;
-const DESCRIPTOR_TAG_HASHTREE: u64 = 1;
-const SHA256_DIGEST_SIZE: usize = 32;
-
 const SYSTEM_PARTITION_NAME: &str = "system";
 
 /// Outcome of an attempted `--fix-locale` pass.
@@ -197,12 +190,12 @@ pub fn apply_fix_locale(
 
     // 7. Patch system.img's footer Hashtree descriptor (NONE algorithm —
     //    no signature, descriptor body is rewritten in place).
-    patch_image_hashtree_root_digest(system_image, SYSTEM_PARTITION_NAME, &new_root_digest)?;
+    patch_hashtree_root_digest(system_image, SYSTEM_PARTITION_NAME, &new_root_digest)?;
 
     // 8. Patch vbmeta_system.img's embedded Hashtree descriptor for
     //    `system`. The image is signed; the resign loop will refresh the
     //    signature after this module returns.
-    patch_image_hashtree_root_digest(vbmeta_system_image, SYSTEM_PARTITION_NAME, &new_root_digest)?;
+    patch_hashtree_root_digest(vbmeta_system_image, SYSTEM_PARTITION_NAME, &new_root_digest)?;
 
     Ok(FixLocaleOutcome::Patched {
         dex_entry: target.entry.name.clone(),
@@ -747,283 +740,6 @@ fn crc32_ieee(data: &[u8]) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// AVB descriptor read / Hashtree regen (mirrors vendor_spl, kept local
-// here so the system.img path can grow asymmetric handling without
-// destabilising vendor.img patches).
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone)]
-struct HashtreeParams {
-    image_size: u64,
-    tree_offset: u64,
-    tree_size: u64,
-    data_block_size: u32,
-    hash_algorithm: String,
-    salt: Vec<u8>,
-    root_digest: Vec<u8>,
-}
-
-fn read_hashtree_params(
-    image_path: &Path,
-    target_partition: &str,
-) -> Result<Option<HashtreeParams>> {
-    let (_, vbmeta_blob) = read_vbmeta_blob(image_path)?;
-    if vbmeta_blob.len() < AVB_VBMETA_IMAGE_HEADER_SIZE {
-        return Ok(None);
-    }
-    let header = AvbVBMetaHeader::from_reader(&vbmeta_blob[..AVB_VBMETA_IMAGE_HEADER_SIZE])?;
-    let descriptors = descriptors_slice(&vbmeta_blob, &header)?;
-
-    let mut cursor = 0usize;
-    while cursor < descriptors.len() {
-        let remaining = &descriptors[cursor..];
-        if remaining.len() < DESCRIPTOR_HEADER_SIZE {
-            break;
-        }
-        let tag = u64::from_be_bytes(remaining[0..8].try_into().unwrap());
-        let num_bytes_following = u64::from_be_bytes(remaining[8..16].try_into().unwrap()) as usize;
-        let total = DESCRIPTOR_HEADER_SIZE + num_bytes_following;
-        if total > remaining.len() {
-            break;
-        }
-        if tag == DESCRIPTOR_TAG_HASHTREE && total >= HASHTREE_DESCRIPTOR_FIXED_SIZE {
-            let body = &remaining[..total];
-            let image_size = u64::from_be_bytes(body[20..28].try_into().unwrap());
-            let tree_offset = u64::from_be_bytes(body[28..36].try_into().unwrap());
-            let tree_size = u64::from_be_bytes(body[36..44].try_into().unwrap());
-            let data_block_size = u32::from_be_bytes(body[44..48].try_into().unwrap());
-            let hash_algorithm = read_cstring(&body[72..104]);
-            let partition_name_len =
-                u32::from_be_bytes(body[104..108].try_into().unwrap()) as usize;
-            let salt_len = u32::from_be_bytes(body[108..112].try_into().unwrap()) as usize;
-            let root_digest_len = u32::from_be_bytes(body[112..116].try_into().unwrap()) as usize;
-            let payload = &body[HASHTREE_DESCRIPTOR_FIXED_SIZE..];
-            if payload.len() < partition_name_len + salt_len + root_digest_len {
-                break;
-            }
-            let partition_name = std::str::from_utf8(&payload[..partition_name_len])
-                .context("Hashtree partition_name is not UTF-8")?;
-            if partition_name == target_partition {
-                let salt = payload[partition_name_len..partition_name_len + salt_len].to_vec();
-                let root_digest = payload[partition_name_len + salt_len
-                    ..partition_name_len + salt_len + root_digest_len]
-                    .to_vec();
-                return Ok(Some(HashtreeParams {
-                    image_size,
-                    tree_offset,
-                    tree_size,
-                    data_block_size,
-                    hash_algorithm,
-                    salt,
-                    root_digest,
-                }));
-            }
-        }
-        cursor += total;
-    }
-    Ok(None)
-}
-
-fn regenerate_hashtree(image_path: &Path, params: &HashtreeParams) -> Result<Vec<u8>> {
-    let block_size = params.data_block_size as u64;
-    if block_size == 0 {
-        return Err(anyhow!("Hashtree descriptor reports zero data_block_size"));
-    }
-    let digest_size = match params.hash_algorithm.as_str() {
-        "sha256" => 32u64,
-        other => {
-            return Err(anyhow!(
-                "Unsupported hash algorithm {} for system.img verity regeneration",
-                other
-            ));
-        }
-    };
-    let digest_padding = next_pow2(digest_size) - digest_size;
-    let (hash_level_offsets, expected_tree_size) =
-        calc_hash_level_offsets(params.image_size, block_size, digest_size + digest_padding);
-    if expected_tree_size != params.tree_size {
-        return Err(anyhow!(
-            "Computed hash tree size {} does not match descriptor's tree_size {}",
-            expected_tree_size,
-            params.tree_size
-        ));
-    }
-    let (root_digest, hash_tree_blob) = generate_hash_tree(
-        image_path,
-        params.image_size,
-        params.data_block_size,
-        &params.hash_algorithm,
-        &params.salt,
-        digest_padding as usize,
-        &hash_level_offsets,
-        params.tree_size,
-    )
-    .map_err(|e| anyhow!("generate_hash_tree failed for system.img: {e}"))?;
-
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(image_path)
-        .with_context(|| {
-            format!(
-                "Failed to open {} for hash tree write",
-                image_path.display()
-            )
-        })?;
-    file.seek(SeekFrom::Start(params.tree_offset))?;
-    file.write_all(&hash_tree_blob)?;
-    file.flush()?;
-    Ok(root_digest)
-}
-
-/// Patch the `root_digest` of the Hashtree descriptor matching
-/// `target_partition` inside `image_path`'s vbmeta blob (footer or
-/// standalone). Length-stable 32-byte overwrite.
-fn patch_image_hashtree_root_digest(
-    image_path: &Path,
-    target_partition: &str,
-    new_root_digest: &[u8],
-) -> Result<()> {
-    let (vbmeta_offset, vbmeta_blob) = read_vbmeta_blob(image_path)?;
-    let header = AvbVBMetaHeader::from_reader(&vbmeta_blob[..AVB_VBMETA_IMAGE_HEADER_SIZE])?;
-    let aux_offset_in_blob =
-        AVB_VBMETA_IMAGE_HEADER_SIZE + header.authentication_data_block_size as usize;
-    let descriptors_start = aux_offset_in_blob + header.descriptors_offset as usize;
-    let descriptors_size = header.descriptors_size as usize;
-    let descriptors_blob = &vbmeta_blob[descriptors_start..descriptors_start + descriptors_size];
-
-    let hit = find_hashtree_descriptor(descriptors_blob, target_partition)?.ok_or_else(|| {
-        anyhow!(
-            "{} has no Hashtree descriptor for `{}`",
-            image_path.display(),
-            target_partition
-        )
-    })?;
-    if hit.root_digest_len != new_root_digest.len() {
-        return Err(anyhow!(
-            "{} Hashtree root_digest is {} bytes; cannot replace with {} bytes",
-            image_path.display(),
-            hit.root_digest_len,
-            new_root_digest.len()
-        ));
-    }
-
-    let digest_file_offset = vbmeta_offset
-        + descriptors_start as u64
-        + hit.descriptor_offset_in_blob as u64
-        + hit.root_digest_offset_in_descriptor as u64;
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image_path)
-        .with_context(|| {
-            format!(
-                "Failed to open {} for Hashtree root_digest patch",
-                image_path.display()
-            )
-        })?;
-    file.seek(SeekFrom::Start(digest_file_offset))?;
-    file.write_all(new_root_digest)?;
-    file.flush()?;
-    Ok(())
-}
-
-fn read_vbmeta_blob(image_path: &Path) -> Result<(u64, Vec<u8>)> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .open(image_path)
-        .with_context(|| format!("Failed to open {} for vbmeta read", image_path.display()))?;
-    let file_size = file.metadata()?.len();
-    let img_type = detect_avb_image_type(image_path)?;
-    let (vbmeta_offset, vbmeta_size) = match img_type {
-        AvbImageType::Vbmeta => (0u64, file_size),
-        AvbImageType::Footer => {
-            file.seek(SeekFrom::End(-(AVB_FOOTER_SIZE as i64)))?;
-            let footer = AvbFooter::from_reader(&mut file)?;
-            (footer.vbmeta_offset, footer.vbmeta_size)
-        }
-        AvbImageType::None => {
-            return Err(anyhow!("{} is not an AVB image", image_path.display()));
-        }
-    };
-    let mut blob = vec![0u8; vbmeta_size as usize];
-    file.seek(SeekFrom::Start(vbmeta_offset))?;
-    file.read_exact(&mut blob)?;
-    Ok((vbmeta_offset, blob))
-}
-
-fn descriptors_slice<'a>(vbmeta_blob: &'a [u8], header: &AvbVBMetaHeader) -> Result<&'a [u8]> {
-    let aux_offset_in_blob =
-        AVB_VBMETA_IMAGE_HEADER_SIZE + header.authentication_data_block_size as usize;
-    let descriptors_start = aux_offset_in_blob + header.descriptors_offset as usize;
-    let descriptors_end = descriptors_start + header.descriptors_size as usize;
-    if descriptors_end > vbmeta_blob.len() {
-        return Err(anyhow!(
-            "Descriptors range {}..{} exceeds vbmeta blob length {}",
-            descriptors_start,
-            descriptors_end,
-            vbmeta_blob.len()
-        ));
-    }
-    Ok(&vbmeta_blob[descriptors_start..descriptors_end])
-}
-
-#[derive(Debug, Clone)]
-struct HashtreeHit {
-    descriptor_offset_in_blob: usize,
-    root_digest_offset_in_descriptor: usize,
-    root_digest_len: usize,
-}
-
-fn find_hashtree_descriptor(
-    descriptors_blob: &[u8],
-    target_partition: &str,
-) -> Result<Option<HashtreeHit>> {
-    let mut cursor = 0usize;
-    while cursor < descriptors_blob.len() {
-        let remaining = &descriptors_blob[cursor..];
-        if remaining.len() < DESCRIPTOR_HEADER_SIZE {
-            return Err(anyhow!(
-                "Descriptor blob ends mid-header at offset {}",
-                cursor
-            ));
-        }
-        let tag = u64::from_be_bytes(remaining[0..8].try_into().unwrap());
-        let num_bytes_following = u64::from_be_bytes(remaining[8..16].try_into().unwrap()) as usize;
-        let total = DESCRIPTOR_HEADER_SIZE + num_bytes_following;
-        if total > remaining.len() {
-            return Err(anyhow!(
-                "Descriptor at offset {} truncated: needs {} bytes, has {}",
-                cursor,
-                total,
-                remaining.len()
-            ));
-        }
-        if tag == DESCRIPTOR_TAG_HASHTREE && total >= HASHTREE_DESCRIPTOR_FIXED_SIZE {
-            let body = &remaining[..total];
-            let partition_name_len =
-                u32::from_be_bytes(body[104..108].try_into().unwrap()) as usize;
-            let salt_len = u32::from_be_bytes(body[108..112].try_into().unwrap()) as usize;
-            let root_digest_len = u32::from_be_bytes(body[112..116].try_into().unwrap()) as usize;
-            let payload_start = HASHTREE_DESCRIPTOR_FIXED_SIZE;
-            if body.len() >= payload_start + partition_name_len + salt_len + root_digest_len {
-                let partition_name = &body[payload_start..payload_start + partition_name_len];
-                if partition_name == target_partition.as_bytes() {
-                    let root_digest_offset_in_descriptor =
-                        payload_start + partition_name_len + salt_len;
-                    return Ok(Some(HashtreeHit {
-                        descriptor_offset_in_blob: cursor,
-                        root_digest_offset_in_descriptor,
-                        root_digest_len,
-                    }));
-                }
-            }
-        }
-        cursor += total;
-    }
-    Ok(None)
-}
-
-// ---------------------------------------------------------------------------
 // Misc small helpers
 // ---------------------------------------------------------------------------
 
@@ -1037,27 +753,6 @@ fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
 
 fn write_u32_le(bytes: &mut [u8], off: usize, value: u32) {
     bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
-}
-
-fn read_cstring(slice: &[u8]) -> String {
-    let end = slice.iter().position(|b| *b == 0).unwrap_or(slice.len());
-    String::from_utf8_lossy(&slice[..end]).into_owned()
-}
-
-fn next_pow2(value: u64) -> u64 {
-    let mut p = 1u64;
-    while p < value {
-        p <<= 1;
-    }
-    p
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
 }
 
 #[cfg(test)]
@@ -1092,12 +787,5 @@ mod tests {
         let s = build_dex_string_with_uleb_prefix("zh");
         // utf16 size = 2, ULEB128 = single byte 0x02. Then "zh" + NUL.
         assert_eq!(s, vec![0x02, b'z', b'h', 0x00]);
-    }
-
-    #[test]
-    fn next_pow2_basic() {
-        assert_eq!(next_pow2(1), 1);
-        assert_eq!(next_pow2(32), 32);
-        assert_eq!(next_pow2(33), 64);
     }
 }
