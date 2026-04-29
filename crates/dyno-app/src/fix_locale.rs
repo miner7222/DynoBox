@@ -67,13 +67,13 @@ pub enum FixLocaleOutcome {
         old_root_digest: String,
         new_root_digest: String,
     },
-    /// `framework.jar` exists but the AntiCrossSell anchor is not present
-    /// (already patched, different ROM, or refactored class). Pipeline
-    /// continues without touching `system.img` or `vbmeta_system.img`.
+    /// The patch was a no-op for one of the legitimate skip reasons:
+    /// `framework.jar` is missing, or it exists but the AntiCrossSell
+    /// anchor is not present (already patched, different ROM build, or
+    /// refactored class). The pipeline continues without touching
+    /// `system.img` or `vbmeta_system.img`. `reason` carries the
+    /// human-readable explanation for the progress log.
     NotApplicable { reason: String },
-    /// `framework.jar` itself was not found. Treated like `NotApplicable`
-    /// by the caller, but exposed separately for clearer logging.
-    FrameworkJarMissing,
 }
 
 /// Apply `--fix-locale` to a freshly unpacked `system.img` and propagate
@@ -86,7 +86,11 @@ pub fn apply_fix_locale(
     let mut volume = open_ext4_volume(system_image)?;
     let inode = match lookup_inode_at_path(&mut volume, FRAMEWORK_JAR_PATH)? {
         Some(i) => i,
-        None => return Ok(FixLocaleOutcome::FrameworkJarMissing),
+        None => {
+            return Ok(FixLocaleOutcome::NotApplicable {
+                reason: "/system/framework/framework.jar not found in system.img".to_string(),
+            });
+        }
     };
     if !inode.is_file() {
         return Err(anyhow!(
@@ -210,6 +214,17 @@ pub fn apply_fix_locale(
 const ZIP_LOCAL_FILE_HEADER_SIG: u32 = 0x04034B50;
 const ZIP_CENTRAL_DIRECTORY_SIG: u32 = 0x02014B50;
 const ZIP_END_OF_CENTRAL_DIRECTORY_SIG: u32 = 0x06054B50;
+/// ZIP general-purpose flag bit 3: when set, CRC + sizes in the local
+/// file header are zero and the real values live in a trailing data
+/// descriptor. We don't parse data descriptors and would silently rewrite
+/// the wrong CRC32 offset, so bail loudly when we see it set.
+const ZIP_FLAG_DATA_DESCRIPTOR: u16 = 0x0008;
+/// ZIP64 sentinel value for compressed/uncompressed size or local header
+/// offset. When present in any of those fields the real value lives in
+/// a ZIP64 extra-field record, which we don't parse. framework.jar is
+/// well under 4 GiB today; bail explicitly if a future build crosses the
+/// line so we fail-loud instead of silently corrupting the JAR.
+const ZIP64_SENTINEL_U32: u32 = 0xFFFFFFFF;
 
 #[derive(Debug, Clone)]
 struct ZipEntry {
@@ -256,16 +271,37 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
                 "framework.jar central directory: unexpected signature {sig:#010x} at offset {cursor}"
             ));
         }
+        let cd_flags = read_u16_le(bytes, cursor + 8);
         let compression_method = read_u16_le(bytes, cursor + 10);
         let cd_crc_offset = cursor + 16;
-        let compressed_size = read_u32_le(bytes, cursor + 20) as usize;
+        let compressed_size_raw = read_u32_le(bytes, cursor + 20);
+        let uncompressed_size_raw = read_u32_le(bytes, cursor + 24);
         let name_len = read_u16_le(bytes, cursor + 28) as usize;
         let extra_len = read_u16_le(bytes, cursor + 30) as usize;
         let comment_len = read_u16_le(bytes, cursor + 32) as usize;
-        let local_header_offset = read_u32_le(bytes, cursor + 42) as usize;
+        let local_header_offset_raw = read_u32_le(bytes, cursor + 42);
         let name = std::str::from_utf8(&bytes[cursor + 46..cursor + 46 + name_len])
             .context("framework.jar central directory entry has non-UTF-8 name")?
             .to_string();
+
+        if cd_flags & ZIP_FLAG_DATA_DESCRIPTOR != 0 {
+            return Err(anyhow!(
+                "framework.jar entry {} uses ZIP data-descriptor (flag bit 3); CRC + sizes live in a trailing record this parser does not handle",
+                name
+            ));
+        }
+        if compressed_size_raw == ZIP64_SENTINEL_U32
+            || uncompressed_size_raw == ZIP64_SENTINEL_U32
+            || local_header_offset_raw == ZIP64_SENTINEL_U32
+        {
+            return Err(anyhow!(
+                "framework.jar entry {} uses ZIP64 extended fields ({:#010x} sentinel); ZIP64 is not supported here",
+                name,
+                ZIP64_SENTINEL_U32
+            ));
+        }
+        let compressed_size = compressed_size_raw as usize;
+        let local_header_offset = local_header_offset_raw as usize;
 
         // Walk the local file header to compute data_start.
         if bytes.len() < local_header_offset + 30 {
@@ -277,6 +313,13 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
         if lfh_sig != ZIP_LOCAL_FILE_HEADER_SIG {
             return Err(anyhow!(
                 "framework.jar local file header for {name}: unexpected signature {lfh_sig:#010x}"
+            ));
+        }
+        let lfh_flags = read_u16_le(bytes, local_header_offset + 6);
+        if lfh_flags & ZIP_FLAG_DATA_DESCRIPTOR != 0 {
+            return Err(anyhow!(
+                "framework.jar entry {} local file header flags ZIP data-descriptor (bit 3); not supported",
+                name
             ));
         }
         let local_header_crc_offset = local_header_offset + 14;
@@ -396,7 +439,10 @@ fn find_anti_cross_sell_anchor(dex_bytes: &[u8]) -> Result<Option<usize>> {
 
     let mut hits = Vec::new();
     let mut i = 0usize;
-    while i + 16 <= dex_bytes.len() {
+    // Read four bytes at i (`1A AA II II`) plus the byte at i+12
+    // (expected `38`). The tightest correct upper bound is therefore
+    // i + 13 ≤ dex_bytes.len(), not i + 16.
+    while i + 13 <= dex_bytes.len() {
         if dex_bytes[i] == 0x1A
             && dex_bytes[i + 2] == idx_lo
             && dex_bytes[i + 3] == idx_hi

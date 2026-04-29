@@ -1546,14 +1546,6 @@ where
                     ),
                 );
             }
-            FixLocaleOutcome::FrameworkJarMissing => {
-                message(
-                    events,
-                    MessageLevel::Warning,
-                    "--fix-locale skipped: /system/framework/framework.jar not found in system.img"
-                        .to_string(),
-                );
-            }
         }
         // The patch above invalidates vbmeta_system.img's existing
         // signature. Make sure it ends up in the resign list even when an
