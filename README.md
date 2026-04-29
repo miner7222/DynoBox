@@ -10,15 +10,15 @@ Pure Rust firmware and OTA toolkit extracted from LTBox.
 - repack dynamic partitions back into split `super_*.img`
 - scan AVB metadata from one image or a whole directory
 - bump boot & vendor security patch level
-- modify AVB rollback_index
-- disarm Lenovo's `ZuiAntiCrossSell` locale gate inside `system.img/framework.jar`
+- modify AVB rollback_index to bypass rollback protection
+- disarm Lenovo's `ZuiAntiCrossSell` locale gate
 
 ## Current Commands
 
 ```powershell
-dynobox unpack --input <firmware_dir> [--output <dir>] [resign -k <key>] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--fix-locale] [repack] [--complete]
-dynobox apply --input <firmware_dir> [--output <dir>] <ota1.zip> ... [resign -k <key>] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--fix-locale] [repack] [--complete]
-dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--fix-locale] [repack]
+dynobox unpack --input <firmware_dir> [--output <dir>]
+dynobox apply --input <firmware_dir> [--output <dir>] <ota1.zip> ...
+dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--fix-locale]
 dynobox repack --input <image_dir> [--output <dir>]
 dynobox info --input <image_or_dir> [--format text|json] [--output <report.txt>]
 dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt>]
@@ -29,7 +29,13 @@ Pipeline stage keywords (`unpack`, `resign`, `repack`) can be written as bare wo
 ### Pipeline Example
 
 ```powershell
-dynobox apply --input TB322_ZUXOS_1.5.10.063_Tool\image 063to117.zip 117to183.zip resign --key testkey_rsa4096 repack --output TB322_ZUXOS_1.5.10.183_Resigned --complete
+dynobox apply `
+    --input TB322_ZUXOS_1.5.10.063_Tool\image `
+    063to117.zip 117to183.zip `
+    resign --key testkey_rsa4096 `
+    repack `
+    --output TB322_ZUXOS_1.5.10.183_Resigned `
+    --complete
 ```
 
 ### Pipeline Behavior
