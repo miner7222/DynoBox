@@ -1,6 +1,7 @@
 pub mod avb_descriptor;
 pub mod boot_spl;
 pub mod events;
+pub mod ext4_helpers;
 pub mod ext4_reader;
 pub mod fix_locale;
 pub mod pipeline;

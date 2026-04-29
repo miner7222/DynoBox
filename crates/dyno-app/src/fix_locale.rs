@@ -40,8 +40,6 @@
 //! as `vendor_spl`. dm-verity validates against `root_digest`; FEC is an
 //! optional recovery code and stale FEC does not break boot.
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
@@ -51,7 +49,7 @@ use crate::avb_descriptor::{
     SHA256_DIGEST_SIZE, hex_encode, patch_hashtree_root_digest, read_hashtree_params,
     regenerate_hashtree,
 };
-use crate::ext4_reader::{Ext4Volume, Inode};
+use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
 
 const ANTI_CROSS_SELL_STRING: &str = "ZuiAntiCrossSell";
 const FRAMEWORK_JAR_PATH: &[&str] = &["system", "framework", "framework.jar"];
@@ -203,100 +201,6 @@ pub fn apply_fix_locale(
         old_root_digest: hex_encode(&old_root_digest),
         new_root_digest: hex_encode(&new_root_digest),
     })
-}
-
-// ---------------------------------------------------------------------------
-// ext4 helpers — narrow copies of the patterns vendor_spl uses
-// ---------------------------------------------------------------------------
-
-fn open_ext4_volume(image_path: &Path) -> Result<Ext4Volume<BufReader<File>>> {
-    let file = File::open(image_path).with_context(|| {
-        format!(
-            "Failed to open {} for ext4 navigation",
-            image_path.display()
-        )
-    })?;
-    Ext4Volume::new(BufReader::new(file)).map_err(|e| {
-        anyhow!(
-            "Failed to parse ext4 superblock on {}: {e}",
-            image_path.display()
-        )
-    })
-}
-
-fn lookup_inode_at_path<R: Read + Seek>(
-    volume: &mut Ext4Volume<R>,
-    components: &[&str],
-) -> Result<Option<Inode>> {
-    let mut current = volume
-        .root()
-        .map_err(|e| anyhow!("Failed to read ext4 root inode: {e}"))?;
-    for name in components {
-        if !current.is_dir() {
-            return Ok(None);
-        }
-        let entries = current
-            .open_dir(volume)
-            .map_err(|e| anyhow!("Failed to read directory while resolving {:?}: {e}", name))?;
-        let next_idx = entries
-            .into_iter()
-            .find(|(entry_name, _, _)| entry_name == name)
-            .map(|(_, idx, _)| idx);
-        let Some(idx) = next_idx else {
-            return Ok(None);
-        };
-        current = volume
-            .get_inode(idx)
-            .map_err(|e| anyhow!("Failed to read inode {} for {:?}: {e}", idx, name))?;
-    }
-    Ok(Some(current))
-}
-
-/// Write a fully-buffered file's worth of bytes back into the underlying
-/// partition image, hitting each extent in turn. The buffer is laid out in
-/// file-order (the same order we read it via `Inode::open_read`), so for
-/// each `(file_block, disk_block, count, is_unwritten)` extent we copy the
-/// matching slice to its disk-block range.
-fn write_via_extents(
-    image_path: &Path,
-    buffer: &[u8],
-    extents: &[(u64, u64, u64, bool)],
-    block_size: u64,
-) -> Result<()> {
-    let mut file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(image_path)
-        .with_context(|| {
-            format!(
-                "Failed to open {} for framework.jar write-back",
-                image_path.display()
-            )
-        })?;
-    for &(file_block_idx, disk_block_idx, block_count, is_unwritten) in extents {
-        if is_unwritten {
-            // Unwritten extents read as zero on Linux; refusing to plant
-            // bytes there avoids a surprise data-block allocation we are
-            // not equipped to perform.
-            return Err(anyhow!(
-                "framework.jar has an unwritten extent at file_block {}; writing through unwritten extents is unsupported",
-                file_block_idx
-            ));
-        }
-        let extent_file_byte = file_block_idx.saturating_mul(block_size);
-        let extent_byte_count = block_count.saturating_mul(block_size);
-        if extent_file_byte >= buffer.len() as u64 {
-            // Extent is past the file's tail (alignment padding); skip.
-            continue;
-        }
-        let buf_start = extent_file_byte as usize;
-        let buf_end = std::cmp::min(buf_start + extent_byte_count as usize, buffer.len());
-        let disk_byte = disk_block_idx.saturating_mul(block_size);
-        file.seek(SeekFrom::Start(disk_byte))?;
-        file.write_all(&buffer[buf_start..buf_end])?;
-    }
-    file.flush()?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------

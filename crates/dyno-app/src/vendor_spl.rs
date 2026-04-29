@@ -28,8 +28,8 @@
 //! against the new `root_digest` only, and FEC is consulted as a recovery
 //! code for damaged blocks. A stale FEC region does not break boot.
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::avb_descriptor::{
@@ -37,7 +37,7 @@ use crate::avb_descriptor::{
     patch_hashtree_root_digest, patch_property_value, read_hashtree_params, read_vbmeta_blob,
     regenerate_hashtree,
 };
-use crate::ext4_reader::{Ext4Volume, Inode};
+use crate::ext4_helpers::{lookup_inode_at_path, map_file_offset_to_disk, open_ext4_volume};
 use anyhow::{Context, Result, anyhow};
 use avbtool_rs::parser::{AVB_VBMETA_IMAGE_HEADER_SIZE, AvbVBMetaHeader};
 use memchr::memmem;
@@ -247,72 +247,6 @@ fn patch_build_prop_spl_via_ext4(vendor_image: &Path, new_spl: &str) -> Result<(
     }
     file.flush()?;
     Ok(())
-}
-
-fn open_ext4_volume(image_path: &Path) -> Result<Ext4Volume<BufReader<File>>> {
-    let file = File::open(image_path).with_context(|| {
-        format!(
-            "Failed to open {} for ext4 navigation",
-            image_path.display()
-        )
-    })?;
-    let reader = BufReader::new(file);
-    Ext4Volume::new(reader)
-        .map_err(|e| anyhow!("Failed to parse ext4 superblock on vendor.img: {e}"))
-}
-
-/// Walk an absolute path under the ext4 root and return the matching
-/// inode, or `None` if any component is missing.
-fn lookup_inode_at_path<R: Read + Seek>(
-    volume: &mut Ext4Volume<R>,
-    components: &[&str],
-) -> Result<Option<Inode>> {
-    let mut current = volume
-        .root()
-        .map_err(|e| anyhow!("Failed to read ext4 root inode: {e}"))?;
-    for name in components {
-        if !current.is_dir() {
-            return Ok(None);
-        }
-        let entries = current
-            .open_dir(volume)
-            .map_err(|e| anyhow!("Failed to read directory while resolving {:?}: {e}", name))?;
-        let next_idx = entries
-            .into_iter()
-            .find(|(entry_name, _, _)| entry_name == name)
-            .map(|(_, idx, _)| idx);
-        let Some(idx) = next_idx else {
-            return Ok(None);
-        };
-        current = volume
-            .get_inode(idx)
-            .map_err(|e| anyhow!("Failed to read inode {} for {:?}: {e}", idx, name))?;
-    }
-    Ok(Some(current))
-}
-
-/// Map a file-relative byte offset to the absolute on-disk byte offset
-/// using the supplied `(file_block_idx, disk_block_idx, block_count, is_unwritten)`
-/// extent table. Returns `None` if the offset falls into a hole or an
-/// `is_unwritten` (logically-zero) extent — in either case there's no
-/// concrete disk byte to patch.
-fn map_file_offset_to_disk(
-    extents: &[(u64, u64, u64, bool)],
-    file_offset: u64,
-    block_size: u64,
-) -> Option<u64> {
-    let block_index = file_offset / block_size;
-    let intra_block = file_offset % block_size;
-    for &(file_block, disk_block, count, is_unwritten) in extents {
-        if block_index >= file_block && block_index < file_block + count {
-            if is_unwritten {
-                return None;
-            }
-            let disk_block_for_offset = disk_block + (block_index - file_block);
-            return Some(disk_block_for_offset * block_size + intra_block);
-        }
-    }
-    None
 }
 
 /// Read the current `com.android.build.vendor.security_patch` from
