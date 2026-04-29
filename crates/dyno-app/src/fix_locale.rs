@@ -97,11 +97,11 @@ pub fn apply_fix_locale(
             "system.img /system/framework/framework.jar is not a regular file"
         ));
     }
-    let jar_extents = inode
-        .extent_mapping(&mut volume)
-        .map_err(|e| anyhow!("Failed to walk framework.jar extent tree: {e}"))?;
-    let jar_bytes = inode
-        .open_read(&mut volume)
+    // Single tree walk that returns both the JAR bytes and the extent
+    // mapping needed to write them back later. Avoids walking the inode
+    // twice (`open_read` + `extent_mapping`) for the same data.
+    let (jar_bytes, jar_extents) = inode
+        .open_read_with_extents(&mut volume)
         .map_err(|e| anyhow!("Failed to read framework.jar from system.img: {e}"))?;
     let block_size = volume.block_size;
     drop(volume);

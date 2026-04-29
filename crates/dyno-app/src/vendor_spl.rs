@@ -186,8 +186,11 @@ fn patch_build_prop_spl_via_ext4(vendor_image: &Path, new_spl: &str) -> Result<(
     if !inode.is_file() {
         return Err(anyhow!("vendor.img /build.prop is not a regular file"));
     }
-    let content = inode
-        .open_read(&mut volume)
+    // Single tree walk that returns both the file content and its
+    // extent mapping; avoids walking the inode twice for the same
+    // small (~12 KiB) build.prop.
+    let (content, extents) = inode
+        .open_read_with_extents(&mut volume)
         .map_err(|e| anyhow!("Failed to read /build.prop from vendor.img: {e}"))?;
 
     let needle = b"ro.vendor.build.security_patch=";
@@ -208,9 +211,6 @@ fn patch_build_prop_spl_via_ext4(vendor_image: &Path, new_spl: &str) -> Result<(
     }
 
     let block_size = volume.block_size;
-    let extents = inode
-        .extent_mapping(&mut volume)
-        .map_err(|e| anyhow!("Failed to walk /build.prop extent tree: {e}"))?;
     if extents.is_empty() {
         return Err(anyhow!(
             "vendor /build.prop has no extents (likely inline data not yet supported here)"

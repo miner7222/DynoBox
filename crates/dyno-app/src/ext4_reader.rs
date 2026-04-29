@@ -567,6 +567,19 @@ impl Inode {
     }
 
     pub fn open_read<R: Read + Seek>(&self, volume: &mut Ext4Volume<R>) -> Result<Vec<u8>> {
+        let (data, _) = self.open_read_with_extents(volume)?;
+        Ok(data)
+    }
+
+    /// Like [`Inode::open_read`], but also returns the extent mapping
+    /// produced by the same single tree walk. Callers that need both
+    /// the file content and a way to write specific bytes back through
+    /// the extent tree (e.g. [`crate::fix_locale`] / [`crate::vendor_spl`])
+    /// can use this to avoid two redundant walks of the same inode.
+    pub fn open_read_with_extents<R: Read + Seek>(
+        &self,
+        volume: &mut Ext4Volume<R>,
+    ) -> Result<(Vec<u8>, Vec<(u64, u64, u64, bool)>)> {
         const MAX_FILE_SIZE: u64 = 16 * 1024 * 1024 * 1024;
         let file_size = self.inode.i_size();
         if file_size > MAX_FILE_SIZE {
@@ -577,6 +590,7 @@ impl Inode {
         }
 
         // Inline data path: small files store content directly in i_block.
+        // No extent map exists, so we return an empty mapping.
         if (self.inode.i_flags & inode_mode::EXT4_EXTENTS_FL) == 0 {
             let size = usize::try_from(file_size).map_err(|_| Ext4Error::InvalidInodeSize {
                 size: file_size,
@@ -589,20 +603,12 @@ impl Inode {
                     max: max_inline_size as u64,
                 });
             }
-            return Ok(self.inode.i_block[..size].to_vec());
+            return Ok((self.inode.i_block[..size].to_vec(), Vec::new()));
         }
 
-        // Extent mode: walk the tree and read each leaf extent.
-        let mut mapping = Vec::new();
-        let mut visited_blocks = HashSet::new();
-        self.parse_extents(
-            volume,
-            &self.inode.i_block,
-            &mut mapping,
-            0,
-            &mut visited_blocks,
-        )?;
-        mapping.sort_by_key(|&(file_block_idx, _, _, _)| file_block_idx);
+        // Extent mode: walk the tree once, then use the same mapping
+        // both for the read pass and (returned) for the caller.
+        let mapping = self.extent_mapping(volume)?;
 
         let file_size_usize =
             usize::try_from(file_size).map_err(|_| Ext4Error::InvalidInodeSize {
@@ -612,7 +618,7 @@ impl Inode {
         let mut data = Vec::with_capacity(file_size_usize.min(8 * 1024 * 1024));
         let mut block_buf = vec![0u8; volume.block_size as usize];
 
-        for (file_block_idx, disk_block_idx, block_count, is_unwritten) in mapping {
+        for &(file_block_idx, disk_block_idx, block_count, is_unwritten) in &mapping {
             let extent_start = file_block_idx.saturating_mul(volume.block_size);
             if extent_start >= file_size {
                 break;
@@ -637,7 +643,7 @@ impl Inode {
             }
         }
         data.resize(file_size_usize, 0);
-        Ok(data)
+        Ok((data, mapping))
     }
 
     fn parse_extents<R: Read + Seek>(
