@@ -1454,10 +1454,16 @@ where
         images = all_images;
     }
 
+    let mut local_inode_cache = LocalInodeCache::default();
+
     let mut vendor_spl_applied: Option<(String, String, String)> = None;
     if let Some(new_spl) = config.vendor_spl.as_deref() {
         require_images_exist("--vendor-spl", out_dir, &["vendor.img", "vbmeta.img"])?;
-        ensure_images_local(out_dir, &["vendor.img", "vbmeta.img"])?;
+        ensure_images_local(
+            &mut local_inode_cache,
+            out_dir,
+            &["vendor.img", "vbmeta.img"],
+        )?;
         let vendor_path = out_dir.join("vendor.img");
         let vbmeta_path = out_dir.join("vbmeta.img");
         match apply_vendor_spl(&vendor_path, &vbmeta_path, new_spl)? {
@@ -1513,7 +1519,11 @@ where
             out_dir,
             &["system.img", "vbmeta_system.img"],
         )?;
-        ensure_images_local(out_dir, &["system.img", "vbmeta_system.img"])?;
+        ensure_images_local(
+            &mut local_inode_cache,
+            out_dir,
+            &["system.img", "vbmeta_system.img"],
+        )?;
         let system_path = out_dir.join("system.img");
         let vbmeta_system_path = out_dir.join("vbmeta_system.img");
         match apply_fix_locale(&system_path, &vbmeta_system_path)? {
@@ -1570,7 +1580,7 @@ where
                 input.display()
             ));
         }
-        ensure_images_local(out_dir, &["boot.img"])?;
+        ensure_images_local(&mut local_inode_cache, out_dir, &["boot.img"])?;
         let boot_out_path = out_dir.join("boot.img");
         match patch_security_patch(&boot_out_path, new_spl)? {
             BootSplPatchOutcome::Patched { old, new } => {
@@ -1624,7 +1634,7 @@ where
         // boot.img may have already been re-inoded by the SPL patch above; that
         // is a no-op (we copy the already-fresh inode to a new one). All other
         // images go through this guard so the resign write hits a private inode.
-        ensure_local_inode(&out_path)?;
+        local_inode_cache.ensure(&out_path)?;
 
         let result = match effective_rollback {
             Some(ri) => avbtool_rs::resign::resign_image_with_options(
@@ -2185,6 +2195,53 @@ fn ensure_local_inode(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Cache of paths already known to have a private inode, so a feature
+/// block (`--vendor-spl`, `--fix-locale`) and the per-image resign loop
+/// don't both pay the [`ensure_local_inode`] copy cost on the same
+/// image. On a 12 GiB `system.img` the second copy alone is ~30 s of
+/// wasted I/O.
+#[derive(Default)]
+struct LocalInodeCache {
+    seen: std::collections::HashSet<std::path::PathBuf>,
+}
+
+impl LocalInodeCache {
+    fn ensure(&mut self, path: &Path) -> anyhow::Result<()> {
+        if self.seen.contains(path) {
+            return Ok(());
+        }
+        // If the on-disk file already has a private inode (link count
+        // 1), no copy is needed — partitions extracted from
+        // super_*.img by the auto-unpack stage land here, since super
+        // extraction writes fresh files instead of hard-linking.
+        if !is_hardlinked(path).unwrap_or(true) {
+            self.seen.insert(path.to_path_buf());
+            return Ok(());
+        }
+        ensure_local_inode(path)?;
+        self.seen.insert(path.to_path_buf());
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn is_hardlinked(path: &Path) -> anyhow::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path)?;
+    Ok(m.nlink() > 1)
+}
+
+#[cfg(not(unix))]
+fn is_hardlinked(_path: &Path) -> anyhow::Result<bool> {
+    // Windows exposes `number_of_links` only behind the unstable
+    // `windows_by_handle` feature, and pulling in `windows-sys` just
+    // for `GetFileInformationByHandle` would dwarf the cost we're
+    // trying to avoid. Be conservative and force the safe-side copy
+    // on the first call; the `LocalInodeCache` then prevents the
+    // second one, which is where the bulk of the redundancy lived.
+    Ok(true)
+}
+
 /// Verify each `image_name` exists under `out_dir`, otherwise error with
 /// a `feature_label`-flavoured message. Used by the `--boot-spl` /
 /// `--vendor-spl` / `--fix-locale` blocks of `run_resign_stage` to fail
@@ -2209,12 +2266,16 @@ fn require_images_exist(
     Ok(())
 }
 
-/// Run [`ensure_local_inode`] on each `out_dir/image_name`. Both
+/// Run [`LocalInodeCache::ensure`] on each `out_dir/image_name`. Both
 /// `--vendor-spl` and `--fix-locale` need this for two images each;
 /// rolling it up into a single call keeps the patch blocks concise.
-fn ensure_images_local(out_dir: &Path, image_names: &[&str]) -> anyhow::Result<()> {
+fn ensure_images_local(
+    cache: &mut LocalInodeCache,
+    out_dir: &Path,
+    image_names: &[&str],
+) -> anyhow::Result<()> {
     for name in image_names {
-        ensure_local_inode(&out_dir.join(name))?;
+        cache.ensure(&out_dir.join(name))?;
     }
     Ok(())
 }
