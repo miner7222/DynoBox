@@ -91,6 +91,17 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl, requires = "resign")]
         vendor_spl: Option<String>,
 
+        /// Defang Lenovo's `ZuiAntiCrossSell` locale gate inside system.img
+        /// by flipping the first conditional branch of `Configuration.setLocales`
+        /// into an unconditional goto. Patches the Dalvik bytecode of the
+        /// matching `classes*.dex` inside `framework.jar`, regenerates
+        /// system.img dm-verity, and propagates the new root digest into
+        /// vbmeta_system.img so the resign loop signs over the new bytes.
+        /// No-op when the AntiCrossSell anchor is absent (already patched
+        /// or different ROM build).
+        #[arg(long, requires = "resign")]
+        fix_locale: bool,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -147,6 +158,16 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl)]
         vendor_spl: Option<String>,
 
+        /// Defang Lenovo's `ZuiAntiCrossSell` locale gate inside system.img
+        /// by flipping the first conditional branch of `Configuration.setLocales`
+        /// into an unconditional goto. Patches the matching `classes*.dex`
+        /// inside `framework.jar`, regenerates system.img dm-verity, and
+        /// propagates the new root digest into vbmeta_system.img so the
+        /// resign loop signs over the new bytes. No-op when the
+        /// AntiCrossSell anchor is absent.
+        #[arg(long)]
+        fix_locale: bool,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -196,6 +217,16 @@ enum Commands {
         /// and root digest into vbmeta.img so the resign loop signs over them.
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl)]
         vendor_spl: Option<String>,
+
+        /// Defang Lenovo's `ZuiAntiCrossSell` locale gate inside system.img
+        /// by flipping the first conditional branch of `Configuration.setLocales`
+        /// into an unconditional goto. Patches the matching `classes*.dex`
+        /// inside `framework.jar`, regenerates system.img dm-verity, and
+        /// propagates the new root digest into vbmeta_system.img so the
+        /// resign loop signs over the new bytes. No-op when the
+        /// AntiCrossSell anchor is absent.
+        #[arg(long)]
+        fix_locale: bool,
 
         /// Repack dynamic partitions back into super after resign
         #[arg(long)]
@@ -310,6 +341,7 @@ fn make_resign_config(
     rollback_index: Option<u64>,
     boot_spl: Option<String>,
     vendor_spl: Option<String>,
+    fix_locale: bool,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
         key,
@@ -318,6 +350,7 @@ fn make_resign_config(
         rollback_index,
         boot_spl,
         vendor_spl,
+        fix_locale,
     })
 }
 
@@ -560,6 +593,7 @@ fn main() -> anyhow::Result<()> {
             rollback,
             boot_spl,
             vendor_spl,
+            fix_locale,
             complete,
         } => {
             if resign && key.is_none() {
@@ -571,7 +605,9 @@ fn main() -> anyhow::Result<()> {
             let request = UnpackRequest {
                 input,
                 output: out_dir,
-                resign: make_resign_config(key, algorithm, force, rollback, boot_spl, vendor_spl),
+                resign: make_resign_config(
+                    key, algorithm, force, rollback, boot_spl, vendor_spl, fix_locale,
+                ),
                 repack,
                 complete,
             };
@@ -592,6 +628,7 @@ fn main() -> anyhow::Result<()> {
             rollback,
             boot_spl,
             vendor_spl,
+            fix_locale,
             complete,
             ota_zips,
         } => {
@@ -615,7 +652,9 @@ fn main() -> anyhow::Result<()> {
                 output: out_dir,
                 ota_zips: real_zips,
                 force_unpack: unpack,
-                resign: make_resign_config(key, algorithm, force, rollback, boot_spl, vendor_spl),
+                resign: make_resign_config(
+                    key, algorithm, force, rollback, boot_spl, vendor_spl, fix_locale,
+                ),
                 repack,
                 complete,
             };
@@ -633,6 +672,7 @@ fn main() -> anyhow::Result<()> {
             rollback,
             boot_spl,
             vendor_spl,
+            fix_locale,
             repack,
         } => {
             let out_dir = resolve_output_dir(output, default_output_name_for_resign(repack));
@@ -646,6 +686,7 @@ fn main() -> anyhow::Result<()> {
                     rollback_index: rollback,
                     boot_spl,
                     vendor_spl,
+                    fix_locale,
                 },
                 repack,
             };

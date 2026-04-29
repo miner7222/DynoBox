@@ -8,6 +8,7 @@ use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
 };
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
+use crate::fix_locale::{FixLocaleOutcome, apply_fix_locale};
 use crate::vendor_spl::{
     VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl,
     validate_spl_format as validate_vendor_spl_format,
@@ -35,6 +36,15 @@ pub struct ResignConfig {
     /// so the resign loop signs over the new bytes. Skipped (warn-only) when
     /// the requested date is not strictly newer than the existing value.
     pub vendor_spl: Option<String>,
+    /// When set, defang Lenovo's `ZuiAntiCrossSell` locale gate inside
+    /// `system.img/system/framework/framework.jar` by flipping the first
+    /// conditional branch in `Configuration.setLocales` into an
+    /// unconditional `goto cond_2`. Triggers a dm-verity hash tree
+    /// regeneration on system.img and propagates the new root digest into
+    /// vbmeta_system.img so the resign loop signs over the patched bytes.
+    /// No-ops when the AntiCrossSell anchor is absent (already patched or
+    /// different ROM build).
+    pub fix_locale: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1516,6 +1526,80 @@ where
         }
     }
 
+    let mut fix_locale_applied: Option<(String, String)> = None;
+    if config.fix_locale {
+        let system_path = out_dir.join("system.img");
+        let vbmeta_system_path = out_dir.join("vbmeta_system.img");
+        if !system_path.exists() {
+            return Err(anyhow::anyhow!(
+                "--fix-locale requested but system.img was not found under {}",
+                out_dir.display()
+            ));
+        }
+        if !vbmeta_system_path.exists() {
+            return Err(anyhow::anyhow!(
+                "--fix-locale requested but vbmeta_system.img was not found under {}",
+                out_dir.display()
+            ));
+        }
+        ensure_local_inode(&system_path)?;
+        ensure_local_inode(&vbmeta_system_path)?;
+        match apply_fix_locale(&system_path, &vbmeta_system_path)? {
+            FixLocaleOutcome::Patched {
+                dex_entry,
+                if_eqz_offset_in_jar,
+                old_root_digest,
+                new_root_digest,
+            } => {
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!(
+                        "system.img AntiCrossSell bypass applied: framework.jar/{} if-eqz at jar offset {:#x} -> goto/16; verity root {} -> {}",
+                        dex_entry,
+                        if_eqz_offset_in_jar,
+                        &old_root_digest[..16.min(old_root_digest.len())],
+                        &new_root_digest[..16.min(new_root_digest.len())]
+                    ),
+                );
+                fix_locale_applied = Some((old_root_digest, new_root_digest));
+            }
+            FixLocaleOutcome::NotApplicable { reason } => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    format!(
+                        "--fix-locale skipped: {}; system.img and vbmeta_system.img left untouched",
+                        reason
+                    ),
+                );
+            }
+            FixLocaleOutcome::FrameworkJarMissing => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    "--fix-locale skipped: /system/framework/framework.jar not found in system.img"
+                        .to_string(),
+                );
+            }
+        }
+        // The patch above invalidates vbmeta_system.img's existing
+        // signature. Make sure it ends up in the resign list even when an
+        // unrelated filter (e.g. --rollback) would otherwise have skipped
+        // it.
+        if fix_locale_applied.is_some() {
+            let already_listed = images.iter().any(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n == "vbmeta_system.img")
+                    .unwrap_or(false)
+            });
+            if !already_listed {
+                images.push(vbmeta_system_path.clone());
+            }
+        }
+    }
+
     let mut boot_spl_applied: Option<(String, String)> = None;
     if let Some(new_spl) = config.boot_spl.as_deref() {
         let boot_image_in_images = images.iter().any(|p| {
@@ -2590,6 +2674,7 @@ mod tests {
             rollback_index: None,
             boot_spl: None,
             vendor_spl: None,
+            fix_locale: false,
         }
     }
 

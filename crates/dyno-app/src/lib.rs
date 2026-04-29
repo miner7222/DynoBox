@@ -1,6 +1,7 @@
 pub mod boot_spl;
 pub mod events;
 pub mod ext4_reader;
+pub mod fix_locale;
 pub mod pipeline;
 pub mod vendor_spl;
 pub mod verify;
