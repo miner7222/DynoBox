@@ -100,7 +100,7 @@ pub fn apply_fix_locale(
     // Single tree walk that returns both the JAR bytes and the extent
     // mapping needed to write them back later. Avoids walking the inode
     // twice (`open_read` + `extent_mapping`) for the same data.
-    let (jar_bytes, jar_extents) = inode
+    let (mut jar_bytes, jar_extents) = inode
         .open_read_with_extents(&mut volume)
         .map_err(|e| anyhow!("Failed to read framework.jar from system.img: {e}"))?;
     let block_size = volume.block_size;
@@ -124,57 +124,55 @@ pub fn apply_fix_locale(
         });
     };
 
-    // 3. Build the patched JAR in memory: byte-flip the if-eqz, recompute
-    //    dex sha1 + adler32, recompute zip CRC32.
-    let mut patched_jar = jar_bytes.clone();
+    // 3. Patch the JAR in place. All mutations are byte-level rewrites
+    //    at known offsets — the dex slice keeps its size, the JAR keeps
+    //    its size, no resize happens — so we mutate `jar_bytes` directly
+    //    instead of cloning a 48 MB buffer just to keep the original
+    //    around. The 0x70 / anchor-byte / length sanity checks below
+    //    enforce the invariants that previously made the clone "safe".
     let dex_data_off = target.entry.data_start;
     let dex_data_end = dex_data_off + target.entry.compressed_size;
-    let dex_slice = &mut patched_jar[dex_data_off..dex_data_end];
-
-    // Replace `38 RR LO HI` (if-eqz) with `29 00 LO HI` (goto/16).
-    // The branch offset bytes (LO HI) carry over unchanged so cond_2 stays
-    // reachable. AA reg drops to 00 padding because goto/16 is fmt 20t.
     let if_eqz_off_in_dex = target.if_eqz_off_in_dex;
-    if dex_slice[if_eqz_off_in_dex] != 0x38 {
-        return Err(anyhow!(
-            "Anchor mismatch: byte at dex offset {} is {:#04x}, expected 0x38 (if-eqz)",
-            if_eqz_off_in_dex,
-            dex_slice[if_eqz_off_in_dex]
-        ));
-    }
-    dex_slice[if_eqz_off_in_dex] = 0x29; // goto/16 opcode
-    dex_slice[if_eqz_off_in_dex + 1] = 0x00; // 20t padding
 
-    // The dex header is 0x70 bytes; sums recomputation reads from byte
-    // 12 onward and writes back into bytes 8..32, so the slice has to
-    // be at least 0x70 bytes. Guarantee that here so the helper itself
-    // can stay infallible.
-    if dex_slice.len() < 0x70 {
-        return Err(anyhow!(
-            "dex slice too small ({} bytes) to recompute header sums",
-            dex_slice.len()
-        ));
+    {
+        let dex_slice = &mut jar_bytes[dex_data_off..dex_data_end];
+        // Replace `38 RR LO HI` (if-eqz) with `29 00 LO HI` (goto/16).
+        // The branch offset bytes (LO HI) carry over unchanged so cond_2
+        // stays reachable. AA reg drops to 00 padding because goto/16
+        // is fmt 20t.
+        if dex_slice[if_eqz_off_in_dex] != 0x38 {
+            return Err(anyhow!(
+                "Anchor mismatch: byte at dex offset {} is {:#04x}, expected 0x38 (if-eqz)",
+                if_eqz_off_in_dex,
+                dex_slice[if_eqz_off_in_dex]
+            ));
+        }
+        dex_slice[if_eqz_off_in_dex] = 0x29; // goto/16 opcode
+        dex_slice[if_eqz_off_in_dex + 1] = 0x00; // 20t padding
+
+        // The dex header is 0x70 bytes; sums recomputation reads from byte
+        // 12 onward and writes back into bytes 8..32, so the slice has to
+        // be at least 0x70 bytes. Guarantee that here so the helper itself
+        // can stay infallible.
+        if dex_slice.len() < 0x70 {
+            return Err(anyhow!(
+                "dex slice too small ({} bytes) to recompute header sums",
+                dex_slice.len()
+            ));
+        }
+        recompute_dex_header_sums(dex_slice);
     }
-    recompute_dex_header_sums(dex_slice);
 
     // Recompute zip CRC32 for the patched dex entry, both in the local
     // file header and the central directory entry, so the jar still
     // verifies.
-    let new_crc = crc32_ieee(dex_slice);
+    let new_crc = crc32_ieee(&jar_bytes[dex_data_off..dex_data_end]);
     write_u32_le(
-        &mut patched_jar,
+        &mut jar_bytes,
         target.entry.local_header_crc_offset,
         new_crc,
     );
-    write_u32_le(&mut patched_jar, target.entry.cd_crc_offset, new_crc);
-
-    if patched_jar.len() != jar_bytes.len() {
-        return Err(anyhow!(
-            "Internal error: patched framework.jar length {} does not match original {}",
-            patched_jar.len(),
-            jar_bytes.len()
-        ));
-    }
+    write_u32_le(&mut jar_bytes, target.entry.cd_crc_offset, new_crc);
 
     // 4. Stash the JAR-relative byte offset of the patched if-eqz for the
     //    progress message — useful when reproducing on a different ROM.
@@ -185,7 +183,7 @@ pub fn apply_fix_locale(
     //    file-byte still maps to the same disk-byte and no extents need
     //    reflowing. The write is chunked per extent to keep the seek/write
     //    count manageable on a ~50 MB jar.
-    write_via_extents(system_image, &patched_jar, &jar_extents, block_size)?;
+    write_via_extents(system_image, &jar_bytes, &jar_extents, block_size)?;
 
     // 6. Regenerate the dm-verity hash tree on the modified system.img and
     //    capture the new root digest.
