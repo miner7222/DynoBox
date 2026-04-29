@@ -1456,22 +1456,10 @@ where
 
     let mut vendor_spl_applied: Option<(String, String, String)> = None;
     if let Some(new_spl) = config.vendor_spl.as_deref() {
+        require_images_exist("--vendor-spl", out_dir, &["vendor.img", "vbmeta.img"])?;
+        ensure_images_local(out_dir, &["vendor.img", "vbmeta.img"])?;
         let vendor_path = out_dir.join("vendor.img");
         let vbmeta_path = out_dir.join("vbmeta.img");
-        if !vendor_path.exists() {
-            return Err(anyhow::anyhow!(
-                "--vendor-spl requested but vendor.img was not found under {}",
-                out_dir.display()
-            ));
-        }
-        if !vbmeta_path.exists() {
-            return Err(anyhow::anyhow!(
-                "--vendor-spl requested but vbmeta.img was not found under {}",
-                out_dir.display()
-            ));
-        }
-        ensure_local_inode(&vendor_path)?;
-        ensure_local_inode(&vbmeta_path)?;
         match apply_vendor_spl(&vendor_path, &vbmeta_path, new_spl)? {
             VendorSplOutcome::Patched {
                 old,
@@ -1514,36 +1502,20 @@ where
         // sure the resign loop will pick it up below even if a future caller
         // tries to combine --vendor-spl with another filter.
         if vendor_spl_applied.is_some() {
-            let already_listed = images.iter().any(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n == "vbmeta.img")
-                    .unwrap_or(false)
-            });
-            if !already_listed {
-                images.push(vbmeta_path.clone());
-            }
+            ensure_image_in_resign_list(&mut images, out_dir, "vbmeta.img");
         }
     }
 
     let mut fix_locale_applied: Option<(String, String)> = None;
     if config.fix_locale {
+        require_images_exist(
+            "--fix-locale",
+            out_dir,
+            &["system.img", "vbmeta_system.img"],
+        )?;
+        ensure_images_local(out_dir, &["system.img", "vbmeta_system.img"])?;
         let system_path = out_dir.join("system.img");
         let vbmeta_system_path = out_dir.join("vbmeta_system.img");
-        if !system_path.exists() {
-            return Err(anyhow::anyhow!(
-                "--fix-locale requested but system.img was not found under {}",
-                out_dir.display()
-            ));
-        }
-        if !vbmeta_system_path.exists() {
-            return Err(anyhow::anyhow!(
-                "--fix-locale requested but vbmeta_system.img was not found under {}",
-                out_dir.display()
-            ));
-        }
-        ensure_local_inode(&system_path)?;
-        ensure_local_inode(&vbmeta_system_path)?;
         match apply_fix_locale(&system_path, &vbmeta_system_path)? {
             FixLocaleOutcome::Patched {
                 dex_entry,
@@ -1588,15 +1560,7 @@ where
         // unrelated filter (e.g. --rollback) would otherwise have skipped
         // it.
         if fix_locale_applied.is_some() {
-            let already_listed = images.iter().any(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n == "vbmeta_system.img")
-                    .unwrap_or(false)
-            });
-            if !already_listed {
-                images.push(vbmeta_system_path.clone());
-            }
+            ensure_image_in_resign_list(&mut images, out_dir, "vbmeta_system.img");
         }
     }
 
@@ -1614,8 +1578,8 @@ where
                 input.display()
             ));
         }
+        ensure_images_local(out_dir, &["boot.img"])?;
         let boot_out_path = out_dir.join("boot.img");
-        ensure_local_inode(&boot_out_path)?;
         match patch_security_patch(&boot_out_path, new_spl)? {
             BootSplPatchOutcome::Patched { old, new } => {
                 message(
@@ -2227,6 +2191,58 @@ fn ensure_local_inode(path: &Path) -> anyhow::Result<()> {
     std::fs::remove_file(path)?;
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Verify each `image_name` exists under `out_dir`, otherwise error with
+/// a `feature_label`-flavoured message. Used by the `--boot-spl` /
+/// `--vendor-spl` / `--fix-locale` blocks of `run_resign_stage` to fail
+/// fast when the patcher is asked to operate on partitions that the
+/// preceding stages did not produce.
+fn require_images_exist(
+    feature_label: &str,
+    out_dir: &Path,
+    image_names: &[&str],
+) -> anyhow::Result<()> {
+    for name in image_names {
+        let p = out_dir.join(name);
+        if !p.exists() {
+            return Err(anyhow::anyhow!(
+                "{} requested but {} was not found under {}",
+                feature_label,
+                name,
+                out_dir.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Run [`ensure_local_inode`] on each `out_dir/image_name`. Both
+/// `--vendor-spl` and `--fix-locale` need this for two images each;
+/// rolling it up into a single call keeps the patch blocks concise.
+fn ensure_images_local(out_dir: &Path, image_names: &[&str]) -> anyhow::Result<()> {
+    for name in image_names {
+        ensure_local_inode(&out_dir.join(name))?;
+    }
+    Ok(())
+}
+
+/// Append `out_dir/image_name` to `images` if it isn't already listed
+/// by basename. The `--vendor-spl` and `--fix-locale` blocks both need
+/// to make sure the resign loop refreshes a stale signature their
+/// in-place AVB descriptor patch leaves behind, even when an unrelated
+/// filter (e.g. `--rollback`) would otherwise drop the corresponding
+/// vbmeta image from the resign list.
+fn ensure_image_in_resign_list(images: &mut Vec<PathBuf>, out_dir: &Path, image_name: &str) {
+    let already_listed = images.iter().any(|p| {
+        p.file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == image_name)
+            .unwrap_or(false)
+    });
+    if !already_listed {
+        images.push(out_dir.join(image_name));
+    }
 }
 
 fn materialize_file_with_fallback(
