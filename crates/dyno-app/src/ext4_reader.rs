@@ -493,6 +493,21 @@ impl<R: Read + Seek> Ext4Volume<R> {
         Ok(())
     }
 
+    /// Read `block_count` consecutive blocks starting at `start_block`
+    /// into `buf` in a single seek + read. The caller is responsible for
+    /// sizing `buf` to `block_count * block_size` bytes.
+    ///
+    /// Used by `Inode::open_read_with_extents` to read each extent run
+    /// in one syscall instead of one read per 4 KiB block — a measurable
+    /// win on large partitions where extents typically span hundreds of
+    /// blocks each.
+    fn read_blocks(&mut self, start_block: u64, buf: &mut [u8]) -> Result<()> {
+        self.stream
+            .seek(SeekFrom::Start(start_block * self.block_size))?;
+        self.stream.read_exact(buf)?;
+        Ok(())
+    }
+
     pub fn get_inode(&mut self, inode_idx: u32) -> Result<Inode> {
         if inode_idx == 0 {
             return Err(Ext4Error::InodeNotFound(inode_idx));
@@ -615,8 +630,7 @@ impl Inode {
                 size: file_size,
                 max: usize::MAX as u64,
             })?;
-        let mut data = Vec::with_capacity(file_size_usize.min(8 * 1024 * 1024));
-        let mut block_buf = vec![0u8; volume.block_size as usize];
+        let mut data = Vec::with_capacity(file_size_usize);
 
         for &(file_block_idx, disk_block_idx, block_count, is_unwritten) in &mapping {
             let extent_start = file_block_idx.saturating_mul(volume.block_size);
@@ -628,19 +642,34 @@ impl Inode {
                 let hole_size = (extent_start - data.len() as u64) as usize;
                 data.resize(data.len() + hole_size, 0);
             }
-            for i in 0..block_count {
-                if data.len() as u64 >= file_size {
-                    break;
-                }
-                let remaining = (file_size - data.len() as u64) as usize;
-                let to_copy = remaining.min(volume.block_size as usize);
-                if is_unwritten {
-                    data.resize(data.len() + to_copy, 0);
-                } else {
-                    volume.read_block(disk_block_idx + i, &mut block_buf)?;
-                    data.extend_from_slice(&block_buf[..to_copy]);
-                }
+
+            // Bytes still owed to the caller from the start of this
+            // extent. Cap at `block_count * block_size` (the extent
+            // covers no more than that on disk).
+            let remaining_in_file = file_size.saturating_sub(data.len() as u64);
+            let extent_byte_count = block_count.saturating_mul(volume.block_size);
+            let to_read = remaining_in_file.min(extent_byte_count) as usize;
+            if to_read == 0 {
+                break;
             }
+
+            if is_unwritten {
+                // Unwritten extents read as zero; no disk read needed.
+                data.resize(data.len() + to_read, 0);
+                continue;
+            }
+
+            // Single batched read covering the whole extent run, padded
+            // up to a block boundary so `read_exact` lands on a clean
+            // block-aligned region. The trailing pad bytes are dropped
+            // by `truncate(to_read)` below — they never appear in the
+            // returned buffer.
+            let aligned_read = (to_read as u64).div_ceil(volume.block_size) * volume.block_size;
+            let aligned_read = aligned_read.min(extent_byte_count) as usize;
+            let prev_len = data.len();
+            data.resize(prev_len + aligned_read, 0);
+            volume.read_blocks(disk_block_idx, &mut data[prev_len..prev_len + aligned_read])?;
+            data.truncate(prev_len + to_read);
         }
         data.resize(file_size_usize, 0);
         Ok((data, mapping))
