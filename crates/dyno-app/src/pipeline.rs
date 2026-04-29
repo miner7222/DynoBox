@@ -1613,6 +1613,21 @@ where
         }
     }
 
+    // Detect a key change between the OEM signing key already on the
+    // partitions and the key the resign loop is about to substitute in.
+    // The bootloader (e.g. abl.elf on TB322 / SDM-class devices) only
+    // verifies signatures against keys it was built with; a key change
+    // therefore usually requires also flashing an abl.elf that accepts
+    // the new key, otherwise the device refuses to boot. Capture both
+    // sha1s now so we can emit a single warning at the end of the
+    // resign stage without having to revisit every image.
+    let new_key_pubkey_sha1 = avbtool_rs::crypto::load_key_from_spec(&config.key)
+        .ok()
+        .map(|k| k.public_key_sha1());
+    let original_key_pubkey_sha1 = images
+        .iter()
+        .find_map(|p| read_image_pubkey_sha1(p).ok().flatten());
+
     let mut resigned_count = 0usize;
     let mut skipped_unsigned_count = 0usize;
 
@@ -1742,6 +1757,22 @@ where
             ),
         );
     }
+
+    if let (Some(orig), Some(new)) = (
+        original_key_pubkey_sha1.as_deref(),
+        new_key_pubkey_sha1.as_deref(),
+    ) && orig != new
+    {
+        message(
+            events,
+            MessageLevel::Warning,
+            format!(
+                "Resign substituted signing key: {} -> {}. The bootloader (e.g. abl.elf on Qualcomm-based devices) typically only verifies signatures against the keys it was built with — the final output may need to ship together with an abl.elf build that accepts the new signing key, otherwise the device will refuse to boot.",
+                orig, new
+            ),
+        );
+    }
+
     events.emit(ProgressEvent::StageCompleted {
         stage: StageKind::Resign,
     });
@@ -1764,6 +1795,22 @@ fn read_rollback_index(path: &Path) -> anyhow::Result<u64> {
             path.display(),
             msg
         )),
+    }
+}
+
+/// Read the embedded public-key SHA-1 from an AVB image's vbmeta blob.
+/// Returns `Ok(None)` for unsigned (algorithm = NONE) or non-AVB images,
+/// since `abl.elf`-side key acceptance only matters for partitions that
+/// actually carry a signature.
+fn read_image_pubkey_sha1(path: &Path) -> anyhow::Result<Option<String>> {
+    let entries = avbtool_rs::info::scan_input(path)?;
+    let Some(entry) = entries.into_iter().next() else {
+        return Ok(None);
+    };
+    match entry.result {
+        avbtool_rs::info::ScanResult::Avb(info) => Ok(info.public_key_sha1),
+        avbtool_rs::info::ScanResult::None => Ok(None),
+        avbtool_rs::info::ScanResult::Error(_) => Ok(None),
     }
 }
 
