@@ -445,20 +445,20 @@ fn find_anti_cross_sell_anchor(dex_bytes: &[u8]) -> Result<Option<usize>> {
         ));
     }
 
+    // Use `memchr` to find every 0x1A byte in the dex (SIMD-accelerated
+    // when the target supports it); the scalar loop only runs the
+    // 4-byte anchor check on the rare candidate positions, instead of
+    // touching every byte of a ~10 MB dex.
     let mut hits = Vec::new();
-    let mut i = 0usize;
-    // Read four bytes at i (`1A AA II II`) plus the byte at i+12
-    // (expected `38`). The tightest correct upper bound is therefore
-    // i + 13 ≤ dex_bytes.len(), not i + 16.
-    while i + 13 <= dex_bytes.len() {
-        if dex_bytes[i] == 0x1A
-            && dex_bytes[i + 2] == idx_lo
-            && dex_bytes[i + 3] == idx_hi
-            && dex_bytes[i + 12] == 0x38
-        {
+    for i in memchr::memchr_iter(0x1A, dex_bytes) {
+        // Need bytes at i, i+2, i+3, i+12. Tightest bound is i+12 < len,
+        // i.e. i + 13 ≤ len.
+        if i + 13 > dex_bytes.len() {
+            break;
+        }
+        if dex_bytes[i + 2] == idx_lo && dex_bytes[i + 3] == idx_hi && dex_bytes[i + 12] == 0x38 {
             hits.push(i + 12);
         }
-        i += 1;
     }
 
     match hits.len() {
