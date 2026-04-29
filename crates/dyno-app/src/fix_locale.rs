@@ -145,7 +145,17 @@ pub fn apply_fix_locale(
     dex_slice[if_eqz_off_in_dex] = 0x29; // goto/16 opcode
     dex_slice[if_eqz_off_in_dex + 1] = 0x00; // 20t padding
 
-    recompute_dex_header_sums(dex_slice)?;
+    // The dex header is 0x70 bytes; sums recomputation reads from byte
+    // 12 onward and writes back into bytes 8..32, so the slice has to
+    // be at least 0x70 bytes. Guarantee that here so the helper itself
+    // can stay infallible.
+    if dex_slice.len() < 0x70 {
+        return Err(anyhow!(
+            "dex slice too small ({} bytes) to recompute header sums",
+            dex_slice.len()
+        ));
+    }
+    recompute_dex_header_sums(dex_slice);
 
     // Recompute zip CRC32 for the patched dex entry, both in the local
     // file header and the central directory entry, so the jar still
@@ -536,17 +546,19 @@ fn build_dex_string_with_uleb_prefix(needle: &str) -> Vec<u8> {
 // Dex header recomputation (sha1 signature + adler32 checksum)
 // ---------------------------------------------------------------------------
 
-fn recompute_dex_header_sums(dex: &mut [u8]) -> Result<()> {
-    if dex.len() < 0x70 {
-        return Err(anyhow!("dex too small to recompute header sums"));
-    }
+/// Recompute the dex header signature (SHA-1 of bytes 32..) and
+/// checksum (Adler-32 of bytes 12..) so ART will accept the patched
+/// dex. The caller is responsible for ensuring `dex` is at least the
+/// dex header size (`0x70` bytes); this function panics on out-of-
+/// bounds slicing rather than carrying a `Result` for the single
+/// length check.
+fn recompute_dex_header_sums(dex: &mut [u8]) {
     // signature = sha1(bytes[32..]); written into bytes[12..32].
     let sig = sha1_digest(&dex[32..]);
     dex[12..32].copy_from_slice(&sig);
     // checksum = adler32(bytes[12..]); written into bytes[8..12].
     let cksum = adler32(&dex[12..]);
     dex[8..12].copy_from_slice(&cksum.to_le_bytes());
-    Ok(())
 }
 
 fn sha1_digest(data: &[u8]) -> [u8; 20] {
