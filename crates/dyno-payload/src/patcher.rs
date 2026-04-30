@@ -547,17 +547,7 @@ fn regenerate_verity_hash_tree(
     let hashes_per_block = bs / hash_size;
 
     let mut levels: Vec<Vec<u8>> = Vec::new();
-    let mut level0 = Vec::with_capacity((data_num * hash_size) as usize);
-    let mut buf = vec![0u8; bs as usize];
-    for i in 0..data_num {
-        dst_file.seek(SeekFrom::Start((data_start + i) * bs))?;
-        dst_file.read_exact(&mut buf)?;
-        let mut hasher = Sha256::new();
-        hasher.update(salt);
-        hasher.update(&buf);
-        level0.extend_from_slice(&hasher.finalize());
-    }
-    pad_to_block_multiple(&mut level0, bs as usize);
+    let level0 = hash_data_blocks(dst_file, data_start, data_num, bs, salt)?;
     levels.push(level0);
 
     loop {
@@ -597,6 +587,64 @@ fn regenerate_verity_hash_tree(
     Ok(())
 }
 
+fn hash_data_blocks(
+    dst_file: &mut File,
+    data_start: u64,
+    data_num: u64,
+    block_size: u64,
+    salt: &[u8],
+) -> Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+
+    const READ_BATCH_BYTES: u64 = 4 * 1024 * 1024;
+
+    let block_size_usize = usize::try_from(block_size)
+        .map_err(|_| DynoError::Tool(format!("block_size {block_size} exceeds usize")))?;
+    let blocks_per_batch = std::cmp::max(1, READ_BATCH_BYTES / block_size);
+    let level0_capacity = data_num
+        .checked_mul(32)
+        .and_then(|len| usize::try_from(len).ok())
+        .ok_or_else(|| DynoError::Tool(format!("level0 size for {data_num} blocks overflows")))?;
+    let mut level0 = Vec::with_capacity(level0_capacity);
+    let mut buf = vec![0u8; (std::cmp::min(data_num, blocks_per_batch) * block_size) as usize];
+    let mut done_blocks = 0u64;
+
+    while done_blocks < data_num {
+        let batch_blocks = std::cmp::min(blocks_per_batch, data_num - done_blocks);
+        let batch_bytes = batch_blocks * block_size;
+        let batch_bytes_usize = usize::try_from(batch_bytes)
+            .map_err(|_| DynoError::Tool(format!("hash batch {batch_bytes} exceeds usize")))?;
+        if buf.len() < batch_bytes_usize {
+            buf.resize(batch_bytes_usize, 0);
+        }
+
+        let batch_offset_blocks = data_start.checked_add(done_blocks).ok_or_else(|| {
+            DynoError::Tool(format!(
+                "hash tree data block offset overflow: {data_start} + {done_blocks}"
+            ))
+        })?;
+        let batch_offset = batch_offset_blocks.checked_mul(block_size).ok_or_else(|| {
+            DynoError::Tool(format!(
+                "hash tree data byte offset overflow: {batch_offset_blocks} * {block_size}"
+            ))
+        })?;
+
+        dst_file.seek(SeekFrom::Start(batch_offset))?;
+        dst_file.read_exact(&mut buf[..batch_bytes_usize])?;
+
+        for block in buf[..batch_bytes_usize].chunks_exact(block_size_usize) {
+            let mut hasher = Sha256::new();
+            hasher.update(salt);
+            hasher.update(block);
+            level0.extend_from_slice(&hasher.finalize());
+        }
+        done_blocks += batch_blocks;
+    }
+
+    pad_to_block_multiple(&mut level0, block_size_usize);
+    Ok(level0)
+}
+
 fn pad_to_block_multiple(buf: &mut Vec<u8>, block_size: usize) {
     let rem = buf.len() % block_size;
     if rem != 0 {
@@ -606,9 +654,13 @@ fn pad_to_block_multiple(buf: &mut Vec<u8>, block_size: usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use prost::Message;
 
-    use super::inspect_operation_support;
+    use super::{hash_data_blocks, inspect_operation_support, pad_to_block_multiple};
     use crate::payload::proto::InstallOperation;
     use crate::payload::proto::install_operation::Type;
     use crate::puffin::proto::{PatchHeader, StreamInfo, patch_header::PatchType};
@@ -648,6 +700,48 @@ mod tests {
         let info = inspect_operation_support(&op, &minimal_puff_patch(PatchType::Bsdiff)).unwrap();
         assert_eq!(info.detail_name, "PUFFDIFF(BSDIFF)");
         assert!(info.unsupported_reason.is_none());
+    }
+
+    #[test]
+    fn hash_data_blocks_hashes_each_block_with_salt() {
+        use sha2::{Digest, Sha256};
+
+        let path = std::env::temp_dir().join(format!(
+            "dynobox-hash-data-blocks-{}-{}.bin",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let block_size = 4096u64;
+        let block_a = vec![0x11; block_size as usize];
+        let block_b = vec![0x22; block_size as usize];
+        file.write_all(&block_a).unwrap();
+        file.write_all(&block_b).unwrap();
+
+        let salt = b"salt";
+        let level0 = hash_data_blocks(&mut file, 0, 2, block_size, salt).unwrap();
+
+        let mut expected = Vec::new();
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(&block_a);
+        expected.extend_from_slice(&hasher.finalize());
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(&block_b);
+        expected.extend_from_slice(&hasher.finalize());
+        pad_to_block_multiple(&mut expected, block_size as usize);
+
+        assert_eq!(level0, expected);
+        let _ = fs::remove_file(path);
     }
 
     fn minimal_puff_patch(patch_type: PatchType) -> Vec<u8> {
