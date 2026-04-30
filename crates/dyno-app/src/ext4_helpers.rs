@@ -167,7 +167,7 @@ mod tests {
     fn map_file_offset_to_disk_returns_none_in_hole() {
         let extents = vec![(0u64, 100u64, 1u64, false), (5u64, 200u64, 1u64, false)];
         // File block 1..4 are unmapped (hole) → None.
-        assert_eq!(map_file_offset_to_disk(&extents, 1 * 4096, 4096), None);
+        assert_eq!(map_file_offset_to_disk(&extents, 4096, 4096), None);
         assert_eq!(
             map_file_offset_to_disk(&extents, 5 * 4096, 4096),
             Some(200 * 4096)
