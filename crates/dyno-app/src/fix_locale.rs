@@ -250,6 +250,17 @@ struct ZipEntry {
     /// central directory record.
     cd_crc_offset: usize,
     compression_method: u16,
+    /// `true` when either the central directory or local file header
+    /// flags general-purpose bit 3 (CRC + sizes deferred to a trailing
+    /// data descriptor record). Recorded but not enforced at parse time
+    /// — only checked when the patcher actually intends to rewrite the
+    /// CRC field on this entry. Common in `META-INF/MANIFEST.MF` and
+    /// other stream-emitted JAR entries we never touch.
+    uses_data_descriptor: bool,
+    /// `true` when any of compressed_size / uncompressed_size /
+    /// local_header_offset reads as the ZIP64 sentinel `0xFFFFFFFF`.
+    /// Same deferred-enforcement rationale as `uses_data_descriptor`.
+    is_zip64: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -317,22 +328,16 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
             .context("framework.jar central directory entry has non-UTF-8 name")?
             .to_string();
 
-        if cd_flags & ZIP_FLAG_DATA_DESCRIPTOR != 0 {
-            return Err(anyhow!(
-                "framework.jar entry {} uses ZIP data-descriptor (flag bit 3); CRC + sizes live in a trailing record this parser does not handle",
-                name
-            ));
-        }
-        if compressed_size_raw == ZIP64_SENTINEL_U32
+        // ZIP64 + data-descriptor are tolerated at parse time. A real-world
+        // framework.jar mixes plain stored entries (the dex slices we
+        // actually patch) with stream-emitted ones like
+        // META-INF/MANIFEST.MF that flag bit 3 even though we never touch
+        // their CRC. The hard refusal moved into the per-target patch
+        // path so non-dex entries don't poison the parse.
+        let is_zip64 = compressed_size_raw == ZIP64_SENTINEL_U32
             || uncompressed_size_raw == ZIP64_SENTINEL_U32
-            || local_header_offset_raw == ZIP64_SENTINEL_U32
-        {
-            return Err(anyhow!(
-                "framework.jar entry {} uses ZIP64 extended fields ({:#010x} sentinel); ZIP64 is not supported here",
-                name,
-                ZIP64_SENTINEL_U32
-            ));
-        }
+            || local_header_offset_raw == ZIP64_SENTINEL_U32;
+        let cd_uses_data_descriptor = cd_flags & ZIP_FLAG_DATA_DESCRIPTOR != 0;
         let compressed_size = compressed_size_raw as usize;
         let local_header_offset = local_header_offset_raw as usize;
 
@@ -351,12 +356,7 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
             ));
         }
         let lfh_flags = read_u16_le(bytes, local_header_offset + 6);
-        if lfh_flags & ZIP_FLAG_DATA_DESCRIPTOR != 0 {
-            return Err(anyhow!(
-                "framework.jar entry {} local file header flags ZIP data-descriptor (bit 3); not supported",
-                name
-            ));
-        }
+        let lfh_uses_data_descriptor = lfh_flags & ZIP_FLAG_DATA_DESCRIPTOR != 0;
         let local_header_crc_offset = local_header_offset + 14;
         let local_name_len = read_u16_le(bytes, local_header_offset + 26) as usize;
         let local_extra_len = read_u16_le(bytes, local_header_offset + 28) as usize;
@@ -386,6 +386,8 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
             local_header_crc_offset,
             cd_crc_offset,
             compression_method,
+            uses_data_descriptor: cd_uses_data_descriptor || lfh_uses_data_descriptor,
+            is_zip64,
         });
 
         cursor = entry_end;
@@ -439,6 +441,26 @@ fn locate_anti_cross_sell_target(
                 "framework.jar dex entry {} is compressed (method {}); only stored dex entries are supported",
                 entry.name,
                 entry.compression_method
+            ));
+        }
+        if entry.uses_data_descriptor {
+            // CRC + sizes for this entry would live in a trailing data
+            // descriptor record we don't parse, so a CRC rewrite would
+            // hit the wrong offsets. Real-world framework.jars don't
+            // emit dex slices through the streaming/data-descriptor
+            // path (only metadata files like META-INF/MANIFEST.MF do),
+            // so this is a hard refusal scoped to dex entries we'd
+            // actually patch.
+            return Err(anyhow!(
+                "framework.jar dex entry {} uses ZIP data-descriptor (flag bit 3); CRC + sizes live in a trailing record this parser does not handle",
+                entry.name
+            ));
+        }
+        if entry.is_zip64 {
+            return Err(anyhow!(
+                "framework.jar dex entry {} uses ZIP64 extended fields ({:#010x} sentinel); ZIP64 is not supported here",
+                entry.name,
+                ZIP64_SENTINEL_U32
             ));
         }
         let dex_end = checked_range_end(
@@ -871,8 +893,82 @@ mod tests {
                 local_header_crc_offset: 0,
                 cd_crc_offset: 0,
                 compression_method: 0,
+                uses_data_descriptor: false,
+                is_zip64: false,
             }],
         };
         assert!(locate_anti_cross_sell_target(&jar, &zip).is_err());
+    }
+
+    /// Regression for the post-refactor fix-locale failure: real-world
+    /// framework.jar mixes plain stored entries (the dex slices we
+    /// patch) with stream-emitted entries like META-INF/MANIFEST.MF
+    /// that flag general-purpose bit 3. The parser must tolerate the
+    /// flag on entries we never touch, and only refuse it for an actual
+    /// matched dex.
+    #[test]
+    fn locate_anti_cross_sell_target_skips_data_descriptor_on_non_dex_entries() {
+        let jar = vec![0u8; 20];
+        let zip = ZipLayout {
+            entries: vec![
+                // The MANIFEST.MF style entry: data-descriptor flagged,
+                // but not a dex — must not poison the parse.
+                ZipEntry {
+                    name: "META-INF/MANIFEST.MF".to_string(),
+                    data_start: 0,
+                    compressed_size: 0,
+                    local_header_crc_offset: 0,
+                    cd_crc_offset: 0,
+                    compression_method: 0,
+                    uses_data_descriptor: true,
+                    is_zip64: false,
+                },
+                // A truncated dex entry: existing checks should still
+                // fire on this one. We use a too-short data range to
+                // confirm we even *reached* the dex iteration arm.
+                ZipEntry {
+                    name: "classes.dex".to_string(),
+                    data_start: 10,
+                    compressed_size: 100,
+                    local_header_crc_offset: 0,
+                    cd_crc_offset: 0,
+                    compression_method: 0,
+                    uses_data_descriptor: false,
+                    is_zip64: false,
+                },
+            ],
+        };
+        let err = locate_anti_cross_sell_target(&jar, &zip)
+            .expect_err("truncated dex range should still error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("dex entry classes.dex range"),
+            "expected truncated-dex message, got: {msg}"
+        );
+        assert!(
+            !msg.contains("META-INF"),
+            "META-INF should not have aborted the parse: {msg}"
+        );
+    }
+
+    /// Refusal still fires when the dex entry itself is flagged.
+    #[test]
+    fn locate_anti_cross_sell_target_rejects_data_descriptor_on_dex_entry() {
+        let jar = vec![0u8; 1024];
+        let zip = ZipLayout {
+            entries: vec![ZipEntry {
+                name: "classes.dex".to_string(),
+                data_start: 10,
+                compressed_size: 100,
+                local_header_crc_offset: 0,
+                cd_crc_offset: 0,
+                compression_method: 0,
+                uses_data_descriptor: true,
+                is_zip64: false,
+            }],
+        };
+        let err = locate_anti_cross_sell_target(&jar, &zip)
+            .expect_err("data-descriptor on dex must error");
+        assert!(format!("{err}").contains("data-descriptor"));
     }
 }
