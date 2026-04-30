@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -106,9 +106,20 @@ pub fn extract_partition_images(
                 let byte_offset = current_byte - chunk.relative_start_byte;
                 let readable_bytes = std::cmp::min(remaining_bytes, chunk.size_bytes - byte_offset);
 
-                let source = chunk_files
-                    .entry(chunk.path.clone())
-                    .or_insert_with(|| File::open(&chunk.path).unwrap());
+                let source = match chunk_files.entry(chunk.path.clone()) {
+                    Entry::Occupied(entry) => entry.into_mut(),
+                    Entry::Vacant(entry) => {
+                        let file = File::open(&chunk.path).map_err(|e| {
+                            DynoError::Tool(format!(
+                                "failed to open super chunk {} for {}: {}",
+                                chunk.path.display(),
+                                partition.name,
+                                e
+                            ))
+                        })?;
+                        entry.insert(file)
+                    }
+                };
 
                 source.seek(SeekFrom::Start(byte_offset))?;
 
@@ -137,4 +148,60 @@ pub fn extract_partition_images(
     }
 
     Ok(extracted)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::metadata::{
+        SuperBlockDevice, SuperChunk, SuperExtent, SuperGeometry, SuperGroup, SuperPartition,
+    };
+
+    #[test]
+    fn missing_super_chunk_returns_error() {
+        let temp = tempdir().unwrap();
+        let layout = SuperLayout {
+            geometry: SuperGeometry {
+                metadata_max_size: 4096,
+                metadata_slot_count: 2,
+                logical_block_size: 4096,
+            },
+            header_flags: 0,
+            block_devices: vec![SuperBlockDevice {
+                name: "super".to_string(),
+                size: 512,
+            }],
+            groups: vec![SuperGroup {
+                name: "default".to_string(),
+                maximum_size: 512,
+            }],
+            partitions: vec![SuperPartition {
+                name: "system_a".to_string(),
+                attributes: 0,
+                group_name: "default".to_string(),
+                extents: vec![SuperExtent {
+                    num_sectors: 1,
+                    target_type: LP_TARGET_TYPE_LINEAR,
+                    target_data: 0,
+                    target_source: 0,
+                }],
+            }],
+            chunks: vec![SuperChunk {
+                filename: "super_1.img".to_string(),
+                path: temp.path().join("missing_super_1.img"),
+                start_sector: 0,
+                num_sectors: 1,
+                sector_size_bytes: 512,
+                start_byte: 0,
+                size_bytes: 512,
+                relative_start_byte: 0,
+            }],
+        };
+
+        let result = extract_partition_images(&layout, &temp.path().join("out"), None);
+
+        assert!(result.is_err());
+    }
 }
