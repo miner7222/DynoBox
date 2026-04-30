@@ -362,7 +362,7 @@ where
 
     if request.repack {
         ops.repack_pipeline(
-            &request.input,
+            input_dir,
             &current_image_dir,
             &request.output,
             temp_root.path(),
@@ -371,7 +371,7 @@ where
     }
 
     if request.complete {
-        complete_output_from_input(&request.input, &request.output, events)?;
+        complete_output_from_input(input_dir, &request.output, events)?;
     }
 
     ops.verify_stage(&request.output, events)?;
@@ -2468,6 +2468,8 @@ mod tests {
     #[derive(Default)]
     struct TestPipelineOps {
         calls: RefCell<Vec<String>>,
+        repack_base_inputs: RefCell<Vec<PathBuf>>,
+        repack_base_has_rawprogram_xml: RefCell<Vec<bool>>,
     }
 
     impl TestPipelineOps {
@@ -2477,6 +2479,14 @@ mod tests {
 
         fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
+        }
+
+        fn repack_base_inputs(&self) -> Vec<PathBuf> {
+            self.repack_base_inputs.borrow().clone()
+        }
+
+        fn repack_base_has_rawprogram_xml(&self) -> Vec<bool> {
+            self.repack_base_has_rawprogram_xml.borrow().clone()
         }
     }
 
@@ -2543,13 +2553,19 @@ mod tests {
 
         fn repack_pipeline(
             &self,
-            _base_input_dir: &Path,
+            base_input_dir: &Path,
             _image_dir: &Path,
             final_output_dir: &Path,
             _scratch_dir: &Path,
             _events: &mut dyn EventSink,
         ) -> anyhow::Result<()> {
             self.record("repack_pipeline");
+            self.repack_base_inputs
+                .borrow_mut()
+                .push(base_input_dir.to_path_buf());
+            self.repack_base_has_rawprogram_xml
+                .borrow_mut()
+                .push(base_input_dir.join("rawprogram0.xml").exists());
             fs::create_dir_all(final_output_dir)?;
             fs::write(final_output_dir.join("super_1.img"), b"repack")?;
             Ok(())
@@ -2715,6 +2731,32 @@ mod tests {
     }
 
     #[test]
+    fn unpack_repack_uses_decrypted_xml_workspace_as_repack_base() {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("input");
+        let output = temp.path().join("output_repack");
+        fs::create_dir_all(&input).unwrap();
+        fs::write(input.join("rawprogram0.x"), tiny_rawprogram_x()).unwrap();
+
+        let request = UnpackRequest {
+            input: input.clone(),
+            output: output.clone(),
+            resign: None,
+            repack: true,
+            complete: false,
+        };
+        let ops = TestPipelineOps::default();
+        let mut sink = NoopEventSink;
+
+        run_unpack_with_ops(&request, &mut sink, &ops).unwrap();
+
+        let base_inputs = ops.repack_base_inputs();
+        assert_eq!(base_inputs.len(), 1);
+        assert_ne!(base_inputs[0], input);
+        assert_eq!(ops.repack_base_has_rawprogram_xml(), vec![true]);
+    }
+
+    #[test]
     fn resolve_partition_source_candidates_uses_extension_fallback_when_filename_is_empty() {
         let temp = tempdir().unwrap();
         let rawprogram_path = temp.path().join("rawprogram4.xml");
@@ -2792,6 +2834,18 @@ mod tests {
             vendor_spl: None,
             fix_locale: false,
         }
+    }
+
+    fn tiny_rawprogram_x() -> &'static [u8] {
+        &[
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x26, 0x87, 0x5e, 0x30, 0x61, 0xa3, 0x72, 0x11, 0x01, 0xba,
+            0xed, 0x99, 0x14, 0x29, 0x4a, 0x4f, 0x71, 0x7d, 0xfb, 0xfe, 0xa2, 0xa3, 0x34, 0xb6,
+            0xfc, 0x3a, 0xa9, 0x1d, 0xbb, 0x38, 0x03, 0x21, 0x50, 0x0c, 0x0a, 0x65, 0x53, 0x3d,
+            0xe5, 0x95, 0x09, 0x70, 0x48, 0x70, 0xce, 0x44, 0x3c, 0x6b, 0x4a, 0x04, 0x70, 0x9b,
+            0x7b, 0xd4, 0x9d, 0xa6, 0x5a, 0xd0, 0xe3, 0x94, 0x40, 0x32, 0x78, 0x50,
+        ]
     }
 
     #[test]
