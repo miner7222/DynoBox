@@ -5,7 +5,9 @@ pub mod parser;
 pub mod repack;
 
 pub use builder::serialize_metadata;
-pub use extractor::extract_partition_images;
+pub use extractor::{
+    PartitionProgressCallback, extract_partition_images, extract_partition_images_with_progress,
+};
 pub use metadata::*;
 pub use parser::parse_super_layout;
 pub use repack::repack_super_image;

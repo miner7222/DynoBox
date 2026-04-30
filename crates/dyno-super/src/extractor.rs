@@ -43,10 +43,35 @@ fn find_chunk<'a>(
     )))
 }
 
+/// Type-erased per-partition extraction progress callback.
+///
+/// Invoked once per partition with `(name, 0, total_bytes)` immediately
+/// before any data is written, then incrementally with
+/// `(name, done_bytes, total_bytes)` after each write chunk, and finally
+/// with `(name, total_bytes, total_bytes)` after the partition is fully
+/// written. Callers that want to render a per-partition progress bar can
+/// detect "started" on the first call (done == 0), update on each
+/// subsequent call, and ignore the rest.
+pub type PartitionProgressCallback<'a> = &'a mut dyn FnMut(&str, u64, u64);
+
 pub fn extract_partition_images(
     layout: &SuperLayout,
     output_dir: &Path,
     partition_names: Option<&[String]>,
+) -> Result<HashMap<String, PathBuf>> {
+    extract_partition_images_with_progress(layout, output_dir, partition_names, None)
+}
+
+/// Like [`extract_partition_images`], but also invokes `progress` per
+/// partition with byte-level progress while data is written. Used by
+/// the pipeline orchestration to drive a real
+/// [`ProgressEvent::ItemProgress`] bar instead of an undifferentiated
+/// spinner during super extraction.
+pub fn extract_partition_images_with_progress(
+    layout: &SuperLayout,
+    output_dir: &Path,
+    partition_names: Option<&[String]>,
+    mut progress: Option<PartitionProgressCallback>,
 ) -> Result<HashMap<String, PathBuf>> {
     if !output_dir.exists() {
         std::fs::create_dir_all(output_dir)?;
@@ -75,6 +100,19 @@ pub fn extract_partition_images(
         let output_path = output_dir.join(format!("{}.img", base_name));
         let mut target = File::create(&output_path)?;
 
+        // Total bytes for this partition = sum of every extent's logical
+        // size, regardless of LINEAR vs ZERO. Callers use this to size a
+        // determinate progress bar.
+        let total_bytes: u64 = partition
+            .extents
+            .iter()
+            .map(|extent| extent.num_sectors * LP_SECTOR_SIZE)
+            .sum();
+        let mut done_bytes: u64 = 0;
+        if let Some(cb) = progress.as_deref_mut() {
+            cb(&base_name, 0, total_bytes);
+        }
+
         for extent in &partition.extents {
             let extent_size_bytes = extent.num_sectors * LP_SECTOR_SIZE;
 
@@ -87,6 +125,10 @@ pub fn extract_partition_images(
                     let write_size = std::cmp::min(zero_remaining, zero_chunk.len() as u64);
                     target.write_all(&zero_chunk[..write_size as usize])?;
                     zero_remaining -= write_size;
+                    done_bytes = done_bytes.saturating_add(write_size);
+                    if let Some(cb) = progress.as_deref_mut() {
+                        cb(&base_name, done_bytes, total_bytes);
+                    }
                 }
                 continue;
             }
@@ -137,6 +179,10 @@ pub fn extract_partition_images(
                     })?;
                     target.write_all(&buf[..read_len])?;
                     chunk_remaining -= read_len as u64;
+                    done_bytes = done_bytes.saturating_add(read_len as u64);
+                    if let Some(cb) = progress.as_deref_mut() {
+                        cb(&base_name, done_bytes, total_bytes);
+                    }
                 }
 
                 remaining_bytes -= readable_bytes;

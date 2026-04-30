@@ -774,7 +774,19 @@ where
         ),
     );
 
-    let extracted = dynobox_super::extract_partition_images(&layout, out_dir, None)?;
+    let total_partitions = layout
+        .partitions
+        .iter()
+        .filter(|p| p.slot_suffix() != Some("b") && p.logical_size() > 0)
+        .count();
+    let extracted = extract_partition_images_with_progress_events(
+        events,
+        StageKind::Unpack,
+        &layout,
+        out_dir,
+        None,
+        total_partitions,
+    )?;
     message(
         events,
         MessageLevel::Info,
@@ -785,6 +797,67 @@ where
         stage: StageKind::Unpack,
     });
     Ok(())
+}
+
+/// Run [`dynobox_super::extract_partition_images_with_progress`] and forward
+/// its per-partition byte counter through `events` as paired
+/// [`ProgressEvent::ItemStarted`] + [`ProgressEvent::ItemProgress`] events.
+///
+/// Throttling matches the OTA apply path: `ItemProgress` is emitted on
+/// integer percent change plus a final tick at completion, so the bar
+/// advances smoothly without spamming tracing output during the inner
+/// 4 MiB chunk loop.
+fn extract_partition_images_with_progress_events<S>(
+    events: &mut S,
+    stage: StageKind,
+    layout: &dynobox_super::SuperLayout,
+    out_dir: &Path,
+    requested: Option<&[String]>,
+    total_partitions: usize,
+) -> anyhow::Result<std::collections::HashMap<String, PathBuf>>
+where
+    S: EventSink + ?Sized,
+{
+    let mut current_index: usize = 0;
+    let mut current_item: Option<String> = None;
+    let mut last_emitted_pct: i32 = -1;
+    let mut callback = |name: &str, done: u64, total: u64| {
+        if current_item.as_deref() != Some(name) {
+            current_index += 1;
+            current_item = Some(name.to_string());
+            last_emitted_pct = -1;
+            events.emit(ProgressEvent::ItemStarted {
+                stage,
+                current: current_index,
+                total: total_partitions,
+                item: name.to_string(),
+            });
+        }
+        let pct = if total == 0 {
+            100
+        } else {
+            ((done * 100) / total) as i32
+        };
+        let final_tick = total > 0 && done == total;
+        if pct == last_emitted_pct && !final_tick {
+            return;
+        }
+        last_emitted_pct = pct;
+        events.emit(ProgressEvent::ItemProgress {
+            stage,
+            item: name.to_string(),
+            done,
+            total,
+            unit: ProgressUnit::Bytes,
+        });
+    };
+    let extracted = dynobox_super::extract_partition_images_with_progress(
+        layout,
+        out_dir,
+        requested,
+        Some(&mut callback),
+    )?;
+    Ok(extracted)
 }
 
 /// Run [`dynobox_payload::apply_partition_payload_with_progress`] and forward
@@ -881,8 +954,19 @@ where
                     auto_unpack_dir.display()
                 ),
             );
-            let extracted =
-                dynobox_super::extract_partition_images(layout, &auto_unpack_dir, None)?;
+            let total_partitions = layout
+                .partitions
+                .iter()
+                .filter(|p| p.slot_suffix() != Some("b") && p.logical_size() > 0)
+                .count();
+            let extracted = extract_partition_images_with_progress_events(
+                events,
+                StageKind::AutoUnpack,
+                layout,
+                &auto_unpack_dir,
+                None,
+                total_partitions,
+            )?;
             message(
                 events,
                 MessageLevel::Info,
@@ -1053,16 +1137,17 @@ where
                             auto_unpack_announced = true;
                         }
                         if !cached_path.exists() {
-                            events.emit(ProgressEvent::ItemStarted {
-                                stage: StageKind::AutoUnpack,
-                                current: 1,
-                                total: 1,
-                                item: p_info.name.clone(),
-                            });
-                            let extracted = dynobox_super::extract_partition_images(
+                            // Single-partition auto-unpack: total_partitions = 1.
+                            // The helper emits its own ItemStarted with the
+                            // real partition name, so we no longer need the
+                            // pre-emitted placeholder.
+                            let extracted = extract_partition_images_with_progress_events(
+                                events,
+                                StageKind::AutoUnpack,
                                 layout,
                                 &auto_unpack_dir,
                                 Some(std::slice::from_ref(&p_info.name)),
+                                1,
                             )?;
                             if let Some(path) = extracted.get(&p_info.name) {
                                 filename = format!("{}.img", p_info.name);
