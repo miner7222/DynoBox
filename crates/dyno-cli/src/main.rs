@@ -307,6 +307,41 @@ fn parse_apply_positional_args(
     Ok(real_zips)
 }
 
+struct ApplyResignOptions<'a> {
+    key: &'a Option<String>,
+    algorithm: &'a Option<String>,
+    force: bool,
+    rollback_index: &'a Option<u64>,
+    boot_spl: &'a Option<String>,
+    vendor_spl: &'a Option<String>,
+    fix_locale: bool,
+}
+
+impl ApplyResignOptions<'_> {
+    fn has_any(&self) -> bool {
+        self.key.is_some()
+            || self.algorithm.is_some()
+            || self.force
+            || self.rollback_index.is_some()
+            || self.boot_spl.is_some()
+            || self.vendor_spl.is_some()
+            || self.fix_locale
+    }
+}
+
+fn validate_apply_resign_options(
+    resign: bool,
+    options: &ApplyResignOptions<'_>,
+) -> anyhow::Result<()> {
+    if !resign && options.has_any() {
+        anyhow::bail!("`apply` resign options require `resign` or `--resign`.");
+    }
+    if resign && options.key.is_none() {
+        anyhow::bail!("`apply resign` requires `--key`.");
+    }
+    Ok(())
+}
+
 fn resolve_info_output_path(output: Option<PathBuf>, format: ReportFormat) -> Option<PathBuf> {
     resolve_report_output_path(output, format, "avb_info.txt", "avb_info.json")
 }
@@ -642,9 +677,16 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("No OTA zip files provided.");
             }
 
-            if resign && key.is_none() {
-                anyhow::bail!("`apply resign` requires `--key`.");
-            }
+            let resign_options = ApplyResignOptions {
+                key: &key,
+                algorithm: &algorithm,
+                force,
+                rollback_index: &rollback,
+                boot_spl: &boot_spl,
+                vendor_spl: &vendor_spl,
+                fix_locale,
+            };
+            validate_apply_resign_options(resign, &resign_options)?;
 
             let out_dir = resolve_output_dir(output, default_output_name_for_apply(resign, repack));
             let request = ApplyRequest {
@@ -776,7 +818,7 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_apply_positional_args;
+    use super::{ApplyResignOptions, parse_apply_positional_args, validate_apply_resign_options};
     use std::path::PathBuf;
 
     #[test]
@@ -814,5 +856,77 @@ mod tests {
         let err = parse_apply_positional_args(&ota_zips, &mut unpack, &mut resign, &mut repack)
             .expect_err("bare complete must be rejected");
         assert!(err.to_string().contains("`--complete`"));
+    }
+
+    #[test]
+    fn validate_apply_resign_options_rejects_key_without_resign() {
+        let key = Some("testkey_rsa2048".to_string());
+        let options = ApplyResignOptions {
+            key: &key,
+            algorithm: &None,
+            force: false,
+            rollback_index: &None,
+            boot_spl: &None,
+            vendor_spl: &None,
+            fix_locale: false,
+        };
+        let err = validate_apply_resign_options(false, &options)
+            .expect_err("key without resign should be rejected");
+
+        assert!(err.to_string().contains("require `resign`"));
+    }
+
+    #[test]
+    fn validate_apply_resign_options_rejects_boot_spl_without_resign() {
+        let boot_spl = Some("2026-04-30".to_string());
+        let options = ApplyResignOptions {
+            key: &None,
+            algorithm: &None,
+            force: false,
+            rollback_index: &None,
+            boot_spl: &boot_spl,
+            vendor_spl: &None,
+            fix_locale: false,
+        };
+        let err = validate_apply_resign_options(false, &options)
+            .expect_err("boot SPL without resign should be rejected");
+
+        assert!(err.to_string().contains("require `resign`"));
+    }
+
+    #[test]
+    fn validate_apply_resign_options_rejects_resign_without_key() {
+        let options = ApplyResignOptions {
+            key: &None,
+            algorithm: &None,
+            force: false,
+            rollback_index: &None,
+            boot_spl: &None,
+            vendor_spl: &None,
+            fix_locale: false,
+        };
+        let err = validate_apply_resign_options(true, &options)
+            .expect_err("resign without key should be rejected");
+
+        assert!(err.to_string().contains("requires `--key`"));
+    }
+
+    #[test]
+    fn validate_apply_resign_options_accepts_resign_with_key() {
+        let key = Some("testkey_rsa2048".to_string());
+        let algorithm = Some("SHA256_RSA2048".to_string());
+        let rollback_index = Some(1);
+        let boot_spl = Some("2026-04-30".to_string());
+        let vendor_spl = Some("2026-04-30".to_string());
+        let options = ApplyResignOptions {
+            key: &key,
+            algorithm: &algorithm,
+            force: true,
+            rollback_index: &rollback_index,
+            boot_spl: &boot_spl,
+            vendor_spl: &vendor_spl,
+            fix_locale: true,
+        };
+        validate_apply_resign_options(true, &options).expect("resign with key should be accepted");
     }
 }
