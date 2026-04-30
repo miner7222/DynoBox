@@ -485,7 +485,21 @@ pub fn apply_partition_payload_with_progress(
         .iter()
         .map(|op| operation_progress_weight(op, block_size))
         .sum();
-    let total_weight: u64 = pre_copy_len.saturating_add(op_weight_total);
+    // Verity regen runs after the op loop and walks every data block to
+    // hash it. Without this term the bar would hit 100 % and then sit
+    // there for tens of seconds while SHA-256 chews through the
+    // partition. Weight = data block count * block_size; level-N+
+    // levels are << 1 % of the work and are folded into the same term.
+    let verity_data_blocks = p_manifest
+        .hash_tree_data_extent
+        .as_ref()
+        .zip(p_manifest.hash_tree_extent.as_ref())
+        .map(|(data_ext, _)| data_ext.num_blocks.unwrap_or(0))
+        .unwrap_or(0);
+    let verity_weight: u64 = verity_data_blocks.saturating_mul(block_size as u64);
+    let total_weight: u64 = pre_copy_len
+        .saturating_add(op_weight_total)
+        .saturating_add(verity_weight);
     let mut done_weight: u64 = 0;
 
     if let Some(cb) = progress.as_deref_mut() {
@@ -542,7 +556,30 @@ pub fn apply_partition_payload_with_progress(
         }
     }
 
-    regenerate_verity_hash_tree(p_manifest, &mut dst_file, block_size)?;
+    // Verity hash-tree regen with byte-level progress. The walk is
+    // single-threaded SHA-256 over `verity_weight` bytes and used to be
+    // invisible: the bar hit 100 % at op-loop end and then sat there
+    // for ~30 s on a 12 GiB system.img while the SHA pass ran. Now we
+    // tick `done_weight` after every 16 MiB of data hashed so the bar
+    // continues to advance through the verity phase.
+    {
+        const VERITY_REPORT_EVERY: u64 = 16 * 1024 * 1024;
+        let mut bytes_since_last_report: u64 = 0;
+        let mut tick = |delta: u64| {
+            done_weight = done_weight.saturating_add(delta);
+            bytes_since_last_report = bytes_since_last_report.saturating_add(delta);
+            if let Some(cb) = progress.as_deref_mut() {
+                if bytes_since_last_report >= VERITY_REPORT_EVERY {
+                    cb(done_weight, total_weight);
+                    bytes_since_last_report = 0;
+                }
+            }
+        };
+        regenerate_verity_hash_tree(p_manifest, &mut dst_file, block_size, Some(&mut tick))?;
+    }
+    if let Some(cb) = progress.as_mut() {
+        cb(done_weight, total_weight);
+    }
 
     Ok(())
 }
@@ -551,6 +588,7 @@ fn regenerate_verity_hash_tree(
     p_manifest: &crate::payload::proto::PartitionUpdate,
     dst_file: &mut File,
     block_size: u32,
+    progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<()> {
     use sha2::{Digest, Sha256};
 
@@ -583,7 +621,7 @@ fn regenerate_verity_hash_tree(
     let hashes_per_block = bs / hash_size;
 
     let mut levels: Vec<Vec<u8>> = Vec::new();
-    let level0 = hash_data_blocks(dst_file, data_start, data_num, bs, salt)?;
+    let level0 = hash_data_blocks(dst_file, data_start, data_num, bs, salt, progress)?;
     levels.push(level0);
 
     loop {
@@ -629,6 +667,7 @@ fn hash_data_blocks(
     data_num: u64,
     block_size: u64,
     salt: &[u8],
+    mut progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<Vec<u8>> {
     use sha2::{Digest, Sha256};
 
@@ -675,6 +714,9 @@ fn hash_data_blocks(
             level0.extend_from_slice(&hasher.finalize());
         }
         done_blocks += batch_blocks;
+        if let Some(cb) = progress.as_deref_mut() {
+            cb(batch_bytes);
+        }
     }
 
     pad_to_block_multiple(&mut level0, block_size_usize);
@@ -763,7 +805,7 @@ mod tests {
         file.write_all(&block_b).unwrap();
 
         let salt = b"salt";
-        let level0 = hash_data_blocks(&mut file, 0, 2, block_size, salt).unwrap();
+        let level0 = hash_data_blocks(&mut file, 0, 2, block_size, salt, None).unwrap();
 
         let mut expected = Vec::new();
         let mut hasher = Sha256::new();
