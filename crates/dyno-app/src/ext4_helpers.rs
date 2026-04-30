@@ -1,6 +1,6 @@
 //! Anyhow-flavoured wrappers around `ext4_reader`.
 //!
-//! `vendor_spl` and `fix_locale` both walk an ext4 image to a known path,
+//! `vendor_spl` and `fuck_as` both walk an ext4 image to a known path,
 //! then either read its data or rewrite specific bytes through the
 //! inode's extent map. Each previously carried its own copies of these
 //! helpers; this module is the canonical home.
@@ -13,7 +13,7 @@
 //! * `ext4_helpers` — dynobox-flavoured wrappers that lift those errors
 //!   into `anyhow::Result` with image-path context, plus the surgical
 //!   write-back primitives (`write_via_extents`, `map_file_offset_to_disk`)
-//!   that vendor_spl and fix_locale share.
+//!   that vendor_spl and fuck_as share.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};

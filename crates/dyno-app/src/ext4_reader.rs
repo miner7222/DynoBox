@@ -589,7 +589,7 @@ impl Inode {
     /// Like [`Inode::open_read`], but also returns the extent mapping
     /// produced by the same single tree walk. Callers that need both
     /// the file content and a way to write specific bytes back through
-    /// the extent tree (e.g. [`crate::fix_locale`] / [`crate::vendor_spl`])
+    /// the extent tree (e.g. [`crate::fuck_as`] / [`crate::vendor_spl`])
     /// can use this to avoid two redundant walks of the same inode.
     pub fn open_read_with_extents<R: Read + Seek>(
         &self,

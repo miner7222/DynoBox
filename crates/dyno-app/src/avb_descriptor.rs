@@ -1,6 +1,6 @@
 //! Shared AVB vbmeta navigation primitives.
 //!
-//! `boot_spl`, `vendor_spl`, and `fix_locale` all walk a vbmeta blob in
+//! `boot_spl`, `vendor_spl`, and `fuck_as` all walk a vbmeta blob in
 //! the same way:
 //!   * resolve the blob's disk byte range (footer-attached or standalone),
 //!   * slice the descriptors region out of the blob,

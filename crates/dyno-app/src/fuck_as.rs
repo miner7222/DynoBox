@@ -1,32 +1,61 @@
-//! Bypass Lenovo's `ZuiAntiCrossSell` locale gate inside `system.img`.
+//! Disable Lenovo's `ZuiAntiCrossSell` LGSI feature flag inside `system.img`.
 //!
-//! The Configuration.setLocales path on TB322 vendors a region check that
-//! forces `zh_CN` whenever `ro.config.lgsi.region == "prc"` and the runtime
-//! locale doesn't already contain `zh`. The cheapest reliable disarm is to
-//! flip the very first conditional branch to `cond_2` in `setLocales` into
-//! an unconditional `goto cond_2`, so the rest of the gate is skipped
-//! regardless of the LGSI feature flag, region prop, or current locale.
+//! Lenovo's `LgsiFeatures` initialiser (`com/lgsi/config/LgsiFeatures.smali`)
+//! registers each LGSI feature by constructing a
+//! `LgsiFeatureInfo(String name, boolean mIsRoot, boolean mIsActive)`
+//! per feature and stuffing it into a registry. For `ZuiAntiCrossSell`
+//! the call site looks like:
+//!
+//! ```smali
+//! const-string v2, "ZuiAntiCrossSell"
+//! invoke-direct {v1, v2, v4, v3}, Lcom/lgsi/config/LgsiFeatureInfo;-><init>(Ljava/lang/String;ZZ)V
+//! ```
+//!
+//! where `v3 = 0x0` (false) and `v4 = 0x1` (true) are the booleans loaded
+//! earlier in the method. The third-arg register `v4` enables the feature.
+//! Flip it to `v3` and the feature registers as disabled, which is the
+//! cheapest reliable disarm — and unlike the old per-locale branch flip in
+//! `Configuration.setLocales`, it kills every behaviour ZuiAntiCrossSell
+//! gates (locale forcing, region filtering, store routing, …) at the
+//! source.
+//!
+//! Bytecode-level: the invoke-direct is a 35c-format instruction, six
+//! bytes wide, encoding the four argument registers across two nibble
+//! pairs. With registers `{v1, v2, v4, v3}` (i.e. `C=v1`, `D=v2`, `E=v4`,
+//! `F=v3`) the on-disk encoding is:
+//!
+//! ```text
+//!   70 40 BB BB 21 34
+//!   ^^ ^^       ^^ ^^
+//!   |  |        |  |
+//!   |  A|G=4|0  |  F|E = 3|4   ← patch byte: 0x34 → 0x33 (E: v4 → v3)
+//!   |           D|C = 2|1
+//!   op = invoke-direct
+//! ```
+//!
+//! Combined with the preceding `const-string v2, "ZuiAntiCrossSell"`
+//! (4-byte 21c-fmt, opcode `0x1A`), the anchor is exactly ten bytes:
+//! `1A AA II II 70 40 ?? ?? 21 34`.
 //!
 //! End-to-end:
 //!   1. Walk `system.img` as ext4 to `/system/framework/framework.jar`.
 //!   2. Parse the JAR's ZIP layout (entries are stored, not deflated).
 //!   3. Locate the `classes*.dex` carrying the AntiCrossSell anchor — the
 //!      string `ZuiAntiCrossSell` must be in the dex string table, and a
-//!      bytecode anchor matching `const-string vAA, "ZuiAntiCrossSell";
-//!      invoke-static; move-result; if-eqz vAA, +cond_2` must occur in the
-//!      method's insns. If the anchor is absent (already patched, different
-//!      build, or the class was refactored), return [`FixLocaleOutcome::NotApplicable`]
+//!      bytecode sequence matching the ten-byte anchor above must occur
+//!      in the method's insns. If the anchor is absent (different build
+//!      or refactored class), return [`FuckAsOutcome::NotApplicable`]
 //!      and leave both images alone.
-//!   4. Replace the 4-byte `if-eqz vAA, +OFF` (opcode 0x38, fmt 21t) with
-//!      `goto/16 +OFF` (opcode 0x29, fmt 20t). Both instructions are 4
-//!      bytes wide and store the branch offset in the same bytes, so the
-//!      branch target stays valid.
+//!   4. Flip byte 9 of the anchor (`F|E` of the invoke-direct) from
+//!      `0x34` to `0x33`. If the byte is already `0x33` the patch is a
+//!      no-op (already applied) and we return `NotApplicable` so the
+//!      caller doesn't waste minutes regenerating an unchanged hash tree.
 //!   5. Recompute the dex header's SHA-1 signature (covers bytes 32..) and
 //!      Adler-32 checksum (covers bytes 12..) so ART will load the dex.
 //!   6. Update CRC32 in the JAR's local file header and central directory
 //!      entry for the modified dex. JAR length is preserved.
 //!   7. Write the rewritten JAR back to `system.img` through the inode's
-//!      extent map (same byte loop pattern as `vendor_spl::patch_build_prop_spl_via_ext4`).
+//!      extent mapping (same byte loop pattern as `vendor_spl::patch_build_prop_spl_via_ext4`).
 //!   8. Regenerate the dm-verity hash tree on `system.img` and overwrite
 //!      the existing tree region. Patch `system.img`'s footer Hashtree
 //!      descriptor's `root_digest` (NONE-algorithm vbmeta — no signature
@@ -55,55 +84,53 @@ const ANTI_CROSS_SELL_STRING: &str = "ZuiAntiCrossSell";
 const FRAMEWORK_JAR_PATH: &[&str] = &["system", "framework", "framework.jar"];
 const SYSTEM_PARTITION_NAME: &str = "system";
 
-/// Outcome of an attempted `--fix-locale` pass.
+/// Outcome of an attempted `--fuck-as` pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FixLocaleOutcome {
+pub enum FuckAsOutcome {
     /// AntiCrossSell anchor was found and patched. `system.img` and
     /// `vbmeta_system.img` were updated. Caller must re-sign vbmeta_system
     /// (regular resign loop handles that).
     Patched {
         dex_entry: String,
-        if_eqz_offset_in_jar: u64,
+        invoke_direct_offset_in_jar: u64,
         old_root_digest: String,
         new_root_digest: String,
     },
     /// The patch was a no-op for one of the legitimate skip reasons:
-    /// `framework.jar` is missing, or it exists but the AntiCrossSell
-    /// anchor is not present (already patched, different ROM build, or
-    /// refactored class). The pipeline continues without touching
-    /// `system.img` or `vbmeta_system.img`. `reason` carries the
-    /// human-readable explanation for the progress log.
+    /// `framework.jar` is missing, the AntiCrossSell anchor is not present
+    /// (different ROM build or refactored class), or the F|E byte is
+    /// already `0x33` (already patched on a previous run). The pipeline
+    /// continues without touching `system.img` or `vbmeta_system.img`.
+    /// `reason` carries the human-readable explanation for the progress
+    /// log.
     NotApplicable { reason: String },
 }
 
-/// Apply `--fix-locale` to a freshly unpacked `system.img` and propagate
+/// Apply `--fuck-as` to a freshly unpacked `system.img` and propagate
 /// the new dm-verity root digest to `vbmeta_system.img`.
 ///
-/// Equivalent to [`apply_fix_locale_with_progress`] called with
+/// Equivalent to [`apply_fuck_as_with_progress`] called with
 /// `verity_progress = None`.
-pub fn apply_fix_locale(
-    system_image: &Path,
-    vbmeta_system_image: &Path,
-) -> Result<FixLocaleOutcome> {
-    apply_fix_locale_with_progress(system_image, vbmeta_system_image, None)
+pub fn apply_fuck_as(system_image: &Path, vbmeta_system_image: &Path) -> Result<FuckAsOutcome> {
+    apply_fuck_as_with_progress(system_image, vbmeta_system_image, None)
 }
 
-/// Like [`apply_fix_locale`] but invokes `verity_progress` with
+/// Like [`apply_fuck_as`] but invokes `verity_progress` with
 /// per-leaf-block delta byte counts during the dm-verity regeneration
 /// phase on `system.img`. The other phases (ext4 walk, JAR byte patch,
 /// AVB descriptor rewrites) run sub-second; only the SHA-256 walk over
 /// a ~12 GiB system.img is long enough to need a progress bar.
-pub fn apply_fix_locale_with_progress(
+pub fn apply_fuck_as_with_progress(
     system_image: &Path,
     vbmeta_system_image: &Path,
     verity_progress: Option<VerityProgressCallback>,
-) -> Result<FixLocaleOutcome> {
+) -> Result<FuckAsOutcome> {
     // 1. Locate framework.jar and its on-disk extent layout.
     let mut volume = open_ext4_volume(system_image)?;
     let inode = match lookup_inode_at_path(&mut volume, FRAMEWORK_JAR_PATH)? {
         Some(i) => i,
         None => {
-            return Ok(FixLocaleOutcome::NotApplicable {
+            return Ok(FuckAsOutcome::NotApplicable {
                 reason: "/system/framework/framework.jar not found in system.img".to_string(),
             });
         }
@@ -132,10 +159,10 @@ pub fn apply_fix_locale_with_progress(
     //    carries the AntiCrossSell anchor.
     let zip = parse_zip_central_directory(&jar_bytes)?;
     let Some(target) = locate_anti_cross_sell_target(&jar_bytes, &zip)? else {
-        return Ok(FixLocaleOutcome::NotApplicable {
+        return Ok(FuckAsOutcome::NotApplicable {
             reason: format!(
                 "no `{ANTI_CROSS_SELL_STRING}` AntiCrossSell anchor found in framework.jar; \
-                 likely already patched or different build"
+                 different build or refactored class"
             ),
         });
     };
@@ -144,27 +171,37 @@ pub fn apply_fix_locale_with_progress(
     //    at known offsets — the dex slice keeps its size, the JAR keeps
     //    its size, no resize happens — so we mutate `jar_bytes` directly
     //    instead of cloning a 48 MB buffer just to keep the original
-    //    around. The 0x70 / anchor-byte / length sanity checks below
-    //    enforce the invariants that previously made the clone "safe".
+    //    around. The opcode/byte sanity checks below enforce the
+    //    invariants that previously made the clone "safe".
     let dex_data_off = target.entry.data_start;
     let dex_data_end = dex_data_off + target.entry.compressed_size;
-    let if_eqz_off_in_dex = target.if_eqz_off_in_dex;
+    let invoke_direct_off_in_dex = target.invoke_direct_off_in_dex;
+    // Patch byte sits at the F|E nibble pair, byte +5 of the
+    // invoke-direct opcode (= byte 9 of the 10-byte anchor).
+    let patch_off_in_dex = invoke_direct_off_in_dex + 5;
 
     {
         let dex_slice = &mut jar_bytes[dex_data_off..dex_data_end];
-        // Replace `38 RR LO HI` (if-eqz) with `29 00 LO HI` (goto/16).
-        // The branch offset bytes (LO HI) carry over unchanged so cond_2
-        // stays reachable. AA reg drops to 00 padding because goto/16
-        // is fmt 20t.
-        if dex_slice[if_eqz_off_in_dex] != 0x38 {
+        let current = dex_slice[patch_off_in_dex];
+        if current == 0x33 {
+            // Already patched on a previous run. Skip the JAR rewrite
+            // and the hash-tree regen; the system.img on disk already
+            // matches and a no-op regen would just waste minutes.
+            return Ok(FuckAsOutcome::NotApplicable {
+                reason: "ZuiAntiCrossSell registration already disabled (F|E byte already 0x33)"
+                    .to_string(),
+            });
+        }
+        if current != 0x34 {
             return Err(anyhow!(
-                "Anchor mismatch: byte at dex offset {} is {:#04x}, expected 0x38 (if-eqz)",
-                if_eqz_off_in_dex,
-                dex_slice[if_eqz_off_in_dex]
+                "Anchor mismatch: F|E byte at dex offset {} is {:#04x}, expected 0x34 (v4) or 0x33 (v3, already patched)",
+                patch_off_in_dex,
+                current
             ));
         }
-        dex_slice[if_eqz_off_in_dex] = 0x29; // goto/16 opcode
-        dex_slice[if_eqz_off_in_dex + 1] = 0x00; // 20t padding
+        // Flip E nibble from v4 (true) to v3 (false). F nibble stays at
+        // v3, so byte goes 0x34 → 0x33.
+        dex_slice[patch_off_in_dex] = 0x33;
 
         // The dex header is 0x70 bytes; sums recomputation reads from byte
         // 12 onward and writes back into bytes 8..32, so the slice has to
@@ -190,9 +227,10 @@ pub fn apply_fix_locale_with_progress(
     );
     write_u32_le(&mut jar_bytes, target.entry.cd_crc_offset, new_crc);
 
-    // 4. Stash the JAR-relative byte offset of the patched if-eqz for the
-    //    progress message — useful when reproducing on a different ROM.
-    let if_eqz_offset_in_jar = (dex_data_off + if_eqz_off_in_dex) as u64;
+    // 4. Stash the JAR-relative byte offset of the patched invoke-direct
+    //    for the progress message — useful when reproducing on a
+    //    different ROM.
+    let invoke_direct_offset_in_jar = (dex_data_off + invoke_direct_off_in_dex) as u64;
 
     // 5. Write the rewritten JAR back into system.img through the inode's
     //    extent mapping. The JAR is the same length as before, so each
@@ -229,9 +267,9 @@ pub fn apply_fix_locale_with_progress(
     //    signature after this module returns.
     patch_hashtree_root_digest(vbmeta_system_image, SYSTEM_PARTITION_NAME, &new_root_digest)?;
 
-    Ok(FixLocaleOutcome::Patched {
+    Ok(FuckAsOutcome::Patched {
         dex_entry: target.entry.name.clone(),
-        if_eqz_offset_in_jar,
+        invoke_direct_offset_in_jar,
         old_root_digest: hex_encode(&old_root_digest),
         new_root_digest: hex_encode(&new_root_digest),
     })
@@ -441,9 +479,10 @@ fn find_eocd(bytes: &[u8]) -> Result<usize> {
 #[derive(Debug, Clone)]
 struct AnchorTarget {
     entry: ZipEntry,
-    /// Byte offset of the `if-eqz` opcode inside the dex (== inside the
-    /// JAR-relative dex slice).
-    if_eqz_off_in_dex: usize,
+    /// Byte offset of the `invoke-direct` opcode (`0x70`) inside the dex
+    /// (== inside the JAR-relative dex slice). The patched byte sits at
+    /// `invoke_direct_off_in_dex + 5` (the F|E nibble pair).
+    invoke_direct_off_in_dex: usize,
 }
 
 fn locate_anti_cross_sell_target(
@@ -500,19 +539,22 @@ fn locate_anti_cross_sell_target(
             ));
         }
         let dex_bytes = &jar_bytes[entry.data_start..dex_end];
-        let Some(if_eqz_off) = find_anti_cross_sell_anchor(dex_bytes)? else {
+        let Some(invoke_direct_off) = find_anti_cross_sell_anchor(dex_bytes)? else {
             continue;
         };
         return Ok(Some(AnchorTarget {
             entry: entry.clone(),
-            if_eqz_off_in_dex: if_eqz_off,
+            invoke_direct_off_in_dex: invoke_direct_off,
         }));
     }
     Ok(None)
 }
 
-/// Search a dex for the AntiCrossSell branch anchor and return the byte
-/// offset of the `if-eqz` (within the dex) if found.
+/// Search a dex for the AntiCrossSell `LgsiFeatureInfo.<init>` call site
+/// and return the byte offset of the `invoke-direct` opcode (within the
+/// dex) if found. Accepts both the unpatched `0x34` (E=v4=true) and the
+/// patched `0x33` (E=v3=false) forms so a re-run can detect "already
+/// done" without erroring out.
 fn find_anti_cross_sell_anchor(dex_bytes: &[u8]) -> Result<Option<usize>> {
     // Locate the string ID of "ZuiAntiCrossSell" in the dex string pool.
     // dex strings are stored in UTF-8 (modified MUTF-8 for non-ASCII) with
@@ -527,15 +569,6 @@ fn find_anti_cross_sell_anchor(dex_bytes: &[u8]) -> Result<Option<usize>> {
         Some(idx) => idx,
         None => return Ok(None),
     };
-
-    // Scan dex bytes for `1A AA II II` (const-string vAA, "ZuiAntiCrossSell")
-    // followed 12 bytes later by `38 ?? LL HH` (if-eqz vBB, +OFF). The
-    // intervening 12 bytes are invoke-static (6 bytes, fmt 35c) and
-    // move-result (2 bytes, fmt 11x) plus the const-string itself's 4
-    // bytes — but we anchor on opcode 0x1A's byte position, so the
-    // distance to the if-eqz is 4 + 6 + 2 = 12 bytes.
-    let idx_lo = (string_idx & 0xFF) as u8;
-    let idx_hi = ((string_idx >> 8) & 0xFF) as u8;
     if string_idx > 0xFFFF {
         // Const-string with a >16-bit string idx would have to be encoded
         // as const-string/jumbo (opcode 0x1B). The probe shows 0x1A is
@@ -546,20 +579,41 @@ fn find_anti_cross_sell_anchor(dex_bytes: &[u8]) -> Result<Option<usize>> {
             string_idx
         ));
     }
+    let idx_lo = (string_idx & 0xFF) as u8;
+    let idx_hi = ((string_idx >> 8) & 0xFF) as u8;
 
+    // Anchor: 1A AA II II 70 40 ?? ?? 21 34
+    //         0  1  2  3  4  5  6  7  8  9
+    // Where:
+    //   bytes 0..3 = const-string vAA, "ZuiAntiCrossSell" (fmt 21c)
+    //     byte 0   = 0x1A (op)
+    //     byte 1   = AA (destination register; whatever the compiler picks)
+    //     bytes 2..3 = string idx (II II), LE
+    //   bytes 4..9 = invoke-direct {v1, v2, v4, v3}, ... (fmt 35c)
+    //     byte 4   = 0x70 (op)
+    //     byte 5   = 0x40 (A|G = 4|0, four-arg call)
+    //     bytes 6..7 = method idx (BBBB), unconstrained
+    //     byte 8   = 0x21 (D|C = v2|v1)
+    //     byte 9   = 0x34 (F|E = v3|v4) — patch target → 0x33
+    //
     // Use `memchr` to find every 0x1A byte in the dex (SIMD-accelerated
     // when the target supports it); the scalar loop only runs the
-    // 4-byte anchor check on the rare candidate positions, instead of
+    // multi-byte anchor check on the rare candidate positions, instead of
     // touching every byte of a ~10 MB dex.
     let mut hits = Vec::new();
     for i in memchr::memchr_iter(0x1A, dex_bytes) {
-        // Need bytes at i, i+2, i+3, i+12. Tightest bound is i+12 < len,
-        // i.e. i + 13 ≤ len.
-        if i + 13 > dex_bytes.len() {
+        // Need bytes at i..i+10. Tightest bound is i+9 < len, i.e. i+10 ≤ len.
+        if i + 10 > dex_bytes.len() {
             break;
         }
-        if dex_bytes[i + 2] == idx_lo && dex_bytes[i + 3] == idx_hi && dex_bytes[i + 12] == 0x38 {
-            hits.push(i + 12);
+        if dex_bytes[i + 2] == idx_lo
+            && dex_bytes[i + 3] == idx_hi
+            && dex_bytes[i + 4] == 0x70
+            && dex_bytes[i + 5] == 0x40
+            && dex_bytes[i + 8] == 0x21
+            && (dex_bytes[i + 9] == 0x34 || dex_bytes[i + 9] == 0x33)
+        {
+            hits.push(i + 4);
         }
     }
 
@@ -922,7 +976,7 @@ mod tests {
         assert!(locate_anti_cross_sell_target(&jar, &zip).is_err());
     }
 
-    /// Regression for the post-refactor fix-locale failure: real-world
+    /// Regression for the post-refactor fuck-as failure: real-world
     /// framework.jar mixes plain stored entries (the dex slices we
     /// patch) with stream-emitted entries like META-INF/MANIFEST.MF
     /// that flag general-purpose bit 3. The parser must tolerate the

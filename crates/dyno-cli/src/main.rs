@@ -91,16 +91,20 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl, requires = "resign")]
         vendor_spl: Option<String>,
 
-        /// Defang Lenovo's `ZuiAntiCrossSell` locale gate inside system.img
-        /// by flipping the first conditional branch of `Configuration.setLocales`
-        /// into an unconditional goto. Patches the Dalvik bytecode of the
-        /// matching `classes*.dex` inside `framework.jar`, regenerates
-        /// system.img dm-verity, and propagates the new root digest into
+        /// Disable Lenovo's `ZuiAntiCrossSell` LGSI feature flag inside
+        /// system.img at the source. Locates the
+        /// `LgsiFeatureInfo(name, mIsRoot, mIsActive)` registration call in
+        /// `LgsiFeatures.<clinit>` and flips the third-arg register from
+        /// `v4` (true) to `v3` (false), so every behaviour the flag gates
+        /// — locale forcing, region filtering, store routing, … —
+        /// registers as off. Patches the Dalvik bytecode of the matching
+        /// `classes*.dex` inside `framework.jar`, regenerates system.img
+        /// dm-verity, and propagates the new root digest into
         /// vbmeta_system.img so the resign loop signs over the new bytes.
-        /// No-op when the AntiCrossSell anchor is absent (already patched
-        /// or different ROM build).
+        /// No-op when the AntiCrossSell anchor is absent (different ROM
+        /// build) or already disabled.
         #[arg(long, requires = "resign")]
-        fix_locale: bool,
+        fuck_as: bool,
 
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
@@ -166,7 +170,7 @@ enum Commands {
         /// resign loop signs over the new bytes. No-op when the
         /// AntiCrossSell anchor is absent.
         #[arg(long)]
-        fix_locale: bool,
+        fuck_as: bool,
 
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
@@ -226,7 +230,7 @@ enum Commands {
         /// resign loop signs over the new bytes. No-op when the
         /// AntiCrossSell anchor is absent.
         #[arg(long)]
-        fix_locale: bool,
+        fuck_as: bool,
 
         /// Repack dynamic partitions back into super after resign
         #[arg(long)]
@@ -314,7 +318,7 @@ struct ApplyResignOptions<'a> {
     rollback_index: &'a Option<u64>,
     boot_spl: &'a Option<String>,
     vendor_spl: &'a Option<String>,
-    fix_locale: bool,
+    fuck_as: bool,
 }
 
 impl ApplyResignOptions<'_> {
@@ -325,7 +329,7 @@ impl ApplyResignOptions<'_> {
             || self.rollback_index.is_some()
             || self.boot_spl.is_some()
             || self.vendor_spl.is_some()
-            || self.fix_locale
+            || self.fuck_as
     }
 }
 
@@ -376,7 +380,7 @@ fn make_resign_config(
     rollback_index: Option<u64>,
     boot_spl: Option<String>,
     vendor_spl: Option<String>,
-    fix_locale: bool,
+    fuck_as: bool,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
         key,
@@ -385,7 +389,7 @@ fn make_resign_config(
         rollback_index,
         boot_spl,
         vendor_spl,
-        fix_locale,
+        fuck_as,
     })
 }
 
@@ -628,7 +632,7 @@ fn main() -> anyhow::Result<()> {
             rollback,
             boot_spl,
             vendor_spl,
-            fix_locale,
+            fuck_as,
             complete,
         } => {
             if resign && key.is_none() {
@@ -641,7 +645,7 @@ fn main() -> anyhow::Result<()> {
                 input,
                 output: out_dir,
                 resign: make_resign_config(
-                    key, algorithm, force, rollback, boot_spl, vendor_spl, fix_locale,
+                    key, algorithm, force, rollback, boot_spl, vendor_spl, fuck_as,
                 ),
                 repack,
                 complete,
@@ -663,7 +667,7 @@ fn main() -> anyhow::Result<()> {
             rollback,
             boot_spl,
             vendor_spl,
-            fix_locale,
+            fuck_as,
             complete,
             ota_zips,
         } => {
@@ -684,7 +688,7 @@ fn main() -> anyhow::Result<()> {
                 rollback_index: &rollback,
                 boot_spl: &boot_spl,
                 vendor_spl: &vendor_spl,
-                fix_locale,
+                fuck_as,
             };
             validate_apply_resign_options(resign, &resign_options)?;
 
@@ -695,7 +699,7 @@ fn main() -> anyhow::Result<()> {
                 ota_zips: real_zips,
                 force_unpack: unpack,
                 resign: make_resign_config(
-                    key, algorithm, force, rollback, boot_spl, vendor_spl, fix_locale,
+                    key, algorithm, force, rollback, boot_spl, vendor_spl, fuck_as,
                 ),
                 repack,
                 complete,
@@ -714,7 +718,7 @@ fn main() -> anyhow::Result<()> {
             rollback,
             boot_spl,
             vendor_spl,
-            fix_locale,
+            fuck_as,
             repack,
         } => {
             let out_dir = resolve_output_dir(output, default_output_name_for_resign(repack));
@@ -728,7 +732,7 @@ fn main() -> anyhow::Result<()> {
                     rollback_index: rollback,
                     boot_spl,
                     vendor_spl,
-                    fix_locale,
+                    fuck_as,
                 },
                 repack,
             };
@@ -868,7 +872,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &None,
             vendor_spl: &None,
-            fix_locale: false,
+            fuck_as: false,
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("key without resign should be rejected");
@@ -886,7 +890,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &boot_spl,
             vendor_spl: &None,
-            fix_locale: false,
+            fuck_as: false,
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("boot SPL without resign should be rejected");
@@ -903,7 +907,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &None,
             vendor_spl: &None,
-            fix_locale: false,
+            fuck_as: false,
         };
         let err = validate_apply_resign_options(true, &options)
             .expect_err("resign without key should be rejected");
@@ -925,7 +929,7 @@ mod tests {
             rollback_index: &rollback_index,
             boot_spl: &boot_spl,
             vendor_spl: &vendor_spl,
-            fix_locale: true,
+            fuck_as: true,
         };
         validate_apply_resign_options(true, &options).expect("resign with key should be accepted");
     }

@@ -9,7 +9,7 @@ use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
 };
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
-use crate::fix_locale::{FixLocaleOutcome, apply_fix_locale_with_progress};
+use crate::fuck_as::{FuckAsOutcome, apply_fuck_as_with_progress};
 use crate::vendor_spl::{
     VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl_with_progress,
     validate_spl_format as validate_vendor_spl_format,
@@ -45,7 +45,7 @@ pub struct ResignConfig {
     /// vbmeta_system.img so the resign loop signs over the patched bytes.
     /// No-ops when the AntiCrossSell anchor is absent (already patched or
     /// different ROM build).
-    pub fix_locale: bool,
+    pub fuck_as: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1607,13 +1607,9 @@ where
         }
     }
 
-    let mut fix_locale_applied: Option<(String, String)> = None;
-    if config.fix_locale {
-        require_images_exist(
-            "--fix-locale",
-            out_dir,
-            &["system.img", "vbmeta_system.img"],
-        )?;
+    let mut fuck_as_applied: Option<(String, String)> = None;
+    if config.fuck_as {
+        require_images_exist("--fuck-as", out_dir, &["system.img", "vbmeta_system.img"])?;
         ensure_images_local(
             &mut local_inode_cache,
             out_dir,
@@ -1626,12 +1622,12 @@ where
             "system.img verity regen",
             &system_path,
             "system",
-            |progress| apply_fix_locale_with_progress(&system_path, &vbmeta_system_path, progress),
+            |progress| apply_fuck_as_with_progress(&system_path, &vbmeta_system_path, progress),
         )?;
         match outcome {
-            FixLocaleOutcome::Patched {
+            FuckAsOutcome::Patched {
                 dex_entry,
-                if_eqz_offset_in_jar,
+                invoke_direct_offset_in_jar,
                 old_root_digest,
                 new_root_digest,
             } => {
@@ -1639,21 +1635,21 @@ where
                     events,
                     MessageLevel::Info,
                     format!(
-                        "system.img AntiCrossSell bypass applied: framework.jar/{} if-eqz at jar offset {:#x} -> goto/16; verity root {} -> {}",
+                        "system.img AntiCrossSell disable applied: framework.jar/{} invoke-direct at jar offset {:#x} (E nibble v4 -> v3); verity root {} -> {}",
                         dex_entry,
-                        if_eqz_offset_in_jar,
+                        invoke_direct_offset_in_jar,
                         &old_root_digest[..16.min(old_root_digest.len())],
                         &new_root_digest[..16.min(new_root_digest.len())]
                     ),
                 );
-                fix_locale_applied = Some((old_root_digest, new_root_digest));
+                fuck_as_applied = Some((old_root_digest, new_root_digest));
             }
-            FixLocaleOutcome::NotApplicable { reason } => {
+            FuckAsOutcome::NotApplicable { reason } => {
                 message(
                     events,
                     MessageLevel::Warning,
                     format!(
-                        "--fix-locale skipped: {}; system.img and vbmeta_system.img left untouched",
+                        "--fuck-as skipped: {}; system.img and vbmeta_system.img left untouched",
                         reason
                     ),
                 );
@@ -1663,7 +1659,7 @@ where
         // signature. Make sure it ends up in the resign list even when an
         // unrelated filter (e.g. --rollback) would otherwise have skipped
         // it.
-        if fix_locale_applied.is_some() {
+        if fuck_as_applied.is_some() {
             ensure_image_in_resign_list(&mut images, out_dir, "vbmeta_system.img");
         }
     }
@@ -2345,7 +2341,7 @@ fn ensure_local_inode(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Cache of paths already known to have a private inode, so a feature
-/// block (`--vendor-spl`, `--fix-locale`) and the per-image resign loop
+/// block (`--vendor-spl`, `--fuck-as`) and the per-image resign loop
 /// don't both pay the [`ensure_local_inode`] copy cost on the same
 /// image. On a 12 GiB `system.img` the second copy alone is ~30 s of
 /// wasted I/O.
@@ -2393,7 +2389,7 @@ fn is_hardlinked(_path: &Path) -> anyhow::Result<bool> {
 
 /// Verify each `image_name` exists under `out_dir`, otherwise error with
 /// a `feature_label`-flavoured message. Used by the `--boot-spl` /
-/// `--vendor-spl` / `--fix-locale` blocks of `run_resign_stage` to fail
+/// `--vendor-spl` / `--fuck-as` blocks of `run_resign_stage` to fail
 /// fast when the patcher is asked to operate on partitions that the
 /// preceding stages did not produce.
 fn require_images_exist(
@@ -2416,7 +2412,7 @@ fn require_images_exist(
 }
 
 /// Run [`LocalInodeCache::ensure`] on each `out_dir/image_name`. Both
-/// `--vendor-spl` and `--fix-locale` need this for two images each;
+/// `--vendor-spl` and `--fuck-as` need this for two images each;
 /// rolling it up into a single call keeps the patch blocks concise.
 fn ensure_images_local(
     cache: &mut LocalInodeCache,
@@ -2430,7 +2426,7 @@ fn ensure_images_local(
 }
 
 /// Append `out_dir/image_name` to `images` if it isn't already listed
-/// by basename. The `--vendor-spl` and `--fix-locale` blocks both need
+/// by basename. The `--vendor-spl` and `--fuck-as` blocks both need
 /// to make sure the resign loop refreshes a stale signature their
 /// in-place AVB descriptor patch leaves behind, even when an unrelated
 /// filter (e.g. `--rollback`) would otherwise drop the corresponding
@@ -3016,7 +3012,7 @@ mod tests {
             rollback_index: None,
             boot_spl: None,
             vendor_spl: None,
-            fix_locale: false,
+            fuck_as: false,
         }
     }
 
