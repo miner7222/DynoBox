@@ -5,6 +5,7 @@ pub mod ext4_helpers;
 pub mod ext4_reader;
 pub mod fix_locale;
 pub mod pipeline;
+mod spl;
 pub mod vendor_spl;
 pub mod verify;
 

@@ -63,20 +63,7 @@ pub enum VendorSplOutcome {
 /// Validate `spl` is a strict `YYYY-MM-DD` ASCII string. The in-place patch
 /// relies on the new value matching the existing length.
 pub fn validate_spl_format(spl: &str) -> Result<()> {
-    let bytes = spl.as_bytes();
-    let well_formed = bytes.len() == 10
-        && bytes[0..4].iter().all(u8::is_ascii_digit)
-        && bytes[4] == b'-'
-        && bytes[5..7].iter().all(u8::is_ascii_digit)
-        && bytes[7] == b'-'
-        && bytes[8..10].iter().all(u8::is_ascii_digit);
-    if !well_formed {
-        return Err(anyhow!(
-            "--vendor-spl must be in YYYY-MM-DD format (got {:?})",
-            spl
-        ));
-    }
-    Ok(())
+    crate::spl::validate_spl_format("--vendor-spl", spl)
 }
 
 /// Apply --vendor-spl to vendor.img and propagate the change to vbmeta.img.
@@ -271,5 +258,9 @@ mod tests {
         assert!(validate_spl_format("2026-4-05").is_err());
         assert!(validate_spl_format("2026/04/05").is_err());
         assert!(validate_spl_format("").is_err());
+        assert!(validate_spl_format("2026-00-05").is_err());
+        assert!(validate_spl_format("2026-13-05").is_err());
+        assert!(validate_spl_format("2026-04-31").is_err());
+        assert!(validate_spl_format("2025-02-29").is_err());
     }
 }
