@@ -605,12 +605,27 @@ mod sha1_hasher {
         }
         pub fn update(&mut self, data: &[u8]) {
             self.total_len = self.total_len.wrapping_add(data.len() as u64);
-            self.buffer.extend_from_slice(data);
-            while self.buffer.len() >= 64 {
-                let block: [u8; 64] = self.buffer[..64].try_into().unwrap();
-                self.process_block(&block);
-                self.buffer.drain(..64);
+            let mut data = data;
+
+            if !self.buffer.is_empty() {
+                let needed = 64 - self.buffer.len();
+                let take = std::cmp::min(needed, data.len());
+                self.buffer.extend_from_slice(&data[..take]);
+                data = &data[take..];
+
+                if self.buffer.len() == 64 {
+                    let block: [u8; 64] = self.buffer[..64].try_into().unwrap();
+                    self.process_block(&block);
+                    self.buffer.clear();
+                }
             }
+
+            let mut chunks = data.chunks_exact(64);
+            for chunk in &mut chunks {
+                let block: &[u8; 64] = chunk.try_into().unwrap();
+                self.process_block(block);
+            }
+            self.buffer.extend_from_slice(chunks.remainder());
         }
         pub fn finalize(mut self) -> [u8; 20] {
             let bit_len = self.total_len.wrapping_mul(8);
@@ -666,6 +681,24 @@ mod sha1_hasher {
             self.h[2] = self.h[2].wrapping_add(c);
             self.h[3] = self.h[3].wrapping_add(d);
             self.h[4] = self.h[4].wrapping_add(e);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::SimpleSha1;
+
+        #[test]
+        fn update_keeps_only_tail_capacity_after_large_input() {
+            let mut h = SimpleSha1::new();
+            h.update(&vec![0x5a; 1024 * 1024 + 7]);
+
+            assert!(h.buffer.len() < 64);
+            assert!(
+                h.buffer.capacity() <= 128,
+                "buffer retained {} bytes of capacity",
+                h.buffer.capacity()
+            );
         }
     }
 }
