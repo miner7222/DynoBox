@@ -268,9 +268,18 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
 
     let mut entries = Vec::with_capacity(total_records);
     let mut cursor = cd_off;
-    let cd_end = cd_off + cd_size;
+    let cd_end = checked_range_end(cd_off, cd_size, "framework.jar central directory")?;
+    if cd_end > bytes.len() {
+        return Err(anyhow!(
+            "framework.jar central directory range {}..{} exceeds jar length {}",
+            cd_off,
+            cd_end,
+            bytes.len()
+        ));
+    }
     while cursor < cd_end {
-        if bytes.len() < cursor + 46 {
+        let fixed_end = checked_range_end(cursor, 46, "framework.jar central directory entry")?;
+        if fixed_end > cd_end || fixed_end > bytes.len() {
             return Err(anyhow!("framework.jar central directory truncated"));
         }
         let sig = read_u32_le(bytes, cursor);
@@ -288,7 +297,23 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
         let extra_len = read_u16_le(bytes, cursor + 30) as usize;
         let comment_len = read_u16_le(bytes, cursor + 32) as usize;
         let local_header_offset_raw = read_u32_le(bytes, cursor + 42);
-        let name = std::str::from_utf8(&bytes[cursor + 46..cursor + 46 + name_len])
+        let variable_len = name_len
+            .checked_add(extra_len)
+            .and_then(|len| len.checked_add(comment_len))
+            .ok_or_else(|| anyhow!("framework.jar central directory entry length overflow"))?;
+        let entry_end = checked_range_end(
+            fixed_end,
+            variable_len,
+            "framework.jar central directory entry",
+        )?;
+        if entry_end > cd_end || entry_end > bytes.len() {
+            return Err(anyhow!(
+                "framework.jar central directory entry at offset {} extends past directory end",
+                cursor
+            ));
+        }
+        let name_end = checked_range_end(fixed_end, name_len, "framework.jar entry name")?;
+        let name = std::str::from_utf8(&bytes[fixed_end..name_end])
             .context("framework.jar central directory entry has non-UTF-8 name")?
             .to_string();
 
@@ -312,7 +337,9 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
         let local_header_offset = local_header_offset_raw as usize;
 
         // Walk the local file header to compute data_start.
-        if bytes.len() < local_header_offset + 30 {
+        let local_fixed_end =
+            checked_range_end(local_header_offset, 30, "framework.jar local file header")?;
+        if local_fixed_end > bytes.len() {
             return Err(anyhow!(
                 "framework.jar local file header for {name} truncated"
             ));
@@ -333,7 +360,24 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
         let local_header_crc_offset = local_header_offset + 14;
         let local_name_len = read_u16_le(bytes, local_header_offset + 26) as usize;
         let local_extra_len = read_u16_le(bytes, local_header_offset + 28) as usize;
-        let data_start = local_header_offset + 30 + local_name_len + local_extra_len;
+        let local_variable_len = local_name_len
+            .checked_add(local_extra_len)
+            .ok_or_else(|| anyhow!("framework.jar local file header length overflow for {name}"))?;
+        let data_start = checked_range_end(
+            local_fixed_end,
+            local_variable_len,
+            "framework.jar local file header",
+        )?;
+        let data_end = checked_range_end(data_start, compressed_size, "framework.jar entry data")?;
+        if data_end > bytes.len() {
+            return Err(anyhow!(
+                "framework.jar entry {} data range {}..{} exceeds jar length {}",
+                name,
+                data_start,
+                data_end,
+                bytes.len()
+            ));
+        }
 
         entries.push(ZipEntry {
             name,
@@ -344,7 +388,7 @@ fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
             compression_method,
         });
 
-        cursor += 46 + name_len + extra_len + comment_len;
+        cursor = entry_end;
     }
     Ok(ZipLayout { entries })
 }
@@ -397,7 +441,21 @@ fn locate_anti_cross_sell_target(
                 entry.compression_method
             ));
         }
-        let dex_bytes = &jar_bytes[entry.data_start..entry.data_start + entry.compressed_size];
+        let dex_end = checked_range_end(
+            entry.data_start,
+            entry.compressed_size,
+            "framework.jar dex entry",
+        )?;
+        if dex_end > jar_bytes.len() {
+            return Err(anyhow!(
+                "framework.jar dex entry {} range {}..{} exceeds jar length {}",
+                entry.name,
+                entry.data_start,
+                dex_end,
+                jar_bytes.len()
+            ));
+        }
+        let dex_bytes = &jar_bytes[entry.data_start..dex_end];
         let Some(if_eqz_off) = find_anti_cross_sell_anchor(dex_bytes)? else {
             continue;
         };
@@ -744,6 +802,12 @@ fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
 }
 
+fn checked_range_end(start: usize, len: usize, label: &str) -> Result<usize> {
+    start
+        .checked_add(len)
+        .ok_or_else(|| anyhow!("{label} offset overflow"))
+}
+
 fn write_u32_le(bytes: &mut [u8], off: usize, value: u32) {
     bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
 }
@@ -780,5 +844,35 @@ mod tests {
         let s = build_dex_string_with_uleb_prefix("zh");
         // utf16 size = 2, ULEB128 = single byte 0x02. Then "zh" + NUL.
         assert_eq!(s, vec![0x02, b'z', b'h', 0x00]);
+    }
+
+    #[test]
+    fn parse_zip_central_directory_rejects_truncated_entry_name() {
+        let mut jar = vec![0u8; 46 + 22];
+        jar[0..4].copy_from_slice(&ZIP_CENTRAL_DIRECTORY_SIG.to_le_bytes());
+        jar[28..30].copy_from_slice(&1000u16.to_le_bytes());
+        let eocd = 46;
+        jar[eocd..eocd + 4].copy_from_slice(&ZIP_END_OF_CENTRAL_DIRECTORY_SIG.to_le_bytes());
+        jar[eocd + 10..eocd + 12].copy_from_slice(&1u16.to_le_bytes());
+        jar[eocd + 12..eocd + 16].copy_from_slice(&46u32.to_le_bytes());
+        jar[eocd + 16..eocd + 20].copy_from_slice(&0u32.to_le_bytes());
+
+        assert!(parse_zip_central_directory(&jar).is_err());
+    }
+
+    #[test]
+    fn locate_anti_cross_sell_target_rejects_truncated_dex_data() {
+        let jar = vec![0u8; 20];
+        let zip = ZipLayout {
+            entries: vec![ZipEntry {
+                name: "classes.dex".to_string(),
+                data_start: 10,
+                compressed_size: 100,
+                local_header_crc_offset: 0,
+                cd_crc_offset: 0,
+                compression_method: 0,
+            }],
+        };
+        assert!(locate_anti_cross_sell_target(&jar, &zip).is_err());
     }
 }
