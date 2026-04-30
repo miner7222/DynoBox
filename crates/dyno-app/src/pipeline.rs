@@ -4,13 +4,14 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use tempfile::TempDir;
 
+use crate::avb_descriptor::read_hashtree_params;
 use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
 };
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
-use crate::fix_locale::{FixLocaleOutcome, apply_fix_locale};
+use crate::fix_locale::{FixLocaleOutcome, apply_fix_locale_with_progress};
 use crate::vendor_spl::{
-    VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl,
+    VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl_with_progress,
     validate_spl_format as validate_vendor_spl_format,
 };
 use crate::verify::run_verify_stage;
@@ -1551,7 +1552,16 @@ where
         )?;
         let vendor_path = out_dir.join("vendor.img");
         let vbmeta_path = out_dir.join("vbmeta.img");
-        match apply_vendor_spl(&vendor_path, &vbmeta_path, new_spl)? {
+        let outcome = run_with_verity_progress(
+            events,
+            "vendor.img verity regen",
+            &vendor_path,
+            "vendor",
+            |progress| {
+                apply_vendor_spl_with_progress(&vendor_path, &vbmeta_path, new_spl, progress)
+            },
+        )?;
+        match outcome {
             VendorSplOutcome::Patched {
                 old,
                 new,
@@ -1611,7 +1621,14 @@ where
         )?;
         let system_path = out_dir.join("system.img");
         let vbmeta_system_path = out_dir.join("vbmeta_system.img");
-        match apply_fix_locale(&system_path, &vbmeta_system_path)? {
+        let outcome = run_with_verity_progress(
+            events,
+            "system.img verity regen",
+            &system_path,
+            "system",
+            |progress| apply_fix_locale_with_progress(&system_path, &vbmeta_system_path, progress),
+        )?;
+        match outcome {
             FixLocaleOutcome::Patched {
                 dex_entry,
                 if_eqz_offset_in_jar,
@@ -2428,6 +2445,88 @@ fn ensure_image_in_resign_list(images: &mut Vec<PathBuf>, out_dir: &Path, image_
     if !already_listed {
         images.push(out_dir.join(image_name));
     }
+}
+
+/// Wrap an `apply_*_with_progress` call so the dm-verity SHA-256 walk
+/// renders as an `ItemStarted` + throttled `ItemProgress` pair on the
+/// resign stage.
+///
+/// `image_path` and `partition_name` are used to read the verity
+/// total-bytes upfront (`data_block_size * data_blocks` from the
+/// Hashtree descriptor). When the descriptor is missing or the read
+/// fails, the function falls back to running the inner closure
+/// without progress so a regen-skipped path still works.
+///
+/// Throttle: the inner closure receives a callback that fires per
+/// 4 KiB block; we forward to `ItemProgress` only when the cumulative
+/// delta crosses 16 MiB or hits the total. That cadence matches the
+/// OTA apply pre-copy throttle and produces ~1 update per second on
+/// real hardware.
+fn run_with_verity_progress<S, F, R>(
+    events: &mut S,
+    item_label: &str,
+    image_path: &Path,
+    partition_name: &str,
+    f: F,
+) -> anyhow::Result<R>
+where
+    S: EventSink + ?Sized,
+    F: FnOnce(Option<crate::avb_descriptor::VerityProgressCallback>) -> anyhow::Result<R>,
+{
+    // Probe the partition's expected verity data length so the bar
+    // gets a determinate `total`. Treat any failure as "no progress
+    // bar" rather than aborting the feature.
+    let total_bytes = match read_hashtree_params(image_path, partition_name) {
+        Ok(Some(params)) => params.image_size,
+        _ => 0,
+    };
+
+    if total_bytes == 0 {
+        return f(None);
+    }
+
+    events.emit(ProgressEvent::ItemStarted {
+        stage: StageKind::Resign,
+        current: 1,
+        total: 1,
+        item: item_label.to_string(),
+    });
+    events.emit(ProgressEvent::ItemProgress {
+        stage: StageKind::Resign,
+        item: item_label.to_string(),
+        done: 0,
+        total: total_bytes,
+        unit: ProgressUnit::Bytes,
+    });
+
+    const REPORT_EVERY: u64 = 16 * 1024 * 1024;
+    let mut done: u64 = 0;
+    let mut bytes_since_last_report: u64 = 0;
+    let item_label_owned = item_label.to_string();
+    let mut tick = |delta: u64| {
+        done = done.saturating_add(delta);
+        bytes_since_last_report = bytes_since_last_report.saturating_add(delta);
+        if bytes_since_last_report >= REPORT_EVERY || done >= total_bytes {
+            events.emit(ProgressEvent::ItemProgress {
+                stage: StageKind::Resign,
+                item: item_label_owned.clone(),
+                done,
+                total: total_bytes,
+                unit: ProgressUnit::Bytes,
+            });
+            bytes_since_last_report = 0;
+        }
+    };
+    let result = f(Some(&mut tick))?;
+    // Final tick at 100% in case the last batch didn't cross the threshold.
+    events.emit(ProgressEvent::ItemProgress {
+        stage: StageKind::Resign,
+        item: item_label.to_string(),
+        done: total_bytes,
+        total: total_bytes,
+        unit: ProgressUnit::Bytes,
+    });
+    Ok(result)
 }
 
 fn materialize_file_with_fallback(

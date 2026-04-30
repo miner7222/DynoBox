@@ -33,9 +33,9 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::avb_descriptor::{
-    PatchPropertyOutcome, SHA256_DIGEST_SIZE, find_property_descriptor, hex_encode,
-    patch_hashtree_root_digest, patch_property_value, read_hashtree_params, read_vbmeta_blob,
-    regenerate_hashtree,
+    PatchPropertyOutcome, SHA256_DIGEST_SIZE, VerityProgressCallback, find_property_descriptor,
+    hex_encode, patch_hashtree_root_digest, patch_property_value, read_hashtree_params,
+    read_vbmeta_blob, regenerate_hashtree_with_progress,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, map_file_offset_to_disk, open_ext4_volume};
 use anyhow::{Context, Result, anyhow};
@@ -68,10 +68,27 @@ pub fn validate_spl_format(spl: &str) -> Result<()> {
 
 /// Apply --vendor-spl to vendor.img and propagate the change to vbmeta.img.
 /// Caller is responsible for re-signing vbmeta.img after this returns.
+///
+/// Equivalent to [`apply_vendor_spl_with_progress`] called with
+/// `verity_progress = None`.
 pub fn apply_vendor_spl(
     vendor_image: &Path,
     vbmeta_image: &Path,
     new_spl: &str,
+) -> Result<VendorSplOutcome> {
+    apply_vendor_spl_with_progress(vendor_image, vbmeta_image, new_spl, None)
+}
+
+/// Like [`apply_vendor_spl`] but invokes `verity_progress` with
+/// per-leaf-block delta byte counts during the dm-verity regeneration
+/// phase. The other phases (build.prop ext4 byte patch, AVB descriptor
+/// rewrites) are sub-second; the SHA-256 walk over a ~1.5 GiB
+/// `vendor.img` is the only stage long enough to need a progress bar.
+pub fn apply_vendor_spl_with_progress(
+    vendor_image: &Path,
+    vbmeta_image: &Path,
+    new_spl: &str,
+    verity_progress: Option<VerityProgressCallback>,
 ) -> Result<VendorSplOutcome> {
     validate_spl_format(new_spl)?;
 
@@ -108,9 +125,14 @@ pub fn apply_vendor_spl(
     patch_build_prop_spl_via_ext4(vendor_image, new_spl)?;
 
     // 4. Regenerate dm-verity hash tree from the modified data and write it
-    //    back at `tree_offset`. avbtool-rs::generate_hash_tree returns the
-    //    root digest plus the full level-packed tree blob.
-    let new_root_digest = regenerate_hashtree(vendor_image, &hashtree)?;
+    //    back at `tree_offset`. The hand-rolled walker in
+    //    `avb_descriptor::regenerate_hashtree_with_progress` mirrors
+    //    `avbtool_rs::footer::generate_hash_tree` byte-for-byte but exposes
+    //    a per-leaf-block progress hook so the CLI bar can advance through
+    //    what would otherwise be a multi-minute opaque SHA-256 walk on a
+    //    ~1.5 GiB vendor.img.
+    let new_root_digest =
+        regenerate_hashtree_with_progress(vendor_image, &hashtree, verity_progress)?;
     if new_root_digest.len() != SHA256_DIGEST_SIZE {
         return Err(anyhow!(
             "Regenerated hash tree returned unexpected root_digest length {}",

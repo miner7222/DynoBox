@@ -15,6 +15,7 @@ dynobox-payload.workspace = true
 dynobox-super.workspace = true
 dynobox-xml.workspace = true
 memchr.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 serde.workspace = true
 thiserror.workspace = true

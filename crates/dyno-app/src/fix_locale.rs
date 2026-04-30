@@ -46,8 +46,8 @@ use anyhow::{Context, Result, anyhow};
 use memchr::memmem;
 
 use crate::avb_descriptor::{
-    SHA256_DIGEST_SIZE, hex_encode, patch_hashtree_root_digest, read_hashtree_params,
-    regenerate_hashtree,
+    SHA256_DIGEST_SIZE, VerityProgressCallback, hex_encode, patch_hashtree_root_digest,
+    read_hashtree_params, regenerate_hashtree_with_progress,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
 
@@ -78,9 +78,25 @@ pub enum FixLocaleOutcome {
 
 /// Apply `--fix-locale` to a freshly unpacked `system.img` and propagate
 /// the new dm-verity root digest to `vbmeta_system.img`.
+///
+/// Equivalent to [`apply_fix_locale_with_progress`] called with
+/// `verity_progress = None`.
 pub fn apply_fix_locale(
     system_image: &Path,
     vbmeta_system_image: &Path,
+) -> Result<FixLocaleOutcome> {
+    apply_fix_locale_with_progress(system_image, vbmeta_system_image, None)
+}
+
+/// Like [`apply_fix_locale`] but invokes `verity_progress` with
+/// per-leaf-block delta byte counts during the dm-verity regeneration
+/// phase on `system.img`. The other phases (ext4 walk, JAR byte patch,
+/// AVB descriptor rewrites) run sub-second; only the SHA-256 walk over
+/// a ~12 GiB system.img is long enough to need a progress bar.
+pub fn apply_fix_locale_with_progress(
+    system_image: &Path,
+    vbmeta_system_image: &Path,
+    verity_progress: Option<VerityProgressCallback>,
 ) -> Result<FixLocaleOutcome> {
     // 1. Locate framework.jar and its on-disk extent layout.
     let mut volume = open_ext4_volume(system_image)?;
@@ -186,11 +202,17 @@ pub fn apply_fix_locale(
     write_via_extents(system_image, &jar_bytes, &jar_extents, block_size)?;
 
     // 6. Regenerate the dm-verity hash tree on the modified system.img and
-    //    capture the new root digest.
+    //    capture the new root digest. The hand-rolled walker in
+    //    `avb_descriptor::regenerate_hashtree_with_progress` mirrors
+    //    `avbtool_rs::footer::generate_hash_tree` byte-for-byte but
+    //    exposes a per-leaf-block progress hook so the CLI bar can
+    //    advance through the multi-minute SHA-256 walk on a ~12 GiB
+    //    system.img.
     let hashtree = read_hashtree_params(system_image, SYSTEM_PARTITION_NAME)?
         .ok_or_else(|| anyhow!("system.img has no Hashtree descriptor for `system`"))?;
     let old_root_digest = hashtree.root_digest.clone();
-    let new_root_digest = regenerate_hashtree(system_image, &hashtree)?;
+    let new_root_digest =
+        regenerate_hashtree_with_progress(system_image, &hashtree, verity_progress)?;
     if new_root_digest.len() != SHA256_DIGEST_SIZE {
         return Err(anyhow!(
             "Regenerated hash tree returned unexpected root_digest length {}",
