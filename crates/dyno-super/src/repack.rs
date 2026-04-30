@@ -123,6 +123,8 @@ pub fn repack_super_image(
 }
 
 fn rewrite_super_xml_entries(xml_paths: &[PathBuf], chunk_plans: &[SuperFlashChunk]) -> Result<()> {
+    let line_rewriter = SuperXmlLineRewriter::new();
+
     for xml_path in xml_paths {
         let content = std::fs::read_to_string(xml_path)?;
 
@@ -143,46 +145,7 @@ fn rewrite_super_xml_entries(xml_paths: &[PathBuf], chunk_plans: &[SuperFlashChu
                 replaced = true;
 
                 for chunk in chunk_plans {
-                    let mut new_line = template.clone();
-
-                    let re_filename = regex::Regex::new(r#"filename="[^"]*""#).unwrap();
-                    new_line = re_filename
-                        .replace(&new_line, format!("filename=\"{}\"", chunk.filename))
-                        .to_string();
-
-                    let re_start = regex::Regex::new(r#"start_sector="[^"]*""#).unwrap();
-                    new_line = re_start
-                        .replace(
-                            &new_line,
-                            format!("start_sector=\"{}\"", chunk.start_sector),
-                        )
-                        .to_string();
-
-                    let re_num = regex::Regex::new(r#"num_partition_sectors="[^"]*""#).unwrap();
-                    new_line = re_num
-                        .replace(
-                            &new_line,
-                            format!("num_partition_sectors=\"{}\"", chunk.num_sectors),
-                        )
-                        .to_string();
-
-                    let re_sec = regex::Regex::new(r#"SECTOR_SIZE_IN_BYTES="[^"]*""#).unwrap();
-                    new_line = re_sec
-                        .replace(
-                            &new_line,
-                            format!("SECTOR_SIZE_IN_BYTES=\"{}\"", chunk.sector_size_bytes),
-                        )
-                        .to_string();
-
-                    let size_kb = chunk.size_bytes / 1024;
-                    let re_kb1 = regex::Regex::new(r#"size_in_KB="[^"]*""#).unwrap();
-                    new_line = re_kb1
-                        .replace(&new_line, format!("size_in_KB=\"{}\"", size_kb))
-                        .to_string();
-                    let re_kb2 = regex::Regex::new(r#"size_in_kb="[^"]*""#).unwrap();
-                    new_line = re_kb2
-                        .replace(&new_line, format!("size_in_kb=\"{}\"", size_kb))
-                        .to_string();
+                    let new_line = line_rewriter.rewrite_line(&template, chunk);
 
                     new_content.push_str(&new_line);
                     new_content.push('\n');
@@ -200,4 +163,97 @@ fn rewrite_super_xml_entries(xml_paths: &[PathBuf], chunk_plans: &[SuperFlashChu
         }
     }
     Ok(())
+}
+
+struct SuperXmlLineRewriter {
+    filename: regex::Regex,
+    start_sector: regex::Regex,
+    num_partition_sectors: regex::Regex,
+    sector_size_bytes: regex::Regex,
+    size_kb_upper: regex::Regex,
+    size_kb_lower: regex::Regex,
+}
+
+impl SuperXmlLineRewriter {
+    fn new() -> Self {
+        Self {
+            filename: regex::Regex::new(r#"filename="[^"]*""#)
+                .expect("static filename regex parses"),
+            start_sector: regex::Regex::new(r#"start_sector="[^"]*""#)
+                .expect("static start_sector regex parses"),
+            num_partition_sectors: regex::Regex::new(r#"num_partition_sectors="[^"]*""#)
+                .expect("static num_partition_sectors regex parses"),
+            sector_size_bytes: regex::Regex::new(r#"SECTOR_SIZE_IN_BYTES="[^"]*""#)
+                .expect("static SECTOR_SIZE_IN_BYTES regex parses"),
+            size_kb_upper: regex::Regex::new(r#"size_in_KB="[^"]*""#)
+                .expect("static size_in_KB regex parses"),
+            size_kb_lower: regex::Regex::new(r#"size_in_kb="[^"]*""#)
+                .expect("static size_in_kb regex parses"),
+        }
+    }
+
+    fn rewrite_line(&self, template: &str, chunk: &SuperFlashChunk) -> String {
+        let mut line = template.to_string();
+        line = self
+            .filename
+            .replace(&line, format!("filename=\"{}\"", chunk.filename))
+            .to_string();
+        line = self
+            .start_sector
+            .replace(&line, format!("start_sector=\"{}\"", chunk.start_sector))
+            .to_string();
+        line = self
+            .num_partition_sectors
+            .replace(
+                &line,
+                format!("num_partition_sectors=\"{}\"", chunk.num_sectors),
+            )
+            .to_string();
+        line = self
+            .sector_size_bytes
+            .replace(
+                &line,
+                format!("SECTOR_SIZE_IN_BYTES=\"{}\"", chunk.sector_size_bytes),
+            )
+            .to_string();
+        let size_kb = chunk.size_bytes / 1024;
+        line = self
+            .size_kb_upper
+            .replace(&line, format!("size_in_KB=\"{}\"", size_kb))
+            .to_string();
+        self.size_kb_lower
+            .replace(&line, format!("size_in_kb=\"{}\"", size_kb))
+            .to_string()
+    }
+}
+
+#[cfg(test)]
+fn rewrite_super_xml_line(template: &str, chunk: &SuperFlashChunk) -> Result<String> {
+    Ok(SuperXmlLineRewriter::new().rewrite_line(template, chunk))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_super_xml_line_updates_chunk_attributes() {
+        let template = r#"<program label="super" filename="super_1.img" start_sector="6" num_partition_sectors="10" SECTOR_SIZE_IN_BYTES="4096" size_in_KB="40"/>"#;
+        let chunk = SuperFlashChunk {
+            filename: "super_2.img".to_string(),
+            start_sector: 2048,
+            num_sectors: 4096,
+            sector_size_bytes: 512,
+            source_offset_bytes: 0,
+            size_bytes: 2 * 1024 * 1024,
+        };
+
+        let line = rewrite_super_xml_line(template, &chunk).unwrap();
+
+        assert!(line.contains(r#"filename="super_2.img""#));
+        assert!(line.contains(r#"start_sector="2048""#));
+        assert!(line.contains(r#"num_partition_sectors="4096""#));
+        assert!(line.contains(r#"SECTOR_SIZE_IN_BYTES="512""#));
+        assert!(line.contains(r#"size_in_KB="2048""#));
+    }
 }
