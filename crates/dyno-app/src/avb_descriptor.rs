@@ -96,7 +96,20 @@ pub fn read_vbmeta_blob(image_path: &Path) -> Result<(u64, Vec<u8>)> {
             return Err(anyhow!("{} is not an AVB image", image_path.display()));
         }
     };
-    let mut blob = vec![0u8; vbmeta_size as usize];
+    let vbmeta_end = vbmeta_offset
+        .checked_add(vbmeta_size)
+        .ok_or_else(|| anyhow!("vbmeta range overflows u64"))?;
+    if vbmeta_end > file_size {
+        return Err(anyhow!(
+            "vbmeta range {}..{} exceeds image size {} for {}",
+            vbmeta_offset,
+            vbmeta_end,
+            file_size,
+            image_path.display()
+        ));
+    }
+    let vbmeta_size = checked_usize_from_u64(vbmeta_size, "vbmeta_size")?;
+    let mut blob = vec![0u8; vbmeta_size];
     file.seek(SeekFrom::Start(vbmeta_offset))?;
     file.read_exact(&mut blob)?;
     Ok((vbmeta_offset, blob))
@@ -104,10 +117,7 @@ pub fn read_vbmeta_blob(image_path: &Path) -> Result<(u64, Vec<u8>)> {
 
 /// Slice the descriptors region out of a vbmeta blob.
 pub fn descriptors_slice<'a>(vbmeta_blob: &'a [u8], header: &AvbVBMetaHeader) -> Result<&'a [u8]> {
-    let aux_offset_in_blob =
-        AVB_VBMETA_IMAGE_HEADER_SIZE + header.authentication_data_block_size as usize;
-    let descriptors_start = aux_offset_in_blob + header.descriptors_offset as usize;
-    let descriptors_end = descriptors_start + header.descriptors_size as usize;
+    let (descriptors_start, descriptors_end) = descriptor_range_in_blob(header)?;
     if descriptors_end > vbmeta_blob.len() {
         return Err(anyhow!(
             "Descriptors range {}..{} exceeds vbmeta blob length {}",
@@ -122,10 +132,66 @@ pub fn descriptors_slice<'a>(vbmeta_blob: &'a [u8], header: &AvbVBMetaHeader) ->
 /// Compute the byte offset of the descriptors region inside the vbmeta
 /// blob. Useful when callers need to convert a `descriptor_offset_in_blob`
 /// (relative to descriptors region) into an absolute file offset.
-pub fn descriptors_start_offset_in_blob(header: &AvbVBMetaHeader) -> usize {
-    AVB_VBMETA_IMAGE_HEADER_SIZE
-        + header.authentication_data_block_size as usize
-        + header.descriptors_offset as usize
+pub fn descriptors_start_offset_in_blob(header: &AvbVBMetaHeader) -> Result<usize> {
+    let (descriptors_start, _) = descriptor_range_in_blob(header)?;
+    Ok(descriptors_start)
+}
+
+fn descriptor_range_in_blob(header: &AvbVBMetaHeader) -> Result<(usize, usize)> {
+    let auth_size = checked_usize_from_u64(
+        header.authentication_data_block_size,
+        "authentication_data_block_size",
+    )?;
+    let descriptors_offset =
+        checked_usize_from_u64(header.descriptors_offset, "descriptors_offset")?;
+    let descriptors_size = checked_usize_from_u64(header.descriptors_size, "descriptors_size")?;
+    let aux_offset = checked_add_usize(
+        AVB_VBMETA_IMAGE_HEADER_SIZE,
+        auth_size,
+        "auxiliary data offset",
+    )?;
+    let descriptors_start = checked_add_usize(aux_offset, descriptors_offset, "descriptors start")?;
+    let descriptors_end =
+        checked_add_usize(descriptors_start, descriptors_size, "descriptors end")?;
+    Ok((descriptors_start, descriptors_end))
+}
+
+fn read_descriptor_header(remaining: &[u8], cursor: usize) -> Result<(u64, usize)> {
+    if remaining.len() < DESCRIPTOR_HEADER_SIZE {
+        return Err(anyhow!(
+            "Descriptor blob ends mid-header at offset {}",
+            cursor
+        ));
+    }
+    let tag = u64::from_be_bytes(remaining[0..8].try_into().unwrap());
+    let num_bytes_following = read_be_u64_as_usize(&remaining[8..16], "descriptor payload length")?;
+    let total = checked_add_usize(
+        DESCRIPTOR_HEADER_SIZE,
+        num_bytes_following,
+        "descriptor total length",
+    )?;
+    if total > remaining.len() {
+        return Err(anyhow!(
+            "Descriptor at offset {} truncated: needs {} bytes, has {}",
+            cursor,
+            total,
+            remaining.len()
+        ));
+    }
+    Ok((tag, total))
+}
+
+fn read_be_u64_as_usize(bytes: &[u8], field_name: &str) -> Result<usize> {
+    checked_usize_from_u64(u64::from_be_bytes(bytes.try_into().unwrap()), field_name)
+}
+
+fn checked_usize_from_u64(value: u64, field_name: &str) -> Result<usize> {
+    usize::try_from(value).map_err(|_| anyhow!("{field_name} exceeds usize: {value}"))
+}
+
+fn checked_add_usize(left: usize, right: usize, label: &str) -> Result<usize> {
+    left.checked_add(right)
+        .ok_or_else(|| anyhow!("{label} offset overflow"))
 }
 
 /// Walk the descriptors blob and return the first Property descriptor
@@ -137,35 +203,20 @@ pub fn find_property_descriptor(
     let mut cursor = 0usize;
     while cursor < descriptors_blob.len() {
         let remaining = &descriptors_blob[cursor..];
-        if remaining.len() < DESCRIPTOR_HEADER_SIZE {
-            return Err(anyhow!(
-                "Descriptor blob ends mid-header at offset {}",
-                cursor
-            ));
-        }
-        let tag = u64::from_be_bytes(remaining[0..8].try_into().unwrap());
-        let num_bytes_following = u64::from_be_bytes(remaining[8..16].try_into().unwrap()) as usize;
-        let total = DESCRIPTOR_HEADER_SIZE + num_bytes_following;
-        if total > remaining.len() {
-            return Err(anyhow!(
-                "Descriptor at offset {} truncated: needs {} bytes, has {}",
-                cursor,
-                total,
-                remaining.len()
-            ));
-        }
+        let (tag, total) = read_descriptor_header(remaining, cursor)?;
         if tag == DESCRIPTOR_TAG_PROPERTY && total >= PROPERTY_DESCRIPTOR_SIZE {
             let body = &remaining[..total];
-            let key_len = u64::from_be_bytes(body[16..24].try_into().unwrap()) as usize;
-            let value_len = u64::from_be_bytes(body[24..32].try_into().unwrap()) as usize;
+            let key_len = read_be_u64_as_usize(&body[16..24], "property key length")?;
+            let value_len = read_be_u64_as_usize(&body[24..32], "property value length")?;
             let key_start = PROPERTY_DESCRIPTOR_SIZE;
-            let value_start = key_start + key_len + 1;
-            if body.len() > value_start + value_len {
-                let key_bytes = &body[key_start..key_start + key_len];
+            let key_end = checked_add_usize(key_start, key_len, "property key end")?;
+            let value_start = checked_add_usize(key_end, 1, "property value start")?;
+            let value_end = checked_add_usize(value_start, value_len, "property value end")?;
+            if body.len() > value_end {
+                let key_bytes = &body[key_start..key_end];
                 if key_bytes == target_key.as_bytes() {
                     let current_value =
-                        String::from_utf8_lossy(&body[value_start..value_start + value_len])
-                            .into_owned();
+                        String::from_utf8_lossy(&body[value_start..value_end]).into_owned();
                     return Ok(Some(PropertyHit {
                         descriptor_offset_in_blob: cursor,
                         value_offset_in_descriptor: value_start,
@@ -189,23 +240,7 @@ pub fn find_hashtree_descriptor(
     let mut cursor = 0usize;
     while cursor < descriptors_blob.len() {
         let remaining = &descriptors_blob[cursor..];
-        if remaining.len() < DESCRIPTOR_HEADER_SIZE {
-            return Err(anyhow!(
-                "Descriptor blob ends mid-header at offset {}",
-                cursor
-            ));
-        }
-        let tag = u64::from_be_bytes(remaining[0..8].try_into().unwrap());
-        let num_bytes_following = u64::from_be_bytes(remaining[8..16].try_into().unwrap()) as usize;
-        let total = DESCRIPTOR_HEADER_SIZE + num_bytes_following;
-        if total > remaining.len() {
-            return Err(anyhow!(
-                "Descriptor at offset {} truncated: needs {} bytes, has {}",
-                cursor,
-                total,
-                remaining.len()
-            ));
-        }
+        let (tag, total) = read_descriptor_header(remaining, cursor)?;
         if tag == DESCRIPTOR_TAG_HASHTREE && total >= HASHTREE_DESCRIPTOR_FIXED_SIZE {
             let body = &remaining[..total];
             let partition_name_len =
@@ -213,14 +248,16 @@ pub fn find_hashtree_descriptor(
             let salt_len = u32::from_be_bytes(body[108..112].try_into().unwrap()) as usize;
             let root_digest_len = u32::from_be_bytes(body[112..116].try_into().unwrap()) as usize;
             let payload_start = HASHTREE_DESCRIPTOR_FIXED_SIZE;
-            if body.len() >= payload_start + partition_name_len + salt_len + root_digest_len {
-                let partition_name = &body[payload_start..payload_start + partition_name_len];
+            let partition_name_end =
+                checked_add_usize(payload_start, partition_name_len, "hashtree partition name")?;
+            let salt_end = checked_add_usize(partition_name_end, salt_len, "hashtree salt")?;
+            let digest_end = checked_add_usize(salt_end, root_digest_len, "hashtree root digest")?;
+            if body.len() >= digest_end {
+                let partition_name = &body[payload_start..partition_name_end];
                 if partition_name == target_partition.as_bytes() {
-                    let root_digest_offset_in_descriptor =
-                        payload_start + partition_name_len + salt_len;
                     return Ok(Some(HashtreeHit {
                         descriptor_offset_in_blob: cursor,
-                        root_digest_offset_in_descriptor,
+                        root_digest_offset_in_descriptor: salt_end,
                         root_digest_len,
                     }));
                 }
@@ -249,15 +286,7 @@ pub fn read_hashtree_params(
     let mut cursor = 0usize;
     while cursor < descriptors.len() {
         let remaining = &descriptors[cursor..];
-        if remaining.len() < DESCRIPTOR_HEADER_SIZE {
-            break;
-        }
-        let tag = u64::from_be_bytes(remaining[0..8].try_into().unwrap());
-        let num_bytes_following = u64::from_be_bytes(remaining[8..16].try_into().unwrap()) as usize;
-        let total = DESCRIPTOR_HEADER_SIZE + num_bytes_following;
-        if total > remaining.len() {
-            break;
-        }
+        let (tag, total) = read_descriptor_header(remaining, cursor)?;
         if tag == DESCRIPTOR_TAG_HASHTREE && total >= HASHTREE_DESCRIPTOR_FIXED_SIZE {
             let body = &remaining[..total];
             let image_size = u64::from_be_bytes(body[20..28].try_into().unwrap());
@@ -270,16 +299,19 @@ pub fn read_hashtree_params(
             let salt_len = u32::from_be_bytes(body[108..112].try_into().unwrap()) as usize;
             let root_digest_len = u32::from_be_bytes(body[112..116].try_into().unwrap()) as usize;
             let payload = &body[HASHTREE_DESCRIPTOR_FIXED_SIZE..];
-            if payload.len() < partition_name_len + salt_len + root_digest_len {
-                break;
+            let salt_end = checked_add_usize(partition_name_len, salt_len, "hashtree salt end")?;
+            let digest_end = checked_add_usize(salt_end, root_digest_len, "hashtree digest end")?;
+            if payload.len() < digest_end {
+                return Err(anyhow!(
+                    "Hashtree descriptor for {} is truncated",
+                    target_partition
+                ));
             }
             let partition_name = std::str::from_utf8(&payload[..partition_name_len])
                 .context("Hashtree partition_name is not UTF-8")?;
             if partition_name == target_partition {
-                let salt = payload[partition_name_len..partition_name_len + salt_len].to_vec();
-                let root_digest = payload[partition_name_len + salt_len
-                    ..partition_name_len + salt_len + root_digest_len]
-                    .to_vec();
+                let salt = payload[partition_name_len..salt_end].to_vec();
+                let root_digest = payload[salt_end..digest_end].to_vec();
                 return Ok(Some(HashtreeParams {
                     image_size,
                     tree_offset,
@@ -376,7 +408,7 @@ pub fn patch_property_value(
         return Ok(PatchPropertyOutcome::NotFound);
     }
     let header = AvbVBMetaHeader::from_reader(&vbmeta_blob[..AVB_VBMETA_IMAGE_HEADER_SIZE])?;
-    let descriptors_start = descriptors_start_offset_in_blob(&header);
+    let descriptors_start = descriptors_start_offset_in_blob(&header)?;
     let descriptors = descriptors_slice(&vbmeta_blob, &header)?;
     let Some(hit) = find_property_descriptor(descriptors, target_key)? else {
         return Ok(PatchPropertyOutcome::NotFound);
@@ -422,7 +454,7 @@ pub fn patch_hashtree_root_digest(
 ) -> Result<()> {
     let (vbmeta_offset, vbmeta_blob) = read_vbmeta_blob(image_path)?;
     let header = AvbVBMetaHeader::from_reader(&vbmeta_blob[..AVB_VBMETA_IMAGE_HEADER_SIZE])?;
-    let descriptors_start = descriptors_start_offset_in_blob(&header);
+    let descriptors_start = descriptors_start_offset_in_blob(&header)?;
     let descriptors = descriptors_slice(&vbmeta_blob, &header)?;
     let hit = find_hashtree_descriptor(descriptors, target_partition)?.ok_or_else(|| {
         anyhow!(
@@ -572,6 +604,42 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn descriptors_slice_rejects_offset_overflow() {
+        let header = AvbVBMetaHeader {
+            magic: *b"AVB0",
+            required_libavb_version_major: 1,
+            required_libavb_version_minor: 0,
+            authentication_data_block_size: u64::MAX,
+            auxiliary_data_block_size: 0,
+            algorithm_type: 0,
+            hash_offset: 0,
+            hash_size: 0,
+            signature_offset: 0,
+            signature_size: 0,
+            public_key_offset: 0,
+            public_key_size: 0,
+            public_key_metadata_offset: 0,
+            public_key_metadata_size: 0,
+            descriptors_offset: 0,
+            descriptors_size: 0,
+            rollback_index: 0,
+            flags: 0,
+            rollback_index_location: 0,
+            release_string: String::new(),
+        };
+
+        assert!(descriptors_slice(&[0u8; AVB_VBMETA_IMAGE_HEADER_SIZE], &header).is_err());
+    }
+
+    #[test]
+    fn find_property_descriptor_rejects_length_overflow() {
+        let mut blob = vec![0u8; DESCRIPTOR_HEADER_SIZE];
+        blob[8..16].copy_from_slice(&u64::MAX.to_be_bytes());
+
+        assert!(find_property_descriptor(&blob, "foo").is_err());
     }
 
     #[test]
