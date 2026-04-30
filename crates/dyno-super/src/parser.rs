@@ -251,8 +251,19 @@ fn parse_metadata(
             "default".to_string()
         };
 
-        let partition_extents =
-            extents[first_extent_index..first_extent_index + num_extents].to_vec();
+        let extent_end = first_extent_index.checked_add(num_extents).ok_or_else(|| {
+            DynoError::Tool(format!("Partition {} extent range overflows usize", name))
+        })?;
+        if extent_end > extents.len() {
+            return Err(DynoError::Tool(format!(
+                "Partition {} extent range {}..{} exceeds extent table length {}",
+                name,
+                first_extent_index,
+                extent_end,
+                extents.len()
+            )));
+        }
+        let partition_extents = extents[first_extent_index..extent_end].to_vec();
 
         partitions.push(SuperPartition {
             name,
@@ -455,4 +466,74 @@ pub fn parse_super_layout(
         partitions,
         chunks,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn parse_metadata_rejects_partition_extent_range_out_of_bounds() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("super_1.img");
+        fs::write(&path, malformed_metadata_with_bad_extent_range()).unwrap();
+
+        assert!(parse_metadata(&path).is_err());
+    }
+
+    fn malformed_metadata_with_bad_extent_range() -> Vec<u8> {
+        let geometry_offset = 0x1000usize;
+        let header_offset = 0x3000usize;
+        let header_size = 128usize;
+        let table_offset = header_offset + header_size;
+        let mut data = vec![0u8; 0x4000];
+
+        write_u32(&mut data, geometry_offset, LP_METADATA_GEOMETRY_MAGIC);
+        write_u32(&mut data, geometry_offset + 40, 4096);
+        write_u32(&mut data, geometry_offset + 44, 1);
+        write_u32(&mut data, geometry_offset + 48, 4096);
+
+        write_u32(&mut data, header_offset, LP_METADATA_HEADER_MAGIC);
+        write_u32(&mut data, header_offset + 8, header_size as u32);
+        write_table_desc(&mut data, header_offset + 80, 0, 1, 52);
+        write_table_desc(&mut data, header_offset + 92, 52, 0, 24);
+        write_table_desc(&mut data, header_offset + 104, 52, 1, 48);
+        write_table_desc(&mut data, header_offset + 116, 100, 1, 64);
+
+        write_c_string(&mut data, table_offset, 36, "system_a");
+        write_u32(&mut data, table_offset + 40, 1);
+        write_u32(&mut data, table_offset + 44, 1);
+        write_u32(&mut data, table_offset + 48, 0);
+
+        write_c_string(&mut data, table_offset + 52, 36, "default");
+        write_u64(&mut data, table_offset + 52 + 40, 512);
+
+        write_u64(&mut data, table_offset + 100 + 16, 512);
+        write_c_string(&mut data, table_offset + 100 + 24, 36, "super");
+
+        data
+    }
+
+    fn write_table_desc(data: &mut [u8], off: usize, offset: u32, entries: u32, size: u32) {
+        write_u32(data, off, offset);
+        write_u32(data, off + 4, entries);
+        write_u32(data, off + 8, size);
+    }
+
+    fn write_c_string(data: &mut [u8], off: usize, len: usize, value: &str) {
+        data[off..off + value.len()].copy_from_slice(value.as_bytes());
+        data[off + value.len()..off + len].fill(0);
+    }
+
+    fn write_u32(data: &mut [u8], off: usize, value: u32) {
+        data[off..off + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn write_u64(data: &mut [u8], off: usize, value: u64) {
+        data[off..off + 8].copy_from_slice(&value.to_le_bytes());
+    }
 }
