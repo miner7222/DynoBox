@@ -444,52 +444,88 @@ pub fn apply_partition_payload_with_progress(
 
     dst_file.set_len(new_size)?;
 
-    if let Some(src) = src_file.as_mut() {
-        let src_len = src.metadata()?.len();
-        let copy_len = std::cmp::min(src_len, new_size);
-        if copy_len > 0 {
-            src.seek(SeekFrom::Start(0))?;
-            dst_file.seek(SeekFrom::Start(0))?;
-            let mut buf = vec![0u8; 1024 * 1024];
-            let mut remaining = copy_len;
-            while remaining > 0 {
-                let chunk = std::cmp::min(remaining as usize, buf.len());
-                src.read_exact(&mut buf[..chunk])?;
-                dst_file.write_all(&buf[..chunk])?;
-                remaining -= chunk as u64;
-            }
-            dst_file.flush()?;
-        }
-    }
-
-    let patcher = Patcher::new(block_size);
-
-    // Counting raw operations would advance the bar in lockstep with the
-    // operation count, but that ignores how lopsided OTA work actually is:
-    // SOURCE_COPY / ZERO ops typically make up the vast majority of the
-    // operation list while consuming almost no CPU, and BROTLI_BSDIFF /
-    // PUFFDIFF ops make up the long tail of the list while consuming
-    // virtually all of the runtime. The bar would race to ~80 % during
-    // SOURCE_COPY and then stall for tens of seconds during the diff tail.
+    // The pre-copy that seeds the new image with the source partition's
+    // bytes used to be invisible to progress reporting: bytes were not
+    // counted in `total_weight`, so on a 12 GiB system.img with mostly
+    // SOURCE_COPY ops the bar sat at 0 % for tens of seconds while this
+    // copy ran, then jumped to 100 % once the op loop blew through its
+    // small per-op weights. Account for the copy in the total and
+    // report after every chunk so the bar moves linearly from the
+    // start of the apply.
+    //
+    // Weighting: bytes copied here go in 1:1 alongside the per-op
+    // weights below. `data_length` (CPU-bound diff/replace work) is
+    // the dominant term; copy bytes use the same coefficient so a
+    // partition that's mostly pre-copy + cheap SOURCE_COPY still
+    // produces a smooth ramp.
+    //
+    // Counting raw operations would advance the bar in lockstep with
+    // the operation count, but that ignores how lopsided OTA work
+    // actually is: SOURCE_COPY / ZERO ops typically make up the vast
+    // majority of the operation list while consuming almost no CPU,
+    // and BROTLI_BSDIFF / PUFFDIFF ops make up the long tail while
+    // consuming virtually all of the runtime. The bar would race to
+    // ~80 % during SOURCE_COPY and then stall for tens of seconds
+    // during the diff tail.
     //
     // Weight each op by `data_length + dst_bytes / 32`:
-    //   * `data_length` is the size of the compressed patch blob the op
-    //     consumes from the payload, which dominates the runtime of every
-    //     diff / replace op (decompress + apply work).
+    //   * `data_length` is the size of the compressed patch blob the
+    //     op consumes from the payload, which dominates the runtime
+    //     of every diff / replace op (decompress + apply work).
     //   * `dst_bytes / 32` gives SOURCE_COPY / ZERO ops a small but
-    //     non-zero share so the bar still moves while the partition is
-    //     being seeded, and so partitions that contain no diff ops at all
-    //     do not divide by zero.
-    let total_weight: u64 = p_manifest
+    //     non-zero share so the bar still moves while the partition
+    //     is being seeded, and so partitions that contain no diff
+    //     ops at all do not divide by zero.
+    let pre_copy_len = match src_file.as_mut() {
+        Some(src) => std::cmp::min(src.metadata()?.len(), new_size),
+        None => 0,
+    };
+    let op_weight_total: u64 = p_manifest
         .operations
         .iter()
         .map(|op| operation_progress_weight(op, block_size))
         .sum();
+    let total_weight: u64 = pre_copy_len.saturating_add(op_weight_total);
     let mut done_weight: u64 = 0;
 
     if let Some(cb) = progress.as_deref_mut() {
         cb(0, total_weight);
     }
+
+    if pre_copy_len > 0 {
+        let src = src_file
+            .as_mut()
+            .expect("pre_copy_len > 0 implies a source");
+        src.seek(SeekFrom::Start(0))?;
+        dst_file.seek(SeekFrom::Start(0))?;
+        // 1 MiB scratch buffer matches the pre-refactor copy loop;
+        // chunking smaller would double the syscall count without
+        // helping the bar (we already throttle the callback below).
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut remaining = pre_copy_len;
+        // Throttle the callback so a 12 GiB pre-copy doesn't emit 12 000
+        // events at 1 MiB granularity. 16 MiB ≈ 0.5–1 update per second
+        // on real hardware while still keeping the bar visibly moving.
+        let report_every: u64 = 16 * 1024 * 1024;
+        let mut bytes_since_last_report: u64 = 0;
+        while remaining > 0 {
+            let chunk = std::cmp::min(remaining as usize, buf.len());
+            src.read_exact(&mut buf[..chunk])?;
+            dst_file.write_all(&buf[..chunk])?;
+            remaining -= chunk as u64;
+            done_weight = done_weight.saturating_add(chunk as u64);
+            bytes_since_last_report = bytes_since_last_report.saturating_add(chunk as u64);
+            if let Some(cb) = progress.as_deref_mut() {
+                if bytes_since_last_report >= report_every || remaining == 0 {
+                    cb(done_weight, total_weight);
+                    bytes_since_last_report = 0;
+                }
+            }
+        }
+        dst_file.flush()?;
+    }
+
+    let patcher = Patcher::new(block_size);
 
     for op in p_manifest.operations.iter() {
         let mut blob = vec![0u8; op.data_length.unwrap_or(0) as usize];
