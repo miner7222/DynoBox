@@ -91,21 +91,6 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl, requires = "resign")]
         vendor_spl: Option<String>,
 
-        /// Disable Lenovo's `ZuiAntiCrossSell` LGSI feature flag inside
-        /// system.img at the source. Locates the
-        /// `LgsiFeatureInfo(name, mIsRoot, mIsActive)` registration call in
-        /// `LgsiFeatures.<clinit>` and flips the third-arg register from
-        /// `v4` (true) to `v3` (false), so every behaviour the flag gates
-        /// — locale forcing, region filtering, store routing, … —
-        /// registers as off. Patches the Dalvik bytecode of the matching
-        /// `classes*.dex` inside `framework.jar`, regenerates system.img
-        /// dm-verity, and propagates the new root digest into
-        /// vbmeta_system.img so the resign loop signs over the new bytes.
-        /// No-op when the AntiCrossSell anchor is absent (different ROM
-        /// build) or already disabled.
-        #[arg(long, requires = "resign")]
-        fuck_as: bool,
-
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -632,7 +617,6 @@ fn main() -> anyhow::Result<()> {
             rollback,
             boot_spl,
             vendor_spl,
-            fuck_as,
             complete,
         } => {
             if resign && key.is_none() {
@@ -645,7 +629,7 @@ fn main() -> anyhow::Result<()> {
                 input,
                 output: out_dir,
                 resign: make_resign_config(
-                    key, algorithm, force, rollback, boot_spl, vendor_spl, fuck_as,
+                    key, algorithm, force, rollback, boot_spl, vendor_spl, false,
                 ),
                 repack,
                 complete,
