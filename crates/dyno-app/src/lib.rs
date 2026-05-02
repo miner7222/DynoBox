@@ -3,7 +3,7 @@ pub mod boot_spl;
 pub mod events;
 pub mod ext4_helpers;
 pub mod ext4_reader;
-pub mod fuck_as;
+pub mod fuck_lgsi;
 pub mod pipeline;
 mod spl;
 pub mod vendor_spl;
