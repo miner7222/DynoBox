@@ -18,7 +18,7 @@ Pure Rust firmware and OTA toolkit extracted from LTBox.
 ```powershell
 dynobox unpack --input <firmware_dir> [--output <dir>]
 dynobox apply --input <firmware_dir> [--output <dir>] <ota1.zip> ...
-dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--fuck-lgsi | --fuck-lgsi-config <json>] [--fuck-lgsi-cleanup]
+dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--fuck-lgsi [<JSON_PATH>]]
 dynobox repack --input <image_dir> [--output <dir>]
 dynobox info --input <image_or_dir> [--format text|json] [--output <report.txt>]
 dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt>]

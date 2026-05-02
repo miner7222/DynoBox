@@ -53,23 +53,12 @@ pub struct ResignConfig {
     /// `LgsiFeatureInfo.<init>` registration site inside
     /// `system.img/system/framework/framework.jar`. Regenerates system.img
     /// dm-verity and propagates the new root digest into vbmeta_system.img
-    /// so the resign loop signs over the patched bytes. No-ops when no
-    /// edits are made.
-    pub fuck_lgsi: Option<FuckLgsiPipelineConfig>,
-}
-
-/// Pipeline-level configuration for `--fuck-lgsi`. Held inside
-/// [`ResignConfig`] so the same struct is shared by every command that
-/// drives `run_resign_stage` (`apply --resign`, `resign`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FuckLgsiPipelineConfig {
-    /// Path to a pre-edited JSON config when running scripted, or `None`
-    /// for the default interactive pause-on-Enter flow.
-    pub config: Option<PathBuf>,
-    /// When `true`, remove `lgsi_features.json` and the html copy from
-    /// the workspace dir after a successful patch. Default `false` keeps
-    /// them as an audit trail.
-    pub cleanup: bool,
+    /// so the resign loop signs over the patched bytes. The
+    /// [`FuckLgsiMode`] picks between the default interactive
+    /// pause-on-Enter flow ([`FuckLgsiMode::Interactive`]) and the
+    /// non-interactive scripted mode reading a pre-edited JSON
+    /// ([`FuckLgsiMode::Config`]). No-ops when no edits are made.
+    pub fuck_lgsi: Option<FuckLgsiMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,6 +364,7 @@ where
 
     let mut current_image_dir = image_stage_dir;
 
+    let mut staged_resign_dir: Option<PathBuf> = None;
     if let Some(config) = &request.resign {
         let resign_out_dir = if request.repack {
             temp_root.path().join("resign_stage")
@@ -382,6 +372,9 @@ where
             request.output.clone()
         };
         ops.resign_stage(&current_image_dir, &resign_out_dir, config, events)?;
+        if request.repack {
+            staged_resign_dir = Some(resign_out_dir.clone());
+        }
         current_image_dir = resign_out_dir;
     }
 
@@ -397,6 +390,10 @@ where
 
     if request.complete {
         complete_output_from_input(input_dir, &request.output, events)?;
+    }
+
+    if let Some(dir) = &staged_resign_dir {
+        propagate_pipeline_report(dir, &request.output, events);
     }
 
     ops.verify_stage(&request.output, events)?;
@@ -436,6 +433,7 @@ where
     )?;
 
     let mut current_image_dir = apply_out_dir;
+    let mut staged_resign_dir: Option<PathBuf> = None;
 
     if let Some(config) = &request.resign {
         let resign_out_dir = if request.repack {
@@ -444,6 +442,9 @@ where
             request.output.clone()
         };
         ops.resign_stage(&current_image_dir, &resign_out_dir, config, events)?;
+        if request.repack {
+            staged_resign_dir = Some(resign_out_dir.clone());
+        }
         current_image_dir = resign_out_dir;
     }
 
@@ -459,6 +460,10 @@ where
 
     if request.complete {
         complete_output_from_input(input_dir, &request.output, events)?;
+    }
+
+    if let Some(dir) = &staged_resign_dir {
+        propagate_pipeline_report(dir, &request.output, events);
     }
 
     ops.verify_stage(&request.output, events)?;
@@ -497,8 +502,54 @@ where
         temp_root.path(),
         events,
     )?;
+    propagate_pipeline_report(&resign_stage_dir, &request.output, events);
     ops.verify_stage(&request.output, events)?;
     Ok(())
+}
+
+/// Copy `report.html` from a resign staging directory to the final
+/// pipeline output. `run_resign_stage` writes the report into its own
+/// `out_dir`, but in apply / resign / unpack pipelines that run a
+/// repack stage, that `out_dir` is a temp directory which gets dropped
+/// after repack finishes. Without this propagation the user-visible
+/// final output would never see the file.
+fn propagate_pipeline_report<S>(staged_resign_dir: &Path, final_output_dir: &Path, events: &mut S)
+where
+    S: EventSink + ?Sized,
+{
+    let src = staged_resign_dir.join("report.html");
+    if !src.exists() {
+        return;
+    }
+    let dst = final_output_dir.join("report.html");
+    // `std::fs::copy` on Windows uses CopyFileExW, which fails with
+    // ERROR_SHARING_VIOLATION (os error 32) when the destination is
+    // already open in another process — common when the user is
+    // re-running the pipeline with `report.html` from a prior run open
+    // in a browser tab. Read source bytes once and write through
+    // `std::fs::write`, which opens the destination with explicit
+    // truncate semantics and recovers in this case.
+    let bytes = match std::fs::read(&src) {
+        Ok(b) => b,
+        Err(e) => {
+            message(
+                events,
+                MessageLevel::Warning,
+                format!("Failed to read pipeline report at {}: {e}", src.display()),
+            );
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&dst, &bytes) {
+        message(
+            events,
+            MessageLevel::Warning,
+            format!(
+                "Failed to write pipeline report to {}: {e} (close any open viewer of report.html and re-run if you need it in the final output)",
+                dst.display()
+            ),
+        );
+    }
 }
 
 fn run_repack_with_ops<S, O>(request: &RepackRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -1676,7 +1727,7 @@ where
     }
 
     let mut fuck_lgsi_applied: Option<(String, String)> = None;
-    if let Some(lgsi_cfg) = config.fuck_lgsi.as_ref() {
+    if let Some(lgsi_mode) = config.fuck_lgsi.as_ref() {
         require_images_exist(
             "--fuck-lgsi",
             out_dir,
@@ -1690,17 +1741,12 @@ where
         let system_path = out_dir.join("system.img");
         let vbmeta_system_path = out_dir.join("vbmeta_system.img");
         let product_path = out_dir.join("product.img");
-        let mode = match &lgsi_cfg.config {
-            Some(path) => FuckLgsiMode::Config(path.clone()),
-            None => FuckLgsiMode::Interactive,
-        };
         let lgsi_input = FuckLgsiInput {
             system_image: &system_path,
             vbmeta_system_image: &vbmeta_system_path,
             product_image: &product_path,
             workspace_dir: out_dir,
-            mode,
-            cleanup_workspace: lgsi_cfg.cleanup,
+            mode: lgsi_mode.clone(),
         };
         let outcome = run_with_verity_progress(
             events,
@@ -2667,25 +2713,37 @@ where
         return f(None);
     }
 
-    events.emit(ProgressEvent::ItemStarted {
-        stage: StageKind::Resign,
-        current: 1,
-        total: 1,
-        item: item_label.to_string(),
-    });
-    events.emit(ProgressEvent::ItemProgress {
-        stage: StageKind::Resign,
-        item: item_label.to_string(),
-        done: 0,
-        total: total_bytes,
-        unit: ProgressUnit::Bytes,
-    });
-
+    // Defer the `ItemStarted` + initial `ItemProgress` emissions until
+    // the first time the closure actually drives a progress tick. The
+    // verity regen is the slow phase callers want a bar for, but the
+    // closure may run substantial pre-work before reaching the
+    // SHA-256 walk — `--fuck-lgsi` ext4-walks two images, parses the
+    // html, walks the dex, writes the workspace JSON, and *blocks on
+    // stdin Enter* before patching anything. Showing the bar at 0 B
+    // while waiting for the user's edits misleads them into thinking
+    // the regen has started already.
     const REPORT_EVERY: u64 = 16 * 1024 * 1024;
     let mut done: u64 = 0;
     let mut bytes_since_last_report: u64 = 0;
+    let mut started = false;
     let item_label_owned = item_label.to_string();
     let mut tick = |delta: u64| {
+        if !started {
+            started = true;
+            events.emit(ProgressEvent::ItemStarted {
+                stage: StageKind::Resign,
+                current: 1,
+                total: 1,
+                item: item_label_owned.clone(),
+            });
+            events.emit(ProgressEvent::ItemProgress {
+                stage: StageKind::Resign,
+                item: item_label_owned.clone(),
+                done: 0,
+                total: total_bytes,
+                unit: ProgressUnit::Bytes,
+            });
+        }
         done = done.saturating_add(delta);
         bytes_since_last_report = bytes_since_last_report.saturating_add(delta);
         if bytes_since_last_report >= REPORT_EVERY || done >= total_bytes {
@@ -2700,14 +2758,19 @@ where
         }
     };
     let result = f(Some(&mut tick))?;
-    // Final tick at 100% in case the last batch didn't cross the threshold.
-    events.emit(ProgressEvent::ItemProgress {
-        stage: StageKind::Resign,
-        item: item_label.to_string(),
-        done: total_bytes,
-        total: total_bytes,
-        unit: ProgressUnit::Bytes,
-    });
+    // Final tick at 100% in case the last batch didn't cross the
+    // threshold. Skip when the closure returned without driving any
+    // progress (e.g. `--fuck-lgsi` no-op early return) — no bar was
+    // shown, no completion is needed.
+    if started {
+        events.emit(ProgressEvent::ItemProgress {
+            stage: StageKind::Resign,
+            item: item_label.to_string(),
+            done: total_bytes,
+            total: total_bytes,
+            unit: ProgressUnit::Bytes,
+        });
+    }
     Ok(result)
 }
 
