@@ -5,6 +5,7 @@ pub mod ext4_helpers;
 pub mod ext4_reader;
 pub mod fuck_lgsi;
 pub mod pipeline;
+pub mod report;
 mod spl;
 pub mod vendor_spl;
 pub mod verify;
