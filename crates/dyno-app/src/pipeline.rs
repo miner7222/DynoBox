@@ -13,6 +13,12 @@ use crate::fuck_lgsi::{
     FuckLgsiInput, FuckLgsiMode, FuckLgsiOutcome, LgsiFeatureChange, LgsiFeatureSkip, SkipReason,
     apply_fuck_lgsi_with_progress,
 };
+use crate::report::{
+    LgsiChange as ReportLgsiChange, LgsiRecord as ReportLgsiRecord, LgsiSkip as ReportLgsiSkip,
+    PipelineReport, RollbackRecord as ReportRollbackRecord,
+    SigningKeyChange as ReportSigningKeyChange, SplRecord as ReportSplRecord,
+    format_unix_to_iso8601_utc,
+};
 use crate::vendor_spl::{
     VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl_with_progress,
     validate_spl_format as validate_vendor_spl_format,
@@ -1477,6 +1483,8 @@ where
         stage: StageKind::Resign,
     });
 
+    let mut report = PipelineReport::new("resign", out_dir);
+
     if let Some(spl) = config.boot_spl.as_deref() {
         validate_spl_format(spl)?;
     }
@@ -1530,10 +1538,22 @@ where
                 .with_context(|| format!("Failed to read rollback_index from {}", filename))?;
             current_ris.push((path.clone(), current_ri));
         }
+        // Use the first target's current rollback as the representative
+        // "from" for the pipeline report. All targets share the same
+        // requested "to" value.
+        let representative_from = current_ris.first().map(|(_, ri)| *ri).unwrap_or(0);
         match confirm_rollback_change(&current_ris, new_ri)? {
             RollbackConfirmation::Accepted => {
                 effective_rollback = Some(new_ri);
                 images = filtered;
+                report.rollback = Some(ReportRollbackRecord {
+                    from_unix: representative_from,
+                    to_unix: new_ri,
+                    from_iso: format_unix_to_iso8601_utc(representative_from),
+                    to_iso: format_unix_to_iso8601_utc(new_ri),
+                    applied: true,
+                    reason: String::new(),
+                });
             }
             RollbackConfirmation::DeclinedByUser => {
                 message(
@@ -1543,6 +1563,14 @@ where
                 );
                 effective_rollback = None;
                 images = all_images;
+                report.rollback = Some(ReportRollbackRecord {
+                    from_unix: representative_from,
+                    to_unix: new_ri,
+                    from_iso: format_unix_to_iso8601_utc(representative_from),
+                    to_iso: format_unix_to_iso8601_utc(new_ri),
+                    applied: false,
+                    reason: "declined by user".to_string(),
+                });
             }
             RollbackConfirmation::SkippedNonInteractive => {
                 message(
@@ -1552,6 +1580,14 @@ where
                 );
                 effective_rollback = None;
                 images = all_images;
+                report.rollback = Some(ReportRollbackRecord {
+                    from_unix: representative_from,
+                    to_unix: new_ri,
+                    from_iso: format_unix_to_iso8601_utc(representative_from),
+                    to_iso: format_unix_to_iso8601_utc(new_ri),
+                    applied: false,
+                    reason: "stdin is not a terminal".to_string(),
+                });
             }
         }
     } else {
@@ -1598,6 +1634,13 @@ where
                         &new_root_digest[..16.min(new_root_digest.len())]
                     ),
                 );
+                report.vendor_spl = Some(ReportSplRecord {
+                    property: VENDOR_SPL_PROPERTY.to_string(),
+                    from: Some(old.clone()),
+                    to: new.clone(),
+                    applied: true,
+                    reason: String::new(),
+                });
                 vendor_spl_applied = Some((old, new, new_root_digest));
             }
             VendorSplOutcome::SkippedNotNewer { old, requested } => {
@@ -1609,6 +1652,13 @@ where
                         VENDOR_SPL_PROPERTY, requested, old
                     ),
                 );
+                report.vendor_spl = Some(ReportSplRecord {
+                    property: VENDOR_SPL_PROPERTY.to_string(),
+                    from: Some(old.clone()),
+                    to: requested.clone(),
+                    applied: false,
+                    reason: format!("requested {requested} is not newer than current {old}"),
+                });
             }
             VendorSplOutcome::NotFound => {
                 return Err(anyhow::anyhow!(
@@ -1705,6 +1755,35 @@ where
                         &new_root_digest[..16.min(new_root_digest.len())]
                     ),
                 );
+                let report_applied: Vec<ReportLgsiChange> = applied
+                    .iter()
+                    .map(|c| ReportLgsiChange {
+                        name: c.name.clone(),
+                        from: c.from,
+                        to: c.to,
+                    })
+                    .collect();
+                let report_skipped: Vec<ReportLgsiSkip> = skipped
+                    .iter()
+                    .map(|s| {
+                        let reason_str = match s.reason {
+                            SkipReason::NotInDex => "JSON entry not present in dex",
+                            SkipReason::NotInDexFromHtml => "HTML feature missing from dex",
+                            SkipReason::NotInHtml => "dex feature missing from HTML",
+                            SkipReason::UnknownDexBool => "dex register tracker inconclusive",
+                        };
+                        ReportLgsiSkip {
+                            name: s.name.clone(),
+                            reason: reason_str.to_string(),
+                        }
+                    })
+                    .collect();
+                report.lgsi = Some(ReportLgsiRecord {
+                    applied: report_applied,
+                    skipped: report_skipped,
+                    old_root_digest: old_root_digest.clone(),
+                    new_root_digest: new_root_digest.clone(),
+                });
                 fuck_lgsi_applied = Some((old_root_digest, new_root_digest));
             }
             FuckLgsiOutcome::NotApplicable { reason } => {
@@ -1752,6 +1831,13 @@ where
                         BOOT_SPL_PROPERTY, old, new
                     ),
                 );
+                report.boot_spl = Some(ReportSplRecord {
+                    property: BOOT_SPL_PROPERTY.to_string(),
+                    from: Some(old.clone()),
+                    to: new.clone(),
+                    applied: true,
+                    reason: String::new(),
+                });
                 boot_spl_applied = Some((old, new));
             }
             BootSplPatchOutcome::SkippedNotNewer { old, requested } => {
@@ -1763,6 +1849,13 @@ where
                         BOOT_SPL_PROPERTY, requested, old
                     ),
                 );
+                report.boot_spl = Some(ReportSplRecord {
+                    property: BOOT_SPL_PROPERTY.to_string(),
+                    from: Some(old.clone()),
+                    to: requested.clone(),
+                    applied: false,
+                    reason: format!("requested {requested} is not newer than current {old}"),
+                });
             }
             BootSplPatchOutcome::NotFound => {
                 return Err(anyhow::anyhow!(
@@ -1834,6 +1927,7 @@ where
             }
             Ok(avbtool_rs::resign::ResignOutcome::Resigned) => {
                 resigned_count += 1;
+                report.resigned_images.push(filename.clone());
             }
             Ok(avbtool_rs::resign::ResignOutcome::SkippedUnsigned) => {
                 skipped_unsigned_count += 1;
@@ -1931,6 +2025,36 @@ where
                 orig, new
             ),
         );
+        report.signing_key_change = Some(ReportSigningKeyChange {
+            old_pubkey_sha1: orig.to_string(),
+            new_pubkey_sha1: new.to_string(),
+        });
+    }
+
+    // Write the pipeline report before the stage emits StageCompleted.
+    // Skip silently when the stage made no observable mutations (e.g. a
+    // pure re-sign with no flags ran the resign loop but didn't bump
+    // SPL / rollback / LGSI; the resigned_images list still triggers a
+    // report so users can see what got touched).
+    report.finish();
+    if report.has_content() {
+        let report_path = out_dir.join("report.html");
+        if let Err(e) = report.write(&report_path) {
+            message(
+                events,
+                MessageLevel::Warning,
+                format!(
+                    "Failed to write pipeline report to {}: {e}; resign stage continues",
+                    report_path.display()
+                ),
+            );
+        } else {
+            message(
+                events,
+                MessageLevel::Info,
+                format!("Pipeline report written to {}", report_path.display()),
+            );
+        }
     }
 
     events.emit(ProgressEvent::StageCompleted {
