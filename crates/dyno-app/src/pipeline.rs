@@ -9,7 +9,10 @@ use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
 };
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
-use crate::fuck_as::{FuckAsOutcome, apply_fuck_as_with_progress};
+use crate::fuck_lgsi::{
+    FuckLgsiInput, FuckLgsiMode, FuckLgsiOutcome, LgsiFeatureChange, LgsiFeatureSkip, SkipReason,
+    apply_fuck_lgsi_with_progress,
+};
 use crate::vendor_spl::{
     VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl_with_progress,
     validate_spl_format as validate_vendor_spl_format,
@@ -37,15 +40,30 @@ pub struct ResignConfig {
     /// so the resign loop signs over the new bytes. Skipped (warn-only) when
     /// the requested date is not strictly newer than the existing value.
     pub vendor_spl: Option<String>,
-    /// When set, defang Lenovo's `ZuiAntiCrossSell` locale gate inside
-    /// `system.img/system/framework/framework.jar` by flipping the first
-    /// conditional branch in `Configuration.setLocales` into an
-    /// unconditional `goto cond_2`. Triggers a dm-verity hash tree
-    /// regeneration on system.img and propagates the new root digest into
-    /// vbmeta_system.img so the resign loop signs over the patched bytes.
-    /// No-ops when the AntiCrossSell anchor is absent (already patched or
-    /// different ROM build).
-    pub fuck_as: bool,
+    /// When set, run `--fuck-lgsi`: extract `lgsi_build_info.html` from
+    /// product.img, render the per-feature `Enabled State` table as
+    /// `<out>/lgsi_features.json`, optionally pause for the user to edit
+    /// the JSON, then patch each changed feature's
+    /// `LgsiFeatureInfo.<init>` registration site inside
+    /// `system.img/system/framework/framework.jar`. Regenerates system.img
+    /// dm-verity and propagates the new root digest into vbmeta_system.img
+    /// so the resign loop signs over the patched bytes. No-ops when no
+    /// edits are made.
+    pub fuck_lgsi: Option<FuckLgsiPipelineConfig>,
+}
+
+/// Pipeline-level configuration for `--fuck-lgsi`. Held inside
+/// [`ResignConfig`] so the same struct is shared by every command that
+/// drives `run_resign_stage` (`apply --resign`, `resign`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FuckLgsiPipelineConfig {
+    /// Path to a pre-edited JSON config when running scripted, or `None`
+    /// for the default interactive pause-on-Enter flow.
+    pub config: Option<PathBuf>,
+    /// When `true`, remove `lgsi_features.json` and the html copy from
+    /// the workspace dir after a successful patch. Default `false` keeps
+    /// them as an audit trail.
+    pub cleanup: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1607,9 +1625,13 @@ where
         }
     }
 
-    let mut fuck_as_applied: Option<(String, String)> = None;
-    if config.fuck_as {
-        require_images_exist("--fuck-as", out_dir, &["system.img", "vbmeta_system.img"])?;
+    let mut fuck_lgsi_applied: Option<(String, String)> = None;
+    if let Some(lgsi_cfg) = config.fuck_lgsi.as_ref() {
+        require_images_exist(
+            "--fuck-lgsi",
+            out_dir,
+            &["system.img", "vbmeta_system.img", "product.img"],
+        )?;
         ensure_images_local(
             &mut local_inode_cache,
             out_dir,
@@ -1617,40 +1639,80 @@ where
         )?;
         let system_path = out_dir.join("system.img");
         let vbmeta_system_path = out_dir.join("vbmeta_system.img");
+        let product_path = out_dir.join("product.img");
+        let mode = match &lgsi_cfg.config {
+            Some(path) => FuckLgsiMode::Config(path.clone()),
+            None => FuckLgsiMode::Interactive,
+        };
+        let lgsi_input = FuckLgsiInput {
+            system_image: &system_path,
+            vbmeta_system_image: &vbmeta_system_path,
+            product_image: &product_path,
+            workspace_dir: out_dir,
+            mode,
+            cleanup_workspace: lgsi_cfg.cleanup,
+        };
         let outcome = run_with_verity_progress(
             events,
             "system.img verity regen",
             &system_path,
             "system",
-            |progress| apply_fuck_as_with_progress(&system_path, &vbmeta_system_path, progress),
+            |progress| apply_fuck_lgsi_with_progress(&lgsi_input, progress),
         )?;
         match outcome {
-            FuckAsOutcome::Patched {
-                dex_entry,
-                invoke_direct_offset_in_jar,
+            FuckLgsiOutcome::Patched {
+                applied,
+                skipped,
                 old_root_digest,
                 new_root_digest,
             } => {
+                for change in &applied {
+                    let LgsiFeatureChange {
+                        name,
+                        from,
+                        to,
+                        invoke_direct_offset_in_jar,
+                    } = change;
+                    message(
+                        events,
+                        MessageLevel::Info,
+                        format!(
+                            "[lgsi] {name}: {from} -> {to} (jar invoke-direct offset {invoke_direct_offset_in_jar:#x})"
+                        ),
+                    );
+                }
+                for skip in &skipped {
+                    let LgsiFeatureSkip { name, reason } = skip;
+                    let reason_str = match reason {
+                        SkipReason::NotInDex => "JSON entry not present in dex",
+                        SkipReason::NotInDexFromHtml => "HTML feature missing from dex",
+                        SkipReason::NotInHtml => "dex feature missing from HTML",
+                        SkipReason::UnknownDexBool => "dex register tracker inconclusive",
+                    };
+                    message(
+                        events,
+                        MessageLevel::Warning,
+                        format!("[lgsi] {name}: skipped ({reason_str})"),
+                    );
+                }
                 message(
                     events,
                     MessageLevel::Info,
                     format!(
-                        "system.img AntiCrossSell disable applied: framework.jar/{} invoke-direct at jar offset {:#x} (E nibble v4 -> v3); verity root {} -> {}",
-                        dex_entry,
-                        invoke_direct_offset_in_jar,
+                        "system.img LGSI patch applied: {} feature(s) flipped; verity root {} -> {}",
+                        applied.len(),
                         &old_root_digest[..16.min(old_root_digest.len())],
                         &new_root_digest[..16.min(new_root_digest.len())]
                     ),
                 );
-                fuck_as_applied = Some((old_root_digest, new_root_digest));
+                fuck_lgsi_applied = Some((old_root_digest, new_root_digest));
             }
-            FuckAsOutcome::NotApplicable { reason } => {
+            FuckLgsiOutcome::NotApplicable { reason } => {
                 message(
                     events,
                     MessageLevel::Warning,
                     format!(
-                        "--fuck-as skipped: {}; system.img and vbmeta_system.img left untouched",
-                        reason
+                        "--fuck-lgsi skipped: {reason}; system.img and vbmeta_system.img left untouched"
                     ),
                 );
             }
@@ -1659,7 +1721,7 @@ where
         // signature. Make sure it ends up in the resign list even when an
         // unrelated filter (e.g. --rollback) would otherwise have skipped
         // it.
-        if fuck_as_applied.is_some() {
+        if fuck_lgsi_applied.is_some() {
             ensure_image_in_resign_list(&mut images, out_dir, "vbmeta_system.img");
         }
     }
@@ -2341,7 +2403,7 @@ fn ensure_local_inode(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Cache of paths already known to have a private inode, so a feature
-/// block (`--vendor-spl`, `--fuck-as`) and the per-image resign loop
+/// block (`--vendor-spl`, `--fuck-lgsi`) and the per-image resign loop
 /// don't both pay the [`ensure_local_inode`] copy cost on the same
 /// image. On a 12 GiB `system.img` the second copy alone is ~30 s of
 /// wasted I/O.
@@ -2389,7 +2451,7 @@ fn is_hardlinked(_path: &Path) -> anyhow::Result<bool> {
 
 /// Verify each `image_name` exists under `out_dir`, otherwise error with
 /// a `feature_label`-flavoured message. Used by the `--boot-spl` /
-/// `--vendor-spl` / `--fuck-as` blocks of `run_resign_stage` to fail
+/// `--vendor-spl` / `--fuck-lgsi` blocks of `run_resign_stage` to fail
 /// fast when the patcher is asked to operate on partitions that the
 /// preceding stages did not produce.
 fn require_images_exist(
@@ -2412,7 +2474,7 @@ fn require_images_exist(
 }
 
 /// Run [`LocalInodeCache::ensure`] on each `out_dir/image_name`. Both
-/// `--vendor-spl` and `--fuck-as` need this for two images each;
+/// `--vendor-spl` and `--fuck-lgsi` need this for two images each;
 /// rolling it up into a single call keeps the patch blocks concise.
 fn ensure_images_local(
     cache: &mut LocalInodeCache,
@@ -2426,7 +2488,7 @@ fn ensure_images_local(
 }
 
 /// Append `out_dir/image_name` to `images` if it isn't already listed
-/// by basename. The `--vendor-spl` and `--fuck-as` blocks both need
+/// by basename. The `--vendor-spl` and `--fuck-lgsi` blocks both need
 /// to make sure the resign loop refreshes a stale signature their
 /// in-place AVB descriptor patch leaves behind, even when an unrelated
 /// filter (e.g. `--rollback`) would otherwise drop the corresponding
@@ -3012,7 +3074,7 @@ mod tests {
             rollback_index: None,
             boot_spl: None,
             vendor_spl: None,
-            fuck_as: false,
+            fuck_lgsi: None,
         }
     }
 

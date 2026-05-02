@@ -11,14 +11,14 @@ Pure Rust firmware and OTA toolkit extracted from LTBox.
 - scan AVB metadata from one image or a whole directory
 - bump boot & vendor security patch level
 - modify AVB rollback_index to bypass rollback protection
-- disable Lenovo's `ZuiAntiCrossSell` LGSI feature flag
+- toggle any LGSI feature flag at its registration site
 
 ## Current Commands
 
 ```powershell
 dynobox unpack --input <firmware_dir> [--output <dir>]
 dynobox apply --input <firmware_dir> [--output <dir>] <ota1.zip> ...
-dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--fuck-as]
+dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--fuck-lgsi | --fuck-lgsi-config <json>] [--fuck-lgsi-cleanup]
 dynobox repack --input <image_dir> [--output <dir>]
 dynobox info --input <image_or_dir> [--format text|json] [--output <report.txt>]
 dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt>]
