@@ -2067,7 +2067,7 @@ where
             events,
             MessageLevel::Warning,
             format!(
-                "Resign substituted signing key: {} -> {}. The bootloader (e.g. abl.elf on Qualcomm-based devices) typically only verifies signatures against the keys it was built with — the final output may need to ship together with an abl.elf build that accepts the new signing key, otherwise the device will refuse to boot.",
+                "Resign substituted signing key: {} -> {}. The bootloader typically only verifies signatures against the keys it was built with — the final output may need to ship together with an abl.elf build that accepts the new signing key, otherwise the device will refuse to boot.",
                 orig, new
             ),
         );
