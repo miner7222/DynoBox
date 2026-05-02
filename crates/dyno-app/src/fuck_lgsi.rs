@@ -157,7 +157,7 @@ pub enum SkipReason {
     UnknownDexBool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FuckLgsiMode {
     /// Write workspace files, block on stdin Enter, re-read JSON.
     Interactive,
@@ -171,7 +171,6 @@ pub struct FuckLgsiInput<'a> {
     pub product_image: &'a Path,
     pub workspace_dir: &'a Path,
     pub mode: FuckLgsiMode,
-    pub cleanup_workspace: bool,
 }
 
 /// Apply `--fuck-lgsi` to a freshly unpacked `system.img` and propagate
@@ -225,30 +224,53 @@ pub fn apply_fuck_lgsi_with_progress(
     let html_features = html_parser::parse_lgsi_html(&html_bytes)
         .context("failed to parse lgsi_build_info.html")?;
 
-    // 4. Locate framework.jar dex carrying LgsiFeatures.
+    // 4. Locate framework.jar dex carrying the LgsiFeatures *class
+    //    definition* + the registration sites. Multiple dexes may
+    //    reference `Lcom/lgsi/config/LgsiFeatures;` as a type without
+    //    actually defining it (other classes call into LgsiFeatures);
+    //    only one dex carries the class_def + the populated `<clinit>`.
+    //    Iterate every dex that mentions the descriptor string and pick
+    //    the first one whose dex walker returns a non-empty feature
+    //    list.
     let zip = parse_zip_central_directory(&jar_bytes)?;
-    let Some(target) = locate_lgsi_features_target(&jar_bytes, &zip)? else {
+    let candidate_dex_entries = collect_lgsi_features_candidate_dexes(&jar_bytes, &zip)?;
+    if candidate_dex_entries.is_empty() {
         return Ok(FuckLgsiOutcome::NotApplicable {
             reason: format!(
                 "no `{LGSI_FEATURES_CLASS}` class found in framework.jar; \
                  different ROM build or refactored class"
             ),
         });
-    };
-    let dex_data_off = target.entry.data_start;
-    let dex_data_end = dex_data_off + target.entry.compressed_size;
+    }
 
-    // 5. Extract dex feature list (per-feature anchor + register tracker).
-    let dex_bytes = &jar_bytes[dex_data_off..dex_data_end];
-    let dex_features = dex_walker::extract_lgsi_features(dex_bytes)?;
-    if dex_features.is_empty() {
+    let mut chosen: Option<(ZipEntry, Vec<dex_walker::DexFeature>)> = None;
+    let mut per_dex_diagnostics: Vec<String> = Vec::with_capacity(candidate_dex_entries.len());
+    for entry in &candidate_dex_entries {
+        let dex_data_end = entry.data_start + entry.compressed_size;
+        let dex_bytes = &jar_bytes[entry.data_start..dex_data_end];
+        match dex_walker::extract_lgsi_features(dex_bytes)? {
+            dex_walker::DexExtractOutcome::Found(features) => {
+                chosen = Some((entry.clone(), features));
+                break;
+            }
+            dex_walker::DexExtractOutcome::NotApplicable(reason) => {
+                per_dex_diagnostics.push(format!("{}: {reason}", entry.name));
+            }
+        }
+    }
+    let Some((target_entry, dex_features)) = chosen else {
+        let diag = per_dex_diagnostics.join("; ");
         return Ok(FuckLgsiOutcome::NotApplicable {
             reason: format!(
-                "found {LGSI_FEATURES_CLASS} but its <clinit> registers no \
-                 features; nothing to patch"
+                "found {LGSI_FEATURES_CLASS} string in {} dex(es) but none carry \
+                 the class definition with registrations; different ROM build or \
+                 refactored class. Per-dex diagnostics: {diag}",
+                candidate_dex_entries.len()
             ),
         });
-    }
+    };
+    let dex_data_off = target_entry.data_start;
+    let dex_data_end = dex_data_off + target_entry.compressed_size;
 
     // 6. Cross-reference: pick which nibble (E or F) holds Enabled.
     let enabled_nibble = cross_ref::determine_enabled_nibble(&html_features, &dex_features)?;
@@ -351,7 +373,10 @@ pub fn apply_fuck_lgsi_with_progress(
     }
 
     if applied.is_empty() {
-        if input.cleanup_workspace {
+        // Interactive mode wrote `lgsi_features.json` + the html copy
+        // into `workspace_dir`. Clean them up now that the patch is a
+        // no-op — `report.html` carries the audit trail.
+        if matches!(input.mode, FuckLgsiMode::Interactive) {
             let _ = workspace::cleanup(input.workspace_dir);
         }
         return Ok(FuckLgsiOutcome::NotApplicable {
@@ -381,10 +406,10 @@ pub fn apply_fuck_lgsi_with_progress(
     let new_crc = crc32_ieee(&jar_bytes[dex_data_off..dex_data_end]);
     write_u32_le(
         &mut jar_bytes,
-        target.entry.local_header_crc_offset,
+        target_entry.local_header_crc_offset,
         new_crc,
     );
-    write_u32_le(&mut jar_bytes, target.entry.cd_crc_offset, new_crc);
+    write_u32_le(&mut jar_bytes, target_entry.cd_crc_offset, new_crc);
 
     // 11. Write rewritten jar back to system.img.
     write_via_extents(input.system_image, &jar_bytes, &jar_extents, block_size)?;
@@ -410,8 +435,10 @@ pub fn apply_fuck_lgsi_with_progress(
         &new_root_digest,
     )?;
 
-    // 14. Optional cleanup.
-    if input.cleanup_workspace {
+    // 14. Cleanup workspace files in interactive mode now that the
+    //     patch is committed. report.html (written later by the resign
+    //     stage) carries the human-readable audit trail.
+    if matches!(input.mode, FuckLgsiMode::Interactive) {
         let _ = workspace::cleanup(input.workspace_dir);
     }
 
@@ -478,7 +505,7 @@ mod html_parser {
             std::str::from_utf8(html).context("lgsi_build_info.html is not valid UTF-8")?;
         let array_text = extract_feature_data_array(html_str)?;
         let cleaned = strip_js_comments_and_trailing_commas(array_text);
-        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_str(&cleaned)
+        let rows: Vec<Vec<serde_json::Value>> = serde_json::from_slice(&cleaned)
             .context("failed to parse featureData array as JSON after cleanup")?;
         if rows.is_empty() {
             bail!("featureData array is empty");
@@ -556,43 +583,69 @@ mod html_parser {
         bail!("featureData array not closed; HTML truncated?")
     }
 
-    fn strip_js_comments_and_trailing_commas(input: &str) -> String {
-        let mut out = String::with_capacity(input.len());
+    /// Strip JS comments and trailing commas from the `featureData`
+    /// literal so what remains parses as JSON. Operates on bytes (not
+    /// `String`) so non-ASCII characters in feature descriptions stay
+    /// intact through the cleanup pass — the stripped output is
+    /// re-parsed by `serde_json::from_slice` directly.
+    ///
+    /// Also fixes JS-but-not-JSON escapes: `featureData` strings
+    /// occasionally carry stray backslashes (real-world example:
+    /// `"… platforms such as CMS\UPE, …"`). JS treats an unknown
+    /// `\X` as a literal `X`; JSON rejects it as an "invalid escape".
+    /// We escape any backslash whose next byte isn't a valid JSON
+    /// escape character (`"`, `\`, `/`, `b`, `f`, `n`, `r`, `t`, `u`)
+    /// by doubling it, so JSON sees a literal `\X`.
+    fn strip_js_comments_and_trailing_commas(input: &str) -> Vec<u8> {
         let bytes = input.as_bytes();
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
         let mut i = 0;
         let mut in_string = false;
         let mut prev_backslash = false;
         while i < bytes.len() {
             let b = bytes[i];
             if in_string {
-                out.push(b as char);
                 if b == b'\\' && !prev_backslash {
-                    prev_backslash = true;
-                } else {
-                    if b == b'"' && !prev_backslash {
-                        in_string = false;
+                    let next = bytes.get(i + 1).copied();
+                    let valid_json_escape = matches!(
+                        next,
+                        Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' | b'u')
+                    );
+                    if valid_json_escape {
+                        out.push(b'\\');
+                    } else {
+                        // Stray backslash before non-escape char (e.g.
+                        // `\U`); double it so JSON sees a literal `\`.
+                        out.extend_from_slice(b"\\\\");
                     }
-                    prev_backslash = false;
+                    prev_backslash = true;
+                    i += 1;
+                    continue;
                 }
+                out.push(b);
+                if b == b'"' && !prev_backslash {
+                    in_string = false;
+                }
+                prev_backslash = false;
                 i += 1;
                 continue;
             }
             if b == b'"' {
                 in_string = true;
                 prev_backslash = false;
-                out.push('"');
+                out.push(b'"');
                 i += 1;
                 continue;
             }
             // `// …` to end of line
-            if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            if b == b'/' && bytes.get(i + 1) == Some(&b'/') {
                 while i < bytes.len() && bytes[i] != b'\n' {
                     i += 1;
                 }
                 continue;
             }
             // `/* … */`
-            if b == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
                 i += 2;
                 while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                     i += 1;
@@ -602,29 +655,29 @@ mod html_parser {
                 }
                 continue;
             }
-            out.push(b as char);
+            out.push(b);
             i += 1;
         }
         // Strip trailing commas inside `[…]` and `{…}`: ", ]" -> "]",
-        // ", }" -> "}". Walk backward through `out` collapsing whitespace
-        // before a closing bracket.
-        let mut cleaned = String::with_capacity(out.len());
-        let chars: Vec<char> = out.chars().collect();
+        // ", }" -> "}". Single byte-level pass; only ASCII whitespace
+        // (space / tab / CR / LF) counts as a separator here, which
+        // matches what JS source emits.
+        let mut cleaned: Vec<u8> = Vec::with_capacity(out.len());
         let mut j = 0;
-        while j < chars.len() {
-            if chars[j] == ',' {
+        while j < out.len() {
+            if out[j] == b',' {
                 let mut k = j + 1;
-                while k < chars.len() && chars[k].is_whitespace() {
+                while k < out.len() && matches!(out[k], b' ' | b'\t' | b'\n' | b'\r') {
                     k += 1;
                 }
-                if k < chars.len() && (chars[k] == ']' || chars[k] == '}') {
+                if k < out.len() && (out[k] == b']' || out[k] == b'}') {
                     // Skip the trailing comma; whitespace stays so the
                     // bracket lands on the right line.
                     j += 1;
                     continue;
                 }
             }
-            cleaned.push(chars[j]);
+            cleaned.push(out[j]);
             j += 1;
         }
         cleaned
@@ -670,6 +723,52 @@ const featureData = [
 </script></html>"#;
             assert!(parse_lgsi_html(html.as_bytes()).is_err());
         }
+
+        /// Smoke test against a real TB322 `lgsi_build_info.html` if
+        /// available locally. Gated on the dump path; CI environments
+        /// without the dump silently no-op.
+        #[test]
+        fn parse_real_tb322_html_when_available() {
+            let path = std::path::Path::new(
+                r"D:\Git\Project-DeZUX\dump\TB322_ZUXOS_1.5.10.183_resigned\system\product\etc\lgsi_build_info.html",
+            );
+            let Ok(bytes) = std::fs::read(path) else {
+                return;
+            };
+            let features = parse_lgsi_html(&bytes).expect("real OEM html must parse");
+            assert!(
+                features.len() > 50,
+                "expected >50 features, got {}",
+                features.len()
+            );
+            assert!(
+                features.iter().any(|f| f.name == "ZuiAntiCrossSell"),
+                "ZuiAntiCrossSell not found in parsed feature list"
+            );
+        }
+
+        /// Regression: real-world `lgsi_build_info.html` rows include
+        /// strings like `"… platforms such as CMS\UPE, …"` where a
+        /// stray backslash precedes a non-JSON-escape character. JS
+        /// treats `\U` as literal `U`; JSON would reject it as an
+        /// "invalid escape". The cleaner must double-escape such
+        /// backslashes so the cleaned blob still parses.
+        #[test]
+        fn parse_lgsi_html_handles_stray_backslash_in_strings() {
+            let html = r#"<html><script>
+const featureData = [
+  ["Name", "Owner", "Desc", "Porting State", "Enabled State", "Writable State", "Req", "Auto", "Src"],
+  ["TabletVantage", "x", "uses CMS\UPE, NPS, etc.", "Ported", "Enabled", "Readonly", "", "", "f.xml:1"],
+  ["Other", "y", "with a real \"quote\" inside", "Ported", "Disabled", "Readonly", "", "", "f.xml:2"],
+];
+</script></html>"#;
+            let out = parse_lgsi_html(html.as_bytes()).expect("stray backslash must round-trip");
+            assert_eq!(out.len(), 2);
+            assert_eq!(out[0].name, "TabletVantage");
+            assert!(out[0].enabled);
+            assert_eq!(out[1].name, "Other");
+            assert!(!out[1].enabled);
+        }
     }
 }
 
@@ -705,7 +804,16 @@ mod dex_walker {
         pub f_bool: Option<bool>,
     }
 
-    pub fn extract_lgsi_features(dex: &[u8]) -> Result<Vec<DexFeature>> {
+    /// Result of an extract pass over a single dex. `Found` carries the
+    /// per-feature registration list; `NotApplicable` carries a string
+    /// identifying which lookup step bailed (so the orchestrator can
+    /// surface a useful diagnostic when *no* candidate dex resolves).
+    pub enum DexExtractOutcome {
+        Found(Vec<DexFeature>),
+        NotApplicable(String),
+    }
+
+    pub fn extract_lgsi_features(dex: &[u8]) -> Result<DexExtractOutcome> {
         // Header layout (subset) — see dex format spec.
         if dex.len() < 0x70 {
             bail!("dex truncated below header size");
@@ -731,7 +839,9 @@ mod dex_walker {
             LGSI_FEATURES_CLASS,
         )?;
         let Some(lgsi_features_type_idx) = lgsi_features_type_idx else {
-            return Ok(Vec::new());
+            return Ok(DexExtractOutcome::NotApplicable(
+                "no LgsiFeatures type idx in this dex".to_string(),
+            ));
         };
         // 2. Find the type_idx of LgsiFeatureInfo (target of <init>).
         let lgsi_feature_info_type_idx = find_type_idx(
@@ -743,35 +853,31 @@ mod dex_walker {
             LGSI_FEATURE_INFO_CLASS,
         )?;
         let Some(lgsi_feature_info_type_idx) = lgsi_feature_info_type_idx else {
-            // Class with no constructor target — nothing to patch.
-            return Ok(Vec::new());
+            return Ok(DexExtractOutcome::NotApplicable(
+                "no LgsiFeatureInfo type idx in this dex".to_string(),
+            ));
         };
-        // 3. Find the string_idx of "<init>" + "(Ljava/lang/String;ZZ)V".
+        // 3. Find the string_idx of "<init>". The full proto descriptor
+        //    `(Ljava/lang/String;ZZ)V` is *not* stored as a single
+        //    string in the dex string pool — protos are composed at
+        //    runtime from `shorty_idx`, `return_type_idx`, and a
+        //    `type_list` reached through `parameters_off`. So we only
+        //    look up the method *name* string here, and reconstruct the
+        //    proto match in step 4 from type_ids + the parameters
+        //    type_list.
         let init_name_string_idx = find_string_idx_strict(
             dex,
             string_ids_size,
             string_ids_off,
             LGSI_FEATURE_INFO_INIT_NAME,
         )?;
-        let init_proto_string_idx = find_string_idx_strict(
-            dex,
-            string_ids_size,
-            string_ids_off,
-            LGSI_FEATURE_INFO_INIT_PROTO,
-        )?;
-        let (Some(init_name_string_idx), Some(init_proto_string_idx)) =
-            (init_name_string_idx, init_proto_string_idx)
-        else {
-            return Ok(Vec::new());
+        let Some(init_name_string_idx) = init_name_string_idx else {
+            return Ok(DexExtractOutcome::NotApplicable(
+                "no `<init>` string idx in this dex".to_string(),
+            ));
         };
-        // 4. Find the proto_idx whose shorty == "(Ljava/lang/String;ZZ)V".
-        //    proto_id_item layout: u32 shorty_idx, u32 return_type_idx,
-        //    u32 parameters_off. shorty_idx is into string_ids; not what
-        //    we want. We want to match by full descriptor: assemble
-        //    each proto's descriptor and compare against
-        //    LGSI_FEATURE_INFO_INIT_PROTO. Simpler: match by the
-        //    descriptor itself read out as a string from the dex by
-        //    walking parameters + return type.
+        // 4. Find the proto_idx for `(Ljava/lang/String;ZZ)V` by walking
+        //    proto_ids and matching return-type + parameters.
         let target_proto_idx = find_proto_idx_for_init(
             dex,
             string_ids_size,
@@ -782,7 +888,9 @@ mod dex_walker {
             proto_ids_off,
         )?;
         let Some(target_proto_idx) = target_proto_idx else {
-            return Ok(Vec::new());
+            return Ok(DexExtractOutcome::NotApplicable(format!(
+                "no proto matching `{LGSI_FEATURE_INFO_INIT_PROTO}` in this dex"
+            )));
         };
         // 5. Find the method_id matching (LgsiFeatureInfo, <init>, target_proto).
         let target_method_idx = find_method_idx(
@@ -794,14 +902,18 @@ mod dex_walker {
             target_proto_idx,
         )?;
         let Some(target_method_idx) = target_method_idx else {
-            return Ok(Vec::new());
+            return Ok(DexExtractOutcome::NotApplicable(format!(
+                "no method_id matching {LGSI_FEATURE_INFO_CLASS}-><init>{LGSI_FEATURE_INFO_INIT_PROTO} in this dex"
+            )));
         };
-        let _ = init_proto_string_idx; // satisfy borrow check; reserved for future cross-checks
         // 6. Find LgsiFeatures' class_def, then its <clinit> code_off.
         let class_data_off =
             find_class_data_off(dex, class_defs_size, class_defs_off, lgsi_features_type_idx)?;
         let Some(class_data_off) = class_data_off else {
-            return Ok(Vec::new());
+            return Ok(DexExtractOutcome::NotApplicable(
+                "no class_def for LgsiFeatures (referenced as type but not defined here)"
+                    .to_string(),
+            ));
         };
         let clinit_code_off = find_clinit_code_off(
             dex,
@@ -812,11 +924,18 @@ mod dex_walker {
             string_ids_off,
         )?;
         let Some(clinit_code_off) = clinit_code_off else {
-            return Ok(Vec::new());
+            return Ok(DexExtractOutcome::NotApplicable(
+                "LgsiFeatures class_def has no <clinit> direct method".to_string(),
+            ));
         };
         // 7. Walk <clinit>'s insns; find every invoke-direct against
         //    target_method_idx + decode the const-string anchoring it.
         let registrations = walk_clinit_for_features(dex, clinit_code_off, target_method_idx)?;
+        if registrations.is_empty() {
+            return Ok(DexExtractOutcome::NotApplicable(format!(
+                "<clinit> walked but found 0 invoke-direct against method_idx {target_method_idx} (LgsiFeatureInfo.<init>); class_data_off={class_data_off:#x}, clinit_code_off={clinit_code_off:#x}"
+            )));
+        }
         // 8. Resolve each feature's name string.
         let mut out = Vec::with_capacity(registrations.len());
         for reg in registrations {
@@ -832,7 +951,12 @@ mod dex_walker {
                 f_bool: reg.f_bool,
             });
         }
-        Ok(out)
+        if out.is_empty() {
+            return Ok(DexExtractOutcome::NotApplicable(
+                "all invoke-direct registrations resolved to non-UTF-8 feature names; cannot continue".to_string(),
+            ));
+        }
+        Ok(DexExtractOutcome::Found(out))
     }
 
     /// Result of scanning <clinit> for one feature registration. Holds
@@ -2023,20 +2147,21 @@ fn find_eocd(bytes: &[u8]) -> Result<usize> {
 // LgsiFeatures dex location
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct LgsiFeaturesTarget {
-    entry: ZipEntry,
-}
-
-fn locate_lgsi_features_target(
+/// Collect every `classes*.dex` entry that mentions
+/// `Lcom/lgsi/config/LgsiFeatures;` in its string pool. The descriptor
+/// shows up in any dex that *references* the type, but only the dex
+/// that *defines* the class also carries its `class_data_item` and
+/// `<clinit>`; framework.jar can ship a dozen dexes referencing the
+/// type (other classes calling into LgsiFeatures) while the actual
+/// class_def lives in only one. The caller (`apply_fuck_lgsi`) walks
+/// candidates in order and picks the first whose dex walker returns
+/// non-empty.
+fn collect_lgsi_features_candidate_dexes(
     jar_bytes: &[u8],
     zip: &ZipLayout,
-) -> Result<Option<LgsiFeaturesTarget>> {
-    // Locate the dex carrying `Lcom/lgsi/config/LgsiFeatures;` by checking
-    // each `classes*.dex` for that descriptor in its string pool. This
-    // generalises the old `--fuck-as` "ZuiAntiCrossSell"-anchored probe
-    // to the broader class-existence check.
+) -> Result<Vec<ZipEntry>> {
     let needle = build_dex_string_with_uleb_prefix(LGSI_FEATURES_CLASS);
+    let mut out = Vec::new();
     for entry in &zip.entries {
         if !entry.name.ends_with(".dex") {
             continue;
@@ -2077,12 +2202,10 @@ fn locate_lgsi_features_target(
         }
         let dex_bytes = &jar_bytes[entry.data_start..dex_end];
         if memmem::find(dex_bytes, &needle).is_some() {
-            return Ok(Some(LgsiFeaturesTarget {
-                entry: entry.clone(),
-            }));
+            out.push(entry.clone());
         }
     }
-    Ok(None)
+    Ok(out)
 }
 
 fn build_dex_string_with_uleb_prefix(needle: &str) -> Vec<u8> {
@@ -2294,6 +2417,60 @@ mod tests {
         assert_eq!(adler32(b""), 1);
         assert_eq!(adler32(b"abc"), 0x024D0127);
         assert_eq!(adler32(b"Wikipedia"), 0x11E60398);
+    }
+
+    /// Smoke test against a real TB323 framework.jar if the dump is on
+    /// the developer's machine. Walks ZIP -> finds candidate dexes ->
+    /// runs `extract_lgsi_features` on each. Asserts at least one
+    /// candidate returns `Found`. Surfaces per-dex diagnostics so
+    /// regressions point at the failing lookup step. Silent no-op when
+    /// the dump path doesn't exist (CI / fresh checkouts).
+    #[test]
+    fn extract_real_framework_jar_when_available() {
+        let path = std::path::Path::new(
+            r"D:\Git\Project-DeZUX\dump\TB323_ZUXOS_2.0.11.043_Tool\system\framework\framework.jar",
+        );
+        let Ok(jar_bytes) = std::fs::read(path) else {
+            return;
+        };
+        let zip = parse_zip_central_directory(&jar_bytes).expect("zip parse");
+        let candidates =
+            collect_lgsi_features_candidate_dexes(&jar_bytes, &zip).expect("candidate collect");
+        assert!(
+            !candidates.is_empty(),
+            "no dex candidates in real framework.jar"
+        );
+        let mut diagnostics: Vec<String> = Vec::new();
+        let mut found_any = false;
+        for entry in &candidates {
+            let dex_data_end = entry.data_start + entry.compressed_size;
+            let dex_bytes = &jar_bytes[entry.data_start..dex_data_end];
+            match dex_walker::extract_lgsi_features(dex_bytes).expect("extract ok") {
+                dex_walker::DexExtractOutcome::Found(features) => {
+                    assert!(
+                        !features.is_empty(),
+                        "Found variant must carry features for {}",
+                        entry.name
+                    );
+                    eprintln!(
+                        "real framework.jar: {} -> {} features",
+                        entry.name,
+                        features.len()
+                    );
+                    found_any = true;
+                    break;
+                }
+                dex_walker::DexExtractOutcome::NotApplicable(reason) => {
+                    diagnostics.push(format!("{}: {reason}", entry.name));
+                }
+            }
+        }
+        assert!(
+            found_any,
+            "no dex candidate in real framework.jar resolved to LgsiFeatures \
+             registrations. Per-dex diagnostics: {}",
+            diagnostics.join("; ")
+        );
     }
 
     #[test]

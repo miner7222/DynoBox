@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use dynobox_app::events::ProgressUnit;
-use dynobox_app::pipeline::FuckLgsiPipelineConfig;
+use dynobox_app::fuck_lgsi::FuckLgsiMode;
 use dynobox_app::{
     ApplyRequest, CommandKind, MessageLevel, ProgressEvent, RepackRequest, ResignConfig,
     ResignRequest, StageKind, UnpackRequest, default_output_name_for_apply,
@@ -153,20 +153,13 @@ enum Commands {
         /// renders the per-feature `Enabled State` table as
         /// `<output>/lgsi_features.json`, then waits on stdin Enter for
         /// you to edit the JSON before patching the matching
-        /// `LgsiFeatureInfo.<init>` registration sites inside
-        /// `system.img/system/framework/framework.jar`.
-        #[arg(long)]
-        fuck_lgsi: bool,
-
-        /// Run `--fuck-lgsi` non-interactively against this pre-edited
-        /// JSON config. Mutually exclusive with `--fuck-lgsi`.
-        #[arg(long, value_name = "JSON_PATH", conflicts_with = "fuck_lgsi")]
-        fuck_lgsi_config: Option<PathBuf>,
-
-        /// Remove `lgsi_features.json` and the html copy from the output
-        /// directory after a successful `--fuck-lgsi` patch.
-        #[arg(long)]
-        fuck_lgsi_cleanup: bool,
+        /// `LgsiFeatureInfo.<init>` registration sites. Pass a path
+        /// (`--fuck-lgsi <JSON_PATH>`) to run non-interactively against
+        /// a pre-edited JSON instead. The workspace files are removed
+        /// after a successful patch — `report.html` carries the audit
+        /// trail.
+        #[arg(long, value_name = "JSON_PATH", num_args = 0..=1, default_missing_value = "")]
+        fuck_lgsi: Option<String>,
 
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
@@ -224,25 +217,15 @@ enum Commands {
         /// `<output>/lgsi_features.json`, then waits on stdin Enter for
         /// you to edit the JSON before patching the matching
         /// `LgsiFeatureInfo.<init>` registration sites inside
-        /// `system.img/system/framework/framework.jar`. Regenerates
-        /// system.img dm-verity and propagates the new root digest into
-        /// vbmeta_system.img so the resign loop signs over the patched
-        /// bytes. No-op when no edits are made.
-        #[arg(long)]
-        fuck_lgsi: bool,
-
-        /// Run `--fuck-lgsi` non-interactively against this pre-edited
-        /// JSON config (same `{name -> bool}` shape `--fuck-lgsi`
-        /// produces). Mutually exclusive with the bare `--fuck-lgsi`
-        /// flag. Useful in CI / scripted re-runs.
-        #[arg(long, value_name = "JSON_PATH", conflicts_with = "fuck_lgsi")]
-        fuck_lgsi_config: Option<PathBuf>,
-
-        /// Remove `lgsi_features.json` and the html copy from the output
-        /// directory after a successful `--fuck-lgsi` patch. Default
-        /// behaviour leaves them in place as an audit trail.
-        #[arg(long)]
-        fuck_lgsi_cleanup: bool,
+        /// `system.img/system/framework/framework.jar`. Pass a path
+        /// (`--fuck-lgsi <JSON_PATH>`) to run non-interactively against
+        /// a pre-edited JSON instead. Regenerates system.img dm-verity
+        /// and propagates the new root digest into vbmeta_system.img.
+        /// The workspace files are removed after a successful patch —
+        /// `report.html` carries the audit trail. No-op when no edits
+        /// are made.
+        #[arg(long, value_name = "JSON_PATH", num_args = 0..=1, default_missing_value = "")]
+        fuck_lgsi: Option<String>,
 
         /// Repack dynamic partitions back into super after resign
         #[arg(long)]
@@ -330,9 +313,7 @@ struct ApplyResignOptions<'a> {
     rollback_index: &'a Option<u64>,
     boot_spl: &'a Option<String>,
     vendor_spl: &'a Option<String>,
-    fuck_lgsi: bool,
-    fuck_lgsi_config: &'a Option<PathBuf>,
-    fuck_lgsi_cleanup: bool,
+    fuck_lgsi: &'a Option<String>,
 }
 
 impl ApplyResignOptions<'_> {
@@ -343,9 +324,7 @@ impl ApplyResignOptions<'_> {
             || self.rollback_index.is_some()
             || self.boot_spl.is_some()
             || self.vendor_spl.is_some()
-            || self.fuck_lgsi
-            || self.fuck_lgsi_config.is_some()
-            || self.fuck_lgsi_cleanup
+            || self.fuck_lgsi.is_some()
     }
 }
 
@@ -389,23 +368,16 @@ fn resolve_report_output_path(
     })
 }
 
-fn build_fuck_lgsi_pipeline_config(
-    fuck_lgsi: bool,
-    fuck_lgsi_config: Option<PathBuf>,
-    fuck_lgsi_cleanup: bool,
-) -> Option<FuckLgsiPipelineConfig> {
-    if fuck_lgsi_config.is_some() {
-        Some(FuckLgsiPipelineConfig {
-            config: fuck_lgsi_config,
-            cleanup: fuck_lgsi_cleanup,
-        })
-    } else if fuck_lgsi {
-        Some(FuckLgsiPipelineConfig {
-            config: None,
-            cleanup: fuck_lgsi_cleanup,
-        })
-    } else {
-        None
+/// Map clap's `Option<String>` for `--fuck-lgsi` into a [`FuckLgsiMode`]:
+/// * `None` — flag absent, no LGSI patch.
+/// * `Some("")` — bare `--fuck-lgsi`, interactive pause-on-Enter flow.
+/// * `Some(path)` — `--fuck-lgsi <path>`, non-interactive scripted run
+///   against that JSON file.
+fn resolve_fuck_lgsi_mode(fuck_lgsi: Option<String>) -> Option<FuckLgsiMode> {
+    match fuck_lgsi {
+        None => None,
+        Some(s) if s.is_empty() => Some(FuckLgsiMode::Interactive),
+        Some(path) => Some(FuckLgsiMode::Config(PathBuf::from(path))),
     }
 }
 
@@ -416,7 +388,7 @@ fn make_resign_config(
     rollback_index: Option<u64>,
     boot_spl: Option<String>,
     vendor_spl: Option<String>,
-    fuck_lgsi: Option<FuckLgsiPipelineConfig>,
+    fuck_lgsi: Option<FuckLgsiMode>,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
         key,
@@ -680,7 +652,13 @@ fn main() -> anyhow::Result<()> {
                 input,
                 output: out_dir,
                 resign: make_resign_config(
-                    key, algorithm, force, rollback, boot_spl, vendor_spl, None,
+                    key,
+                    algorithm,
+                    force,
+                    rollback,
+                    boot_spl,
+                    vendor_spl,
+                    None::<FuckLgsiMode>,
                 ),
                 repack,
                 complete,
@@ -703,8 +681,6 @@ fn main() -> anyhow::Result<()> {
             boot_spl,
             vendor_spl,
             fuck_lgsi,
-            fuck_lgsi_config,
-            fuck_lgsi_cleanup,
             complete,
             ota_zips,
         } => {
@@ -725,14 +701,11 @@ fn main() -> anyhow::Result<()> {
                 rollback_index: &rollback,
                 boot_spl: &boot_spl,
                 vendor_spl: &vendor_spl,
-                fuck_lgsi,
-                fuck_lgsi_config: &fuck_lgsi_config,
-                fuck_lgsi_cleanup,
+                fuck_lgsi: &fuck_lgsi,
             };
             validate_apply_resign_options(resign, &resign_options)?;
 
-            let lgsi_pipeline_config =
-                build_fuck_lgsi_pipeline_config(fuck_lgsi, fuck_lgsi_config, fuck_lgsi_cleanup);
+            let lgsi_mode = resolve_fuck_lgsi_mode(fuck_lgsi);
 
             let out_dir = resolve_output_dir(output, default_output_name_for_apply(resign, repack));
             let request = ApplyRequest {
@@ -741,13 +714,7 @@ fn main() -> anyhow::Result<()> {
                 ota_zips: real_zips,
                 force_unpack: unpack,
                 resign: make_resign_config(
-                    key,
-                    algorithm,
-                    force,
-                    rollback,
-                    boot_spl,
-                    vendor_spl,
-                    lgsi_pipeline_config,
+                    key, algorithm, force, rollback, boot_spl, vendor_spl, lgsi_mode,
                 ),
                 repack,
                 complete,
@@ -767,13 +734,10 @@ fn main() -> anyhow::Result<()> {
             boot_spl,
             vendor_spl,
             fuck_lgsi,
-            fuck_lgsi_config,
-            fuck_lgsi_cleanup,
             repack,
         } => {
             let out_dir = resolve_output_dir(output, default_output_name_for_resign(repack));
-            let lgsi_pipeline_config =
-                build_fuck_lgsi_pipeline_config(fuck_lgsi, fuck_lgsi_config, fuck_lgsi_cleanup);
+            let lgsi_mode = resolve_fuck_lgsi_mode(fuck_lgsi);
             let request = ResignRequest {
                 input,
                 output: out_dir,
@@ -784,7 +748,7 @@ fn main() -> anyhow::Result<()> {
                     rollback_index: rollback,
                     boot_spl,
                     vendor_spl,
-                    fuck_lgsi: lgsi_pipeline_config,
+                    fuck_lgsi: lgsi_mode,
                 },
                 repack,
             };
@@ -924,9 +888,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &None,
             vendor_spl: &None,
-            fuck_lgsi: false,
-            fuck_lgsi_config: &None,
-            fuck_lgsi_cleanup: false,
+            fuck_lgsi: &None,
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("key without resign should be rejected");
@@ -944,9 +906,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &boot_spl,
             vendor_spl: &None,
-            fuck_lgsi: false,
-            fuck_lgsi_config: &None,
-            fuck_lgsi_cleanup: false,
+            fuck_lgsi: &None,
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("boot SPL without resign should be rejected");
@@ -963,9 +923,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &None,
             vendor_spl: &None,
-            fuck_lgsi: false,
-            fuck_lgsi_config: &None,
-            fuck_lgsi_cleanup: false,
+            fuck_lgsi: &None,
         };
         let err = validate_apply_resign_options(true, &options)
             .expect_err("resign without key should be rejected");
@@ -987,9 +945,7 @@ mod tests {
             rollback_index: &rollback_index,
             boot_spl: &boot_spl,
             vendor_spl: &vendor_spl,
-            fuck_lgsi: true,
-            fuck_lgsi_config: &None,
-            fuck_lgsi_cleanup: false,
+            fuck_lgsi: &Some(String::new()),
         };
         validate_apply_resign_options(true, &options).expect("resign with key should be accepted");
     }
