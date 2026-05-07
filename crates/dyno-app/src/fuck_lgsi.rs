@@ -2083,6 +2083,11 @@ mod workspace {
         eprintln!("  HTML  : {} (reference, do not edit)", html_path.display());
         eprintln!("Edit the JSON to flip individual features (true = enabled, false = disabled),");
         eprintln!("then press Enter to continue. Ctrl-C aborts the resign stage.");
+        // Best-effort: pop the workspace folder in the OS file
+        // browser so the user doesn't have to copy-paste the path.
+        // Failures are swallowed — the path is already printed
+        // above and the user can navigate manually.
+        open_in_file_manager(workspace_dir);
         loop {
             wait_for_enter()?;
             match read_user_json(&json_path) {
@@ -2094,6 +2099,24 @@ mod workspace {
                 }
             }
         }
+    }
+
+    /// Open `path` in the host OS file browser. Best-effort — any
+    /// spawn failure is silently ignored (the workspace path was
+    /// already printed to stderr immediately above the call site).
+    /// Skipped when `DYNOBOX_NO_OPEN` is set, so headless / scripted
+    /// runs that route stdin through the `--fuck-lgsi` interactive
+    /// flow don't pop spurious file-manager windows.
+    fn open_in_file_manager(path: &Path) {
+        if std::env::var_os("DYNOBOX_NO_OPEN").is_some() {
+            return;
+        }
+        #[cfg(target_os = "windows")]
+        let _ = std::process::Command::new("explorer").arg(path).spawn();
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("open").arg(path).spawn();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     }
 
     fn wait_for_enter() -> Result<()> {
