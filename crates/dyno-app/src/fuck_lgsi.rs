@@ -1058,7 +1058,7 @@ mod dex_walker {
         };
         // 4. Find the proto_idx for `(Ljava/lang/String;ZZ)V` by walking
         //    proto_ids and matching return-type + parameters.
-        let target_proto_idx = find_proto_idx_for_init(
+        let target_proto_idx = find_proto_idx(
             dex,
             string_ids_size,
             string_ids_off,
@@ -1066,6 +1066,8 @@ mod dex_walker {
             type_ids_off,
             proto_ids_size,
             proto_ids_off,
+            "V",
+            &["Ljava/lang/String;", "Z", "Z"],
         )?;
         let Some(target_proto_idx) = target_proto_idx else {
             return Ok(DexExtractOutcome::NotApplicable(format!(
@@ -1472,7 +1474,19 @@ mod dex_walker {
         Ok(None)
     }
 
-    fn find_proto_idx_for_init(
+    /// Walk `proto_ids` and return the index of the first proto whose
+    /// return type and parameter list match `return_descriptor` and
+    /// `params` (each entry is a JVM type descriptor like
+    /// `Ljava/lang/String;` or `Z`). Pre-resolves every input
+    /// descriptor to a type idx once so the proto-table scan is a
+    /// straight per-entry comparison.
+    ///
+    /// Returns `Ok(None)` when any of the descriptors aren't in the
+    /// dex's `type_ids` (a hard miss — the proto can't exist) or when
+    /// no proto matches both the return type and the full params
+    /// list. Returns the proto idx on first match.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn find_proto_idx(
         dex: &[u8],
         string_ids_size: usize,
         string_ids_off: usize,
@@ -1480,30 +1494,35 @@ mod dex_walker {
         type_ids_off: usize,
         proto_ids_size: usize,
         proto_ids_off: usize,
+        return_descriptor: &str,
+        params: &[&str],
     ) -> Result<Option<u32>> {
-        // Resolve the type idx for `Ljava/lang/String;` and `V` (void).
-        let Some(string_type_idx) = find_type_idx(
+        let Some(target_return_type_idx) = find_type_idx(
             dex,
             string_ids_size,
             string_ids_off,
             type_ids_size,
             type_ids_off,
-            "Ljava/lang/String;",
+            return_descriptor,
         )?
         else {
             return Ok(None);
         };
-        let Some(void_type_idx) = find_type_idx(
-            dex,
-            string_ids_size,
-            string_ids_off,
-            type_ids_size,
-            type_ids_off,
-            "V",
-        )?
-        else {
-            return Ok(None);
-        };
+        let mut target_param_type_idxs: Vec<u32> = Vec::with_capacity(params.len());
+        for d in params {
+            let Some(idx) = find_type_idx(
+                dex,
+                string_ids_size,
+                string_ids_off,
+                type_ids_size,
+                type_ids_off,
+                d,
+            )?
+            else {
+                return Ok(None);
+            };
+            target_param_type_idxs.push(idx);
+        }
 
         let table_end = proto_ids_off
             .checked_add(proto_ids_size.saturating_mul(12))
@@ -1516,19 +1535,23 @@ mod dex_walker {
             let entry_off = proto_ids_off + idx * 12;
             let return_type_idx = read_u32_le(dex, entry_off + 4);
             let parameters_off = read_u32_le(dex, entry_off + 8) as usize;
-            if return_type_idx != void_type_idx {
+            if return_type_idx != target_return_type_idx {
                 continue;
             }
-            // Empty parameters => no `String;ZZ` match.
+            if target_param_type_idxs.is_empty() {
+                if parameters_off == 0 {
+                    return Ok(Some(idx as u32));
+                }
+                continue;
+            }
             if parameters_off == 0 {
                 continue;
             }
-            // type_list layout: u32 size, u16 list[size].
             if parameters_off + 4 > dex.len() {
                 continue;
             }
             let list_size = read_u32_le(dex, parameters_off) as usize;
-            if list_size != 3 {
+            if list_size != target_param_type_idxs.len() {
                 continue;
             }
             let list_off = parameters_off + 4;
@@ -1536,61 +1559,19 @@ mod dex_walker {
             if list_end > dex.len() {
                 continue;
             }
-            let p0 = read_u16_le(dex, list_off) as u32;
-            let p1 = read_u16_le(dex, list_off + 2) as u32;
-            let p2 = read_u16_le(dex, list_off + 4) as u32;
-            // p0 must be Ljava/lang/String;, p1/p2 must both resolve to
-            // primitive boolean "Z".
-            if p0 != string_type_idx {
-                continue;
+            let mut matches = true;
+            for (i, expected_idx) in target_param_type_idxs.iter().enumerate() {
+                let actual = read_u16_le(dex, list_off + i * 2) as u32;
+                if actual != *expected_idx {
+                    matches = false;
+                    break;
+                }
             }
-            // Check p1 and p2 type descriptors are "Z".
-            if !type_idx_is(
-                dex,
-                type_ids_off,
-                type_ids_size,
-                string_ids_off,
-                string_ids_size,
-                p1,
-                "Z",
-            )? {
-                continue;
+            if matches {
+                return Ok(Some(idx as u32));
             }
-            if !type_idx_is(
-                dex,
-                type_ids_off,
-                type_ids_size,
-                string_ids_off,
-                string_ids_size,
-                p2,
-                "Z",
-            )? {
-                continue;
-            }
-            return Ok(Some(idx as u32));
         }
         Ok(None)
-    }
-
-    fn type_idx_is(
-        dex: &[u8],
-        type_ids_off: usize,
-        type_ids_size: usize,
-        string_ids_off: usize,
-        string_ids_size: usize,
-        type_idx: u32,
-        target: &str,
-    ) -> Result<bool> {
-        if type_idx as usize >= type_ids_size {
-            return Ok(false);
-        }
-        let entry_off = type_ids_off + (type_idx as usize) * 4;
-        if entry_off + 4 > dex.len() {
-            return Ok(false);
-        }
-        let descriptor_idx = read_u32_le(dex, entry_off);
-        let s = read_string_at_idx(dex, string_ids_size, string_ids_off, descriptor_idx)?;
-        Ok(s.as_deref() == Some(target))
     }
 
     pub(super) fn find_class_data_off(
@@ -2206,7 +2187,7 @@ mod zui_settings_dex {
         };
 
         // 3. Resolve proto idx for `()Z` (no params, returns boolean).
-        let Some(z_returning_no_args_proto) = find_proto_idx_no_args_returning_z(
+        let Some(z_returning_no_args_proto) = super::dex_walker::find_proto_idx(
             dex,
             string_ids_size,
             string_ids_off,
@@ -2214,6 +2195,8 @@ mod zui_settings_dex {
             type_ids_off,
             proto_ids_size,
             proto_ids_off,
+            "Z",
+            &[],
         )?
         else {
             return Ok(None);
@@ -2376,43 +2359,6 @@ mod zui_settings_dex {
             }
         }
         Ok(out)
-    }
-
-    fn find_proto_idx_no_args_returning_z(
-        dex: &[u8],
-        string_ids_size: usize,
-        string_ids_off: usize,
-        type_ids_size: usize,
-        type_ids_off: usize,
-        proto_ids_size: usize,
-        proto_ids_off: usize,
-    ) -> Result<Option<u32>> {
-        let Some(z_type_idx) = super::dex_walker::find_type_idx(
-            dex,
-            string_ids_size,
-            string_ids_off,
-            type_ids_size,
-            type_ids_off,
-            "Z",
-        )?
-        else {
-            return Ok(None);
-        };
-        let table_end = proto_ids_off
-            .checked_add(proto_ids_size.saturating_mul(12))
-            .ok_or_else(|| anyhow!("dex proto_ids overflow"))?;
-        if table_end > dex.len() {
-            bail!("dex proto_ids out of bounds");
-        }
-        for idx in 0..proto_ids_size {
-            let entry_off = proto_ids_off + idx * 12;
-            let return_type_idx = read_u32_le(dex, entry_off + 4);
-            let parameters_off = read_u32_le(dex, entry_off + 8) as usize;
-            if return_type_idx == z_type_idx && parameters_off == 0 {
-                return Ok(Some(idx as u32));
-            }
-        }
-        Ok(None)
     }
 }
 
