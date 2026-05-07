@@ -275,7 +275,8 @@ pub fn apply_fuck_lgsi_with_progress(
     //    the first one whose dex walker returns a non-empty feature
     //    list.
     let zip = parse_zip_central_directory(&jar_bytes)?;
-    let candidate_dex_entries = collect_lgsi_features_candidate_dexes(&jar_bytes, &zip)?;
+    let candidate_dex_entries =
+        collect_dex_candidates_referencing(&jar_bytes, &zip, LGSI_FEATURES_CLASS, "framework.jar")?;
     if candidate_dex_entries.is_empty() {
         return Ok(FuckLgsiOutcome::NotApplicable {
             reason: format!(
@@ -552,25 +553,14 @@ fn apply_zui_settings_locale_patch(
     //    `invoke-static` sites. Pick the first dex whose walker
     //    returns a non-empty patch result.
     let zip = parse_zip_central_directory(&apk_bytes)?;
-    let needle = build_dex_string_with_uleb_prefix(LOCALE_LIST_EDITOR_CLASS);
+    let candidate_entries = collect_dex_candidates_referencing(
+        &apk_bytes,
+        &zip,
+        LOCALE_LIST_EDITOR_CLASS,
+        "ZuiSettings.apk",
+    )?;
     let mut chosen: Option<(ZipEntry, zui_settings_dex::LocalePatchResult)> = None;
-    for entry in &zip.entries {
-        if !entry.name.ends_with(".dex") {
-            continue;
-        }
-        if entry.compression_method != 0 || entry.uses_data_descriptor || entry.is_zip64 {
-            continue;
-        }
-        let dex_end = entry.data_start + entry.compressed_size;
-        if dex_end > apk_bytes.len() {
-            continue;
-        }
-        // Quick descriptor probe — most dexes don't reference
-        // LocaleListEditor at all; skip them without running the full
-        // walker.
-        if memmem::find(&apk_bytes[entry.data_start..dex_end], &needle).is_none() {
-            continue;
-        }
+    for entry in candidate_entries {
         let dex_data_off = entry.data_start;
         let dex_data_end = dex_data_off + entry.compressed_size;
         let result = {
@@ -581,7 +571,7 @@ fn apply_zui_settings_locale_patch(
             zui_settings_dex::patch_locale_list_editor(dex_slice)?
         };
         if let Some(r) = result {
-            chosen = Some((entry.clone(), r));
+            chosen = Some((entry, r));
             break;
         }
     }
@@ -2599,23 +2589,29 @@ fn find_eocd(bytes: &[u8]) -> Result<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// LgsiFeatures dex location
+// Dex candidate location (shared by LgsiFeatures + ZuiSettings flows)
 // ---------------------------------------------------------------------------
 
-/// Collect every `classes*.dex` entry that mentions
-/// `Lcom/lgsi/config/LgsiFeatures;` in its string pool. The descriptor
-/// shows up in any dex that *references* the type, but only the dex
-/// that *defines* the class also carries its `class_data_item` and
-/// `<clinit>`; framework.jar can ship a dozen dexes referencing the
-/// type (other classes calling into LgsiFeatures) while the actual
-/// class_def lives in only one. The caller (`apply_fuck_lgsi`) walks
-/// candidates in order and picks the first whose dex walker returns
-/// non-empty.
-fn collect_lgsi_features_candidate_dexes(
+/// Collect every `classes*.dex` entry inside `jar_bytes` (a
+/// stored-only ZIP, parsed via [`parse_zip_central_directory`]) whose
+/// dex string pool contains `descriptor`. The descriptor shows up in
+/// any dex that *references* the type, but only the dex that *defines*
+/// the class also carries its `class_data_item`; jar-style containers
+/// can ship a dozen dexes referencing a type while the actual class
+/// definition lives in only one. Callers iterate the returned list in
+/// order and pick the first whose downstream dex walker yields a
+/// non-empty result.
+///
+/// `jar_label` (e.g. `"framework.jar"`, `"ZuiSettings.apk"`) is used
+/// only for error messages on hard refusals (compressed dex /
+/// data-descriptor flag / ZIP64 sentinel / out-of-bounds entry).
+fn collect_dex_candidates_referencing(
     jar_bytes: &[u8],
     zip: &ZipLayout,
+    descriptor: &str,
+    jar_label: &str,
 ) -> Result<Vec<ZipEntry>> {
-    let needle = build_dex_string_with_uleb_prefix(LGSI_FEATURES_CLASS);
+    let needle = build_dex_string_with_uleb_prefix(descriptor);
     let mut out = Vec::new();
     for entry in &zip.entries {
         if !entry.name.ends_with(".dex") {
@@ -2623,20 +2619,20 @@ fn collect_lgsi_features_candidate_dexes(
         }
         if entry.compression_method != 0 {
             return Err(anyhow!(
-                "framework.jar dex entry {} is compressed (method {}); only stored dex entries are supported",
+                "{jar_label} dex entry {} is compressed (method {}); only stored dex entries are supported",
                 entry.name,
                 entry.compression_method
             ));
         }
         if entry.uses_data_descriptor {
             return Err(anyhow!(
-                "framework.jar dex entry {} uses ZIP data-descriptor (flag bit 3); CRC + sizes live in a trailing record this parser does not handle",
+                "{jar_label} dex entry {} uses ZIP data-descriptor (flag bit 3); CRC + sizes live in a trailing record this parser does not handle",
                 entry.name
             ));
         }
         if entry.is_zip64 {
             return Err(anyhow!(
-                "framework.jar dex entry {} uses ZIP64 extended fields ({:#010x} sentinel); ZIP64 is not supported here",
+                "{jar_label} dex entry {} uses ZIP64 extended fields ({:#010x} sentinel); ZIP64 is not supported here",
                 entry.name,
                 ZIP64_SENTINEL_U32
             ));
@@ -2644,11 +2640,11 @@ fn collect_lgsi_features_candidate_dexes(
         let dex_end = checked_range_end(
             entry.data_start,
             entry.compressed_size,
-            "framework.jar dex entry",
+            "dex entry data range",
         )?;
         if dex_end > jar_bytes.len() {
             return Err(anyhow!(
-                "framework.jar dex entry {} range {}..{} exceeds jar length {}",
+                "{jar_label} dex entry {} range {}..{} exceeds jar length {}",
                 entry.name,
                 entry.data_start,
                 dex_end,
@@ -2889,8 +2885,13 @@ mod tests {
             return;
         };
         let zip = parse_zip_central_directory(&jar_bytes).expect("zip parse");
-        let candidates =
-            collect_lgsi_features_candidate_dexes(&jar_bytes, &zip).expect("candidate collect");
+        let candidates = collect_dex_candidates_referencing(
+            &jar_bytes,
+            &zip,
+            LGSI_FEATURES_CLASS,
+            "framework.jar",
+        )
+        .expect("candidate collect");
         assert!(
             !candidates.is_empty(),
             "no dex candidates in real framework.jar"
