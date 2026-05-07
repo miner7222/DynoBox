@@ -1415,7 +1415,7 @@ mod dex_walker {
         }
     }
 
-    fn find_type_idx(
+    pub(super) fn find_type_idx(
         dex: &[u8],
         string_ids_size: usize,
         string_ids_off: usize,
@@ -1443,7 +1443,7 @@ mod dex_walker {
         Ok(None)
     }
 
-    fn find_method_idx(
+    pub(super) fn find_method_idx(
         dex: &[u8],
         method_ids_size: usize,
         method_ids_off: usize,
@@ -1593,7 +1593,7 @@ mod dex_walker {
         Ok(s.as_deref() == Some(target))
     }
 
-    fn find_class_data_off(
+    pub(super) fn find_class_data_off(
         dex: &[u8],
         class_defs_size: usize,
         class_defs_off: usize,
@@ -1666,7 +1666,7 @@ mod dex_walker {
 
     /// Find the string idx of `needle` in `string_ids`. Strict variant
     /// requires an exact match including length and NUL terminator.
-    fn find_string_idx_strict(
+    pub(super) fn find_string_idx_strict(
         dex: &[u8],
         string_ids_size: usize,
         string_ids_off: usize,
@@ -1751,7 +1751,7 @@ mod dex_walker {
         }
     }
 
-    fn read_uleb128(dex: &[u8], p: &mut usize) -> Result<u64> {
+    pub(super) fn read_uleb128(dex: &[u8], p: &mut usize) -> Result<u64> {
         let mut result: u64 = 0;
         let mut shift = 0u32;
         loop {
@@ -2162,7 +2162,7 @@ mod zui_settings_dex {
         // 1. Resolve type idx for LocaleListEditor (must have class_def
         //    here) and LenovoUtils (referenced as type for the static
         //    calls).
-        let Some(editor_type_idx) = find_type_idx_local(
+        let Some(editor_type_idx) = super::dex_walker::find_type_idx(
             dex,
             string_ids_size,
             string_ids_off,
@@ -2173,7 +2173,7 @@ mod zui_settings_dex {
         else {
             return Ok(None);
         };
-        let Some(utils_type_idx) = find_type_idx_local(
+        let Some(utils_type_idx) = super::dex_walker::find_type_idx(
             dex,
             string_ids_size,
             string_ids_off,
@@ -2186,13 +2186,21 @@ mod zui_settings_dex {
         };
 
         // 2. Resolve string idxs for the method names.
-        let Some(is_prc_name_idx) =
-            find_string_idx_local(dex, string_ids_size, string_ids_off, IS_PRC_VERSION_NAME)?
+        let Some(is_prc_name_idx) = super::dex_walker::find_string_idx_strict(
+            dex,
+            string_ids_size,
+            string_ids_off,
+            IS_PRC_VERSION_NAME,
+        )?
         else {
             return Ok(None);
         };
-        let Some(is_row_name_idx) =
-            find_string_idx_local(dex, string_ids_size, string_ids_off, IS_ROW_VERSION_NAME)?
+        let Some(is_row_name_idx) = super::dex_walker::find_string_idx_strict(
+            dex,
+            string_ids_size,
+            string_ids_off,
+            IS_ROW_VERSION_NAME,
+        )?
         else {
             return Ok(None);
         };
@@ -2212,7 +2220,7 @@ mod zui_settings_dex {
         };
 
         // 4. Resolve method idxs for both calls.
-        let is_prc_method_idx = find_method_idx_local(
+        let is_prc_method_idx = super::dex_walker::find_method_idx(
             dex,
             method_ids_size,
             method_ids_off,
@@ -2220,7 +2228,7 @@ mod zui_settings_dex {
             is_prc_name_idx,
             z_returning_no_args_proto,
         )?;
-        let is_row_method_idx = find_method_idx_local(
+        let is_row_method_idx = super::dex_walker::find_method_idx(
             dex,
             method_ids_size,
             method_ids_off,
@@ -2236,8 +2244,12 @@ mod zui_settings_dex {
         //    code_item. For each invoke-static against either target
         //    method idx, byte-patch the 8-byte invoke + move-result
         //    pair to const/16 + 2x nop.
-        let Some(class_data_off) =
-            find_class_data_off_local(dex, class_defs_size, class_defs_off, editor_type_idx)?
+        let Some(class_data_off) = super::dex_walker::find_class_data_off(
+            dex,
+            class_defs_size,
+            class_defs_off,
+            editor_type_idx,
+        )?
         else {
             return Ok(None);
         };
@@ -2344,20 +2356,20 @@ mod zui_settings_dex {
 
     fn collect_method_code_offs(dex: &[u8], class_data_off: usize) -> Result<Vec<usize>> {
         let mut p = class_data_off;
-        let static_fields_size = read_uleb128_local(dex, &mut p)?;
-        let instance_fields_size = read_uleb128_local(dex, &mut p)?;
-        let direct_methods_size = read_uleb128_local(dex, &mut p)?;
-        let virtual_methods_size = read_uleb128_local(dex, &mut p)?;
+        let static_fields_size = super::dex_walker::read_uleb128(dex, &mut p)?;
+        let instance_fields_size = super::dex_walker::read_uleb128(dex, &mut p)?;
+        let direct_methods_size = super::dex_walker::read_uleb128(dex, &mut p)?;
+        let virtual_methods_size = super::dex_walker::read_uleb128(dex, &mut p)?;
         for _ in 0..(static_fields_size + instance_fields_size) {
-            let _ = read_uleb128_local(dex, &mut p)?;
-            let _ = read_uleb128_local(dex, &mut p)?;
+            let _ = super::dex_walker::read_uleb128(dex, &mut p)?;
+            let _ = super::dex_walker::read_uleb128(dex, &mut p)?;
         }
         let mut out = Vec::new();
         for size in [direct_methods_size, virtual_methods_size] {
             for _ in 0..size {
-                let _diff = read_uleb128_local(dex, &mut p)?;
-                let _access = read_uleb128_local(dex, &mut p)?;
-                let code_off = read_uleb128_local(dex, &mut p)? as usize;
+                let _diff = super::dex_walker::read_uleb128(dex, &mut p)?;
+                let _access = super::dex_walker::read_uleb128(dex, &mut p)?;
+                let code_off = super::dex_walker::read_uleb128(dex, &mut p)? as usize;
                 if code_off != 0 {
                     out.push(code_off);
                 }
@@ -2375,7 +2387,7 @@ mod zui_settings_dex {
         proto_ids_size: usize,
         proto_ids_off: usize,
     ) -> Result<Option<u32>> {
-        let Some(z_type_idx) = find_type_idx_local(
+        let Some(z_type_idx) = super::dex_walker::find_type_idx(
             dex,
             string_ids_size,
             string_ids_off,
@@ -2401,152 +2413,6 @@ mod zui_settings_dex {
             }
         }
         Ok(None)
-    }
-
-    // Local copies of helpers that already exist inside `dex_walker`
-    // but aren't `pub`. We could re-export them, but the duplication
-    // is small and keeps the module boundaries clear.
-    fn find_type_idx_local(
-        dex: &[u8],
-        string_ids_size: usize,
-        string_ids_off: usize,
-        type_ids_size: usize,
-        type_ids_off: usize,
-        descriptor: &str,
-    ) -> Result<Option<u32>> {
-        let Some(s_idx) = find_string_idx_local(dex, string_ids_size, string_ids_off, descriptor)?
-        else {
-            return Ok(None);
-        };
-        let table_end = type_ids_off
-            .checked_add(type_ids_size.saturating_mul(4))
-            .ok_or_else(|| anyhow!("dex type_ids overflow"))?;
-        if table_end > dex.len() {
-            bail!("dex type_ids out of bounds");
-        }
-        for idx in 0..type_ids_size {
-            let entry_off = type_ids_off + idx * 4;
-            let descriptor_idx = read_u32_le(dex, entry_off);
-            if descriptor_idx == s_idx {
-                return Ok(Some(idx as u32));
-            }
-        }
-        Ok(None)
-    }
-
-    fn find_method_idx_local(
-        dex: &[u8],
-        method_ids_size: usize,
-        method_ids_off: usize,
-        class_type_idx: u32,
-        name_string_idx: u32,
-        proto_idx: u32,
-    ) -> Result<Option<u32>> {
-        let table_end = method_ids_off
-            .checked_add(method_ids_size.saturating_mul(8))
-            .ok_or_else(|| anyhow!("dex method_ids overflow"))?;
-        if table_end > dex.len() {
-            bail!("dex method_ids out of bounds");
-        }
-        for idx in 0..method_ids_size {
-            let entry_off = method_ids_off + idx * 8;
-            let class_idx = read_u16_le(dex, entry_off) as u32;
-            let proto_at_idx = read_u16_le(dex, entry_off + 2) as u32;
-            let name_idx = read_u32_le(dex, entry_off + 4);
-            if class_idx == class_type_idx
-                && proto_at_idx == proto_idx
-                && name_idx == name_string_idx
-            {
-                return Ok(Some(idx as u32));
-            }
-        }
-        Ok(None)
-    }
-
-    fn find_class_data_off_local(
-        dex: &[u8],
-        class_defs_size: usize,
-        class_defs_off: usize,
-        class_type_idx: u32,
-    ) -> Result<Option<usize>> {
-        let table_end = class_defs_off
-            .checked_add(class_defs_size.saturating_mul(32))
-            .ok_or_else(|| anyhow!("dex class_defs overflow"))?;
-        if table_end > dex.len() {
-            bail!("dex class_defs out of bounds");
-        }
-        for idx in 0..class_defs_size {
-            let entry_off = class_defs_off + idx * 32;
-            let class_idx = read_u32_le(dex, entry_off);
-            if class_idx == class_type_idx {
-                let class_data_off = read_u32_le(dex, entry_off + 24) as usize;
-                if class_data_off == 0 {
-                    return Ok(None);
-                }
-                return Ok(Some(class_data_off));
-            }
-        }
-        Ok(None)
-    }
-
-    fn find_string_idx_local(
-        dex: &[u8],
-        string_ids_size: usize,
-        string_ids_off: usize,
-        needle: &str,
-    ) -> Result<Option<u32>> {
-        let needle_bytes = needle.as_bytes();
-        let table_end = string_ids_off
-            .checked_add(string_ids_size.saturating_mul(4))
-            .ok_or_else(|| anyhow!("dex string_ids overflow"))?;
-        if table_end > dex.len() {
-            bail!("dex string_ids out of bounds");
-        }
-        for idx in 0..string_ids_size {
-            let entry_off = string_ids_off + idx * 4;
-            let str_data_off = read_u32_le(dex, entry_off) as usize;
-            if str_data_off >= dex.len() {
-                continue;
-            }
-            let mut p = str_data_off;
-            loop {
-                if p >= dex.len() {
-                    bail!("dex string_data_item truncated at offset {p}");
-                }
-                let b = dex[p];
-                p += 1;
-                if b & 0x80 == 0 {
-                    break;
-                }
-            }
-            if p + needle_bytes.len() + 1 > dex.len() {
-                continue;
-            }
-            if &dex[p..p + needle_bytes.len()] == needle_bytes && dex[p + needle_bytes.len()] == 0 {
-                return Ok(Some(idx as u32));
-            }
-        }
-        Ok(None)
-    }
-
-    fn read_uleb128_local(dex: &[u8], p: &mut usize) -> Result<u64> {
-        let mut result: u64 = 0;
-        let mut shift = 0u32;
-        loop {
-            if *p >= dex.len() {
-                bail!("dex ULEB128 truncated at offset {p}", p = *p);
-            }
-            let b = dex[*p];
-            *p += 1;
-            result |= ((b & 0x7F) as u64) << shift;
-            if b & 0x80 == 0 {
-                return Ok(result);
-            }
-            shift += 7;
-            if shift >= 64 {
-                bail!("dex ULEB128 overflow");
-            }
-        }
     }
 }
 
