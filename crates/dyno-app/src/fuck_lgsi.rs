@@ -100,10 +100,38 @@ const PRODUCT_HTML_PATH: &[&str] = &["etc", "lgsi_build_info.html"];
 const ANTI_CROSS_SELL_FEATURE_NAME: &str = "ZuiAntiCrossSell";
 
 const ZUI_SETTINGS_APK_PATH: &[&str] = &["system", "priv-app", "ZuiSettings", "ZuiSettings.apk"];
-const LOCALE_LIST_EDITOR_CLASS: &str = "Lcom/android/settings/localepicker/LocaleListEditor;";
 const LENOVO_UTILS_CLASS: &str = "Lcom/lenovo/common/utils/LenovoUtils;";
 const IS_PRC_VERSION_NAME: &str = "isPrcVersion";
 const IS_ROW_VERSION_NAME: &str = "isRowVersion";
+
+/// Classes inside `ZuiSettings.apk` that gate UI elements on
+/// `LenovoUtils.isPrcVersion()` / `isRowVersion()` and ship the same
+/// `invoke-static {} + move-result vAA` pattern this patcher rewrites.
+/// Each entry is a JVM class descriptor (`Lpkg/Class;`); the dex
+/// walker locates a class_def for each one across every
+/// `classes*.dex` inside the APK and patches every matching call site
+/// inside that class's methods.
+///
+/// Coverage:
+/// * `LocaleListEditor` — the language picker (5 PRC/ROW gates,
+///   added 2026-05-02 in the original ZuiAntiCrossSell follow-up).
+/// * `regionalpreferences/*` — the "Regional preferences" category
+///   (region picker, temperature unit, measurement system, first day
+///   of week). Two `getAvailabilityStatus()` controllers + four
+///   `BaseSearchIndexProvider` inner classes (`RegionPickerFragment$1`,
+///   `TemperatureUnitFragment$2`, `MeasurementSystemItemFragment$2`,
+///   `FirstDayOfWeekItemFragment$2`) all gate visibility/search
+///   indexing on `isPrcVersion()`. PRC build hides the entire
+///   category + drops the four sub-pages from Settings search.
+const ZUI_SETTINGS_PATCH_TARGETS: &[&str] = &[
+    "Lcom/android/settings/localepicker/LocaleListEditor;",
+    "Lcom/android/settings/regionalpreferences/RegionalPreferencesCategoryController;",
+    "Lcom/android/settings/regionalpreferences/RegionalPreferencesController;",
+    "Lcom/android/settings/regionalpreferences/RegionPickerFragment$1;",
+    "Lcom/android/settings/regionalpreferences/TemperatureUnitFragment$2;",
+    "Lcom/android/settings/regionalpreferences/MeasurementSystemItemFragment$2;",
+    "Lcom/android/settings/regionalpreferences/FirstDayOfWeekItemFragment$2;",
+];
 
 pub const WORKSPACE_JSON_NAME: &str = "lgsi_features.json";
 pub const WORKSPACE_HTML_NAME: &str = "lgsi_build_info.html";
@@ -144,27 +172,41 @@ pub enum FuckLgsiOutcome {
     NotApplicable { reason: String },
 }
 
-/// Result of the `LocaleListEditor.smali` follow-up patch inside
-/// `ZuiSettings.apk`.
+/// Result of the `ZuiSettings.apk` PRC→ROW follow-up dex patch.
 ///
 /// The patch rewrites every `invoke-static {}, LenovoUtils->isPrcVersion()Z`
-/// and `isRowVersion()Z` site inside `LocaleListEditor`'s methods so the
-/// PRC build picks the ROW UI path: language picker shows
-/// `getUserLocaleList()` (user's enabled locales), the "Add language"
-/// button is visible, the Edit menu is shown, drag-reorder is enabled,
-/// and the standard `R$xml->languages` resource (with Terms of Address
-/// preference) is loaded. See `40_Session_Memory.md` for the full
-/// per-site analysis.
+/// and `isRowVersion()Z` site inside the methods of every class listed
+/// in [`ZUI_SETTINGS_PATCH_TARGETS`], so the PRC build behaves like ROW
+/// across both the language picker and the Regional Preferences
+/// category:
+///
+/// * Language picker (`LocaleListEditor`): `getUserLocaleList()`
+///   instead of the read-only `getAllLocaleList()` picker; "Add
+///   language" button + Edit menu visible; drag-reorder enabled;
+///   Terms of Address preference shown.
+/// * Regional Preferences category
+///   (`RegionalPreferencesCategoryController`,
+///   `RegionalPreferencesController`): category + entry point visible
+///   in Settings (PRC normally returns `CONDITIONALLY_UNAVAILABLE`).
+/// * Regional Preferences sub-pages (Region picker, Temperature
+///   unit, Measurement system, First day of week): entries
+///   re-registered in Settings search index (PRC normally returns
+///   `false` from `isPageSearchEnabled`).
+///
+/// See `40_Session_Memory.md` for the per-site analysis.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZuiSettingsLocalePatch {
-    /// Filename inside `ZuiSettings.apk` that carried the
-    /// `LocaleListEditor` class definition (typically `classes4.dex`).
-    pub dex_entry: String,
+    /// Filenames inside `ZuiSettings.apk` whose dex bytes were
+    /// rewritten — one entry per `classes*.dex` that carried at least
+    /// one matching class_def. Multiple dexes are common because the
+    /// language picker (`smali_classes4`) and the regional-preferences
+    /// classes can land in different splits.
+    pub dex_entries: Vec<String>,
     /// Number of `isPrcVersion()` invoke-static sites rewritten to a
-    /// hardcoded `false` constant.
+    /// hardcoded `false` constant across all patched dexes.
     pub is_prc_sites_patched: usize,
     /// Number of `isRowVersion()` invoke-static sites rewritten to a
-    /// hardcoded `true` constant.
+    /// hardcoded `true` constant across all patched dexes.
     pub is_row_sites_patched: usize,
     /// Byte offsets inside the APK of each rewritten `invoke-static`
     /// opcode (helpful for cross-referencing with smali line numbers).
@@ -532,13 +574,21 @@ fn anti_cross_sell_flipped_off(applied: &[LgsiFeatureChange]) -> bool {
         .any(|c| c.name == ANTI_CROSS_SELL_FEATURE_NAME && c.from && !c.to)
 }
 
-/// ext4-walks `system.img` to `/system/priv-app/ZuiSettings/ZuiSettings.apk`,
-/// finds the dex carrying `LocaleListEditor`, and rewrites every
-/// `LenovoUtils.isPrcVersion()Z` / `isRowVersion()Z` invoke-static
-/// site to a hardcoded `false` / `true` constant. Returns `None`
-/// when the APK or class is absent (older firmware build, refactored
-/// code) or when no patchable site was found; returns `Some(patch)`
-/// when the APK was rewritten in place.
+/// ext4-walks `system.img` to `/system/priv-app/ZuiSettings/ZuiSettings.apk`
+/// and rewrites every `LenovoUtils.isPrcVersion()Z` /
+/// `isRowVersion()Z` invoke-static site inside the methods of every
+/// class listed in [`ZUI_SETTINGS_PATCH_TARGETS`] to a hardcoded
+/// `false` / `true`. Each target class can live in a different
+/// `classes*.dex` (the language picker sits in `smali_classes4`, the
+/// Regional Preferences classes in different splits), so the walker
+/// iterates every dex and tries every target class against it.
+/// Multiple dexes may end up patched in a single run.
+///
+/// Returns `None` when the APK is absent (older firmware build) or
+/// no class definition was found across any target × dex pair.
+/// Returns `Some(patch)` carrying per-class site totals + a flat
+/// list of patched `classes*.dex` entry names when at least one
+/// rewrite landed.
 fn apply_zui_settings_locale_patch(
     system_image: &Path,
     block_size: u64,
@@ -560,76 +610,76 @@ fn apply_zui_settings_locale_patch(
         return Ok(None);
     }
 
-    // 2. Parse APK as ZIP. Walk every `classes*.dex` entry the same
-    //    way the framework.jar / LgsiFeatures path does — many dexes
-    //    *reference* `LocaleListEditor` as a type without defining the
-    //    class, only one carries the class_def + the patchable
-    //    `invoke-static` sites. Pick the first dex whose walker
-    //    returns a non-empty patch result.
+    // 2. Parse APK as ZIP. Iterate every `classes*.dex` entry, run
+    //    every target class's walker against it, and recompute that
+    //    dex's header sums + APK ZIP entry CRC once if any patches
+    //    landed inside it. Multiple dexes are commonly patched in a
+    //    single run because the language-picker class and the
+    //    regional-preferences classes can live in different splits.
     let zip = parse_zip_central_directory(&apk_bytes)?;
-    let candidate_entries = collect_dex_candidates_referencing(
-        &apk_bytes,
-        &zip,
-        LOCALE_LIST_EDITOR_CLASS,
-        "ZuiSettings.apk",
-    )?;
-    let mut chosen: Option<(ZipEntry, zui_settings_dex::LocalePatchResult)> = None;
-    for entry in candidate_entries {
+    let dex_entries: Vec<ZipEntry> = zip
+        .entries
+        .iter()
+        .filter(|e| e.name.ends_with(".dex"))
+        .filter(|e| !(e.compression_method != 0 || e.uses_data_descriptor || e.is_zip64))
+        .filter(|e| e.data_start + e.compressed_size <= apk_bytes.len())
+        .cloned()
+        .collect();
+
+    let mut total_is_prc_sites = 0usize;
+    let mut total_is_row_sites = 0usize;
+    let mut invoke_offsets_in_apk: Vec<u64> = Vec::new();
+    let mut patched_dex_entries: Vec<String> = Vec::new();
+
+    for entry in &dex_entries {
         let dex_data_off = entry.data_start;
         let dex_data_end = dex_data_off + entry.compressed_size;
-        let result = {
-            let dex_slice = &mut apk_bytes[dex_data_off..dex_data_end];
-            if dex_slice.len() < 0x70 {
+        let mut dex_modified = false;
+
+        for class_descriptor in ZUI_SETTINGS_PATCH_TARGETS {
+            let result = {
+                let dex_slice = &mut apk_bytes[dex_data_off..dex_data_end];
+                if dex_slice.len() < 0x70 {
+                    break;
+                }
+                zui_settings_dex::patch_class_in_dex(dex_slice, class_descriptor)?
+            };
+            let Some(r) = result else { continue };
+            if r.is_prc_sites + r.is_row_sites == 0 {
                 continue;
             }
-            zui_settings_dex::patch_locale_list_editor(dex_slice)?
-        };
-        if let Some(r) = result {
-            chosen = Some((entry, r));
-            break;
+            total_is_prc_sites += r.is_prc_sites;
+            total_is_row_sites += r.is_row_sites;
+            for off in r.invoke_offsets_in_dex {
+                invoke_offsets_in_apk.push((dex_data_off + off) as u64);
+            }
+            dex_modified = true;
+        }
+
+        if dex_modified {
+            // Recompute this dex's header sums + APK CRC for the entry.
+            {
+                let dex_slice = &mut apk_bytes[dex_data_off..dex_data_end];
+                recompute_dex_header_sums(dex_slice);
+            }
+            let new_crc = crc32_ieee(&apk_bytes[dex_data_off..dex_data_end]);
+            write_u32_le(&mut apk_bytes, entry.local_header_crc_offset, new_crc);
+            write_u32_le(&mut apk_bytes, entry.cd_crc_offset, new_crc);
+            patched_dex_entries.push(entry.name.clone());
         }
     }
-    let Some((
-        target_entry,
-        zui_settings_dex::LocalePatchResult {
-            is_prc_sites,
-            is_row_sites,
-            invoke_offsets_in_dex,
-        },
-    )) = chosen
-    else {
-        return Ok(None);
-    };
-    let dex_data_off = target_entry.data_start;
-    let dex_data_end = dex_data_off + target_entry.compressed_size;
-    if is_prc_sites + is_row_sites == 0 {
+
+    if total_is_prc_sites + total_is_row_sites == 0 {
         return Ok(None);
     }
 
-    // 4. Recompute dex header sums + apk CRC32.
-    {
-        let dex_slice = &mut apk_bytes[dex_data_off..dex_data_end];
-        recompute_dex_header_sums(dex_slice);
-    }
-    let new_crc = crc32_ieee(&apk_bytes[dex_data_off..dex_data_end]);
-    write_u32_le(
-        &mut apk_bytes,
-        target_entry.local_header_crc_offset,
-        new_crc,
-    );
-    write_u32_le(&mut apk_bytes, target_entry.cd_crc_offset, new_crc);
-
-    // 5. Write APK back via ext4 extents.
+    // 3. Write the (now possibly multi-dex-patched) APK back via ext4 extents.
     write_via_extents(system_image, &apk_bytes, &apk_extents, block_size)?;
 
-    let invoke_offsets_in_apk = invoke_offsets_in_dex
-        .into_iter()
-        .map(|o| (dex_data_off + o) as u64)
-        .collect();
     Ok(Some(ZuiSettingsLocalePatch {
-        dex_entry: target_entry.name,
-        is_prc_sites_patched: is_prc_sites,
-        is_row_sites_patched: is_row_sites,
+        dex_entries: patched_dex_entries,
+        is_prc_sites_patched: total_is_prc_sites,
+        is_row_sites_patched: total_is_row_sites,
         invoke_offsets_in_apk,
     }))
 }
@@ -2129,7 +2179,19 @@ mod zui_settings_dex {
         pub invoke_offsets_in_dex: Vec<usize>,
     }
 
-    pub fn patch_locale_list_editor(dex: &mut [u8]) -> Result<Option<LocalePatchResult>> {
+    /// Rewrite every `invoke-static {}, LenovoUtils->isPrcVersion()Z`
+    /// site inside the methods of class `class_descriptor` (must be
+    /// defined in this dex) to a hardcoded `false`, and every
+    /// `isRowVersion()Z` site to a hardcoded `true`. Returns
+    /// `Ok(None)` when the class isn't defined here (referenced as a
+    /// type only) or when the dex doesn't carry the LenovoUtils proto
+    /// idxs needed for matching. Returns `Ok(Some(result))` with
+    /// per-site counts when the class was found and at least one
+    /// match was rewritten.
+    pub fn patch_class_in_dex(
+        dex: &mut [u8],
+        class_descriptor: &str,
+    ) -> Result<Option<LocalePatchResult>> {
         if dex.len() < 0x70 {
             return Ok(None);
         }
@@ -2144,16 +2206,16 @@ mod zui_settings_dex {
         let class_defs_size = read_u32_le(dex, 0x60) as usize;
         let class_defs_off = read_u32_le(dex, 0x64) as usize;
 
-        // 1. Resolve type idx for LocaleListEditor (must have class_def
+        // 1. Resolve type idx for the target class (must have class_def
         //    here) and LenovoUtils (referenced as type for the static
         //    calls).
-        let Some(editor_type_idx) = super::dex_walker::find_type_idx(
+        let Some(target_type_idx) = super::dex_walker::find_type_idx(
             dex,
             string_ids_size,
             string_ids_off,
             type_ids_size,
             type_ids_off,
-            LOCALE_LIST_EDITOR_CLASS,
+            class_descriptor,
         )?
         else {
             return Ok(None);
@@ -2235,7 +2297,7 @@ mod zui_settings_dex {
             dex,
             class_defs_size,
             class_defs_off,
-            editor_type_idx,
+            target_type_idx,
         )?
         else {
             return Ok(None);

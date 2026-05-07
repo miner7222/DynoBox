@@ -66,7 +66,7 @@ pub struct LgsiRecord {
 
 #[derive(Debug, Clone)]
 pub struct ZuiSettingsLocalePatch {
-    pub dex_entry: String,
+    pub dex_entries: Vec<String>,
     pub is_prc_sites_patched: usize,
     pub is_row_sites_patched: usize,
     pub invoke_offsets_in_apk: Vec<u64>,
@@ -303,13 +303,19 @@ fn push_lgsi_section(out: &mut String, l: &LgsiRecord) {
 
     if let Some(p) = &l.zui_settings_locale_patch {
         out.push_str(
-            "<h3 style='margin-bottom:4px'>ZuiSettings.apk LocaleListEditor follow-up patch</h3>\n",
+            "<h3 style='margin-bottom:4px'>ZuiSettings.apk PRC&rarr;ROW follow-up patch</h3>\n",
         );
-        out.push_str("<p>Triggered by the <code>ZuiAntiCrossSell</code> true&rarr;false flip. The patch rewrites every <code>LenovoUtils.isPrcVersion()Z</code> / <code>isRowVersion()Z</code> invoke-static site inside <code>LocaleListEditor</code>'s methods so the PRC build picks the ROW UI path: full language picker (Add language, Edit menu, drag-reorder, Terms of Address) replaces the read-only PRC variant.</p>\n");
-        out.push_str(&format!(
-            "<p>Patched dex entry: <code>{}</code></p>\n",
-            esc(&p.dex_entry)
-        ));
+        out.push_str("<p>Triggered by the <code>ZuiAntiCrossSell</code> true&rarr;false flip. The patch rewrites every <code>LenovoUtils.isPrcVersion()Z</code> / <code>isRowVersion()Z</code> invoke-static site inside the methods of every targeted ZuiSettings class so the PRC build picks the ROW UI path: full language picker (Add language, Edit menu, drag-reorder, Terms of Address) plus the previously-hidden Regional Preferences category (Region picker, Temperature unit, Measurement system, First day of week).</p>\n");
+        let dex_list = if p.dex_entries.is_empty() {
+            "(none)".to_string()
+        } else {
+            p.dex_entries
+                .iter()
+                .map(|d| format!("<code>{}</code>", esc(d)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        out.push_str(&format!("<p>Patched dex entries: {dex_list}</p>\n"));
         out.push_str(
             "<table>\n<tr><th>Method ref</th><th>Sites rewritten</th><th>Forced result</th></tr>\n",
         );

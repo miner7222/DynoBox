@@ -1815,18 +1815,23 @@ where
                     zui_settings_locale_patch
                         .as_ref()
                         .map(|p| ReportZuiSettingsLocalePatch {
-                            dex_entry: p.dex_entry.clone(),
+                            dex_entries: p.dex_entries.clone(),
                             is_prc_sites_patched: p.is_prc_sites_patched,
                             is_row_sites_patched: p.is_row_sites_patched,
                             invoke_offsets_in_apk: p.invoke_offsets_in_apk.clone(),
                         });
                 if let Some(p) = &zui_settings_locale_patch {
+                    let dex_list = if p.dex_entries.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        p.dex_entries.join(", ")
+                    };
                     message(
                         events,
                         MessageLevel::Info,
                         format!(
-                            "[lgsi] ZuiAntiCrossSell flip → ZuiSettings.apk/{} LocaleListEditor patched: {} isPrcVersion site(s) → false, {} isRowVersion site(s) → true",
-                            p.dex_entry, p.is_prc_sites_patched, p.is_row_sites_patched,
+                            "[lgsi] ZuiAntiCrossSell flip → ZuiSettings.apk PRC→ROW patch: {} isPrcVersion site(s) → false, {} isRowVersion site(s) → true; dex(es): {dex_list}",
+                            p.is_prc_sites_patched, p.is_row_sites_patched,
                         ),
                     );
                 }
