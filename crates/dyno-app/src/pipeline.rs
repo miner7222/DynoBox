@@ -10,7 +10,7 @@ use crate::boot_spl::{
 };
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
 use crate::fuck_lgsi::{
-    FuckLgsiInput, FuckLgsiMode, FuckLgsiOutcome, LgsiFeatureChange, LgsiFeatureSkip, SkipReason,
+    FuckLgsiInput, FuckLgsiMode, FuckLgsiOutcome, LgsiFeatureChange, LgsiFeatureSkip,
     apply_fuck_lgsi_with_progress,
 };
 use crate::report::{
@@ -1780,16 +1780,10 @@ where
                 }
                 for skip in &skipped {
                     let LgsiFeatureSkip { name, reason } = skip;
-                    let reason_str = match reason {
-                        SkipReason::NotInDex => "JSON entry not present in dex",
-                        SkipReason::NotInDexFromHtml => "HTML feature missing from dex",
-                        SkipReason::NotInHtml => "dex feature missing from HTML",
-                        SkipReason::UnknownDexBool => "dex register tracker inconclusive",
-                    };
                     message(
                         events,
                         MessageLevel::Warning,
-                        format!("[lgsi] {name}: skipped ({reason_str})"),
+                        format!("[lgsi] {name}: skipped ({})", reason.as_str()),
                     );
                 }
                 message(
@@ -1812,17 +1806,9 @@ where
                     .collect();
                 let report_skipped: Vec<ReportLgsiSkip> = skipped
                     .iter()
-                    .map(|s| {
-                        let reason_str = match s.reason {
-                            SkipReason::NotInDex => "JSON entry not present in dex",
-                            SkipReason::NotInDexFromHtml => "HTML feature missing from dex",
-                            SkipReason::NotInHtml => "dex feature missing from HTML",
-                            SkipReason::UnknownDexBool => "dex register tracker inconclusive",
-                        };
-                        ReportLgsiSkip {
-                            name: s.name.clone(),
-                            reason: reason_str.to_string(),
-                        }
+                    .map(|s| ReportLgsiSkip {
+                        name: s.name.clone(),
+                        reason: s.reason.as_str().to_string(),
                     })
                     .collect();
                 let report_zui_locale =

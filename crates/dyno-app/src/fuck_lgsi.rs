@@ -199,6 +199,20 @@ pub enum SkipReason {
     UnknownDexBool,
 }
 
+impl SkipReason {
+    /// Human-readable summary of the skip reason. Used by both the
+    /// resign-stage `Warning` event emissions and the pipeline
+    /// `report.html` LGSI sub-section so the wording stays in sync.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SkipReason::NotInDex => "JSON entry not present in dex",
+            SkipReason::NotInDexFromHtml => "HTML feature missing from dex",
+            SkipReason::NotInHtml => "dex feature missing from HTML",
+            SkipReason::UnknownDexBool => "dex register tracker inconclusive",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FuckLgsiMode {
     /// Write workspace files, block on stdin Enter, re-read JSON.
