@@ -2221,11 +2221,20 @@ fn confirm_rollback_change(
             format_unix_timestamp_utc(new_ri),
         )?;
     }
-    write!(handle, "Proceed with rollback rewrite? [y/N] ")?;
+    // Prompt with a trailing newline so a `dynobox-gui` child reading
+    // stdout line-by-line can detect the `[y/N]` prompt as a complete
+    // line and surface Yes/No buttons. Plain CLI users see the cursor
+    // on the line below the prompt, which is fine.
+    writeln!(handle, "Proceed with rollback rewrite? [y/N] ")?;
     handle.flush()?;
     drop(handle);
 
-    if !std::io::stdin().is_terminal() {
+    // `DYNOBOX_GUI=1` from the egui front-end opts out of the
+    // is-terminal short-circuit: the GUI pipes our stdin/stdout but
+    // stands in for a real tty by surfacing buttons that write to
+    // stdin on click.
+    let force_interactive = std::env::var_os("DYNOBOX_GUI").is_some();
+    if !force_interactive && !std::io::stdin().is_terminal() {
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         writeln!(

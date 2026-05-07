@@ -3,6 +3,7 @@ members = [
   "crates/dyno-app",
   "crates/dyno-cli",
   "crates/dyno-core",
+  "crates/dyno-gui",
   "crates/dyno-super",
   "crates/dyno-payload",
   "crates/dyno-xml",
@@ -18,6 +19,7 @@ authors = ["miner7222"]
 
 [workspace.dependencies]
 dynobox-app = { path = "crates/dyno-app" }
+dynobox-cli = { path = "crates/dyno-cli" }
 dynobox-core = { path = "crates/dyno-core" }
 dynobox-super = { path = "crates/dyno-super" }
 dynobox-payload = { path = "crates/dyno-payload" }

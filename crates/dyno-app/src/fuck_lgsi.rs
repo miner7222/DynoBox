@@ -2066,7 +2066,11 @@ mod workspace {
 
     pub fn interactive_collect_edited_state(workspace_dir: &Path) -> Result<Vec<(String, bool)>> {
         let stdin = io::stdin();
-        if !stdin.is_terminal() {
+        // `DYNOBOX_GUI=1` from the egui front-end stands in for a real
+        // tty: the GUI pipes our stdin/stdout but surfaces a Continue
+        // button that writes `\n` on click.
+        let force_interactive = std::env::var_os("DYNOBOX_GUI").is_some();
+        if !force_interactive && !stdin.is_terminal() {
             bail!(
                 "--fuck-lgsi needs an interactive terminal; pass --fuck-lgsi-config <path> instead"
             );

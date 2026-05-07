@@ -26,6 +26,28 @@ dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt
 
 Pipeline stage keywords (`unpack`, `resign`, `repack`) can be written as bare words or with `--` prefix. Both forms work.
 
+### GUI
+
+```powershell
+dynobox-gui                  # double-click or run with no args -> opens GUI
+dynobox-gui apply --input ...  resign --key testkey_rsa4096 ...  # any args -> CLI passthrough
+```
+
+`dynobox-gui` (`crates/dyno-gui`) is a **dual-mode** binary: launched
+without arguments it opens a minimal egui front-end (mode dropdown,
+folder/file pickers, OTA zip list, resign-options panel that
+auto-greys when resign isn't selected, scrollable log pane on the
+right). Launched **with** any arguments it transparently forwards to
+the sibling `dynobox` CLI and exits with that process's status code,
+so the same shipped binary covers both flows.
+
+On Windows the GUI subsystem flag suppresses the console window for
+double-click launches; when invoked from a terminal the CLI
+passthrough first attaches to the parent console so child stdout /
+stderr lands in your shell as usual.
+
+The GUI passes `--fuck-lgsi <json>` only — interactive pause-on-Enter still requires a real terminal, so use the CLI path when you need to hand-edit `lgsi_features.json` for the first time.
+
 ### Pipeline Example
 
 ```powershell

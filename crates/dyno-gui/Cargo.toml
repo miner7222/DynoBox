@@ -1,0 +1,26 @@
+[package]
+name = "dynobox-gui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Minimal egui front-end for the DynoBox CLI"
+
+[dependencies]
+anyhow.workspace = true
+dynobox-cli.workspace = true
+eframe = { version = "0.34.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.34.2"
+egui_extras = { version = "0.34.2", features = ["datepicker"] }
+# `egui_extras::DatePickerButton` switched from chrono to jiff in
+# 0.33+. Use the same crate directly for the SPL field state.
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+rfd = "0.15"
+
+[[bin]]
+name = "dynobox-gui"
+path = "src/main.rs"
+
+[lints]
+workspace = true
