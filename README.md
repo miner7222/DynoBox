@@ -26,27 +26,20 @@ dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt
 
 Pipeline stage keywords (`unpack`, `resign`, `repack`) can be written as bare words or with `--` prefix. Both forms work.
 
-### GUI
+### GUI mode
 
-```powershell
-dynobox-gui                  # double-click or run with no args -> opens GUI
-dynobox-gui apply --input ...  resign --key testkey_rsa4096 ...  # any args -> CLI passthrough
-```
+The shipped `dynobox` binary is **dual-mode**. Run it with any
+arguments and it behaves exactly like the CLI documented above. Run
+it with no arguments (e.g. double-click `dynobox.exe`) and it opens a
+minimal egui front-end instead — mode dropdown, folder / file
+pickers, OTA-zip list with drag-and-drop reordering, resign-options
+panel that auto-greys when resign isn't selected, and a "Run in
+terminal" button that spawns the same binary in a fresh OS terminal
+window.
 
-`dynobox-gui` (`crates/dyno-gui`) is a **dual-mode** binary: launched
-without arguments it opens a minimal egui front-end (mode dropdown,
-folder/file pickers, OTA zip list, resign-options panel that
-auto-greys when resign isn't selected, scrollable log pane on the
-right). Launched **with** any arguments it transparently forwards to
-the sibling `dynobox` CLI and exits with that process's status code,
-so the same shipped binary covers both flows.
-
-On Windows the GUI subsystem flag suppresses the console window for
-double-click launches; when invoked from a terminal the CLI
-passthrough first attaches to the parent console so child stdout /
-stderr lands in your shell as usual.
-
-The GUI passes `--fuck-lgsi <json>` only — interactive pause-on-Enter still requires a real terminal, so use the CLI path when you need to hand-edit `lgsi_features.json` for the first time.
+The crate is `crates/dyno-gui` and builds as `dynobox-gui[.exe]`
+locally; CI / release rename the artifact to `dynobox[.exe]` so a
+single binary covers both flows.
 
 ### Pipeline Example
 
@@ -76,8 +69,9 @@ dynobox apply `
 ```text
 crates/
   dyno-app/      app-layer orchestration and progress events
-  dyno-cli/      CLI adapter
+  dyno-cli/      CLI parsing + pipeline driver (lib + thin bin wrapper)
   dyno-core/     shared core types
+  dyno-gui/      egui front-end; ships as the `dynobox` release binary
   dyno-super/    super parsing and repack
   dyno-payload/  OTA payload parsing and patch apply
   dyno-xml/      rawprogram XML parsing
@@ -87,7 +81,7 @@ crates/
 
 ```powershell
 cargo fmt
-cargo build -p dynobox-cli
+cargo build -p dynobox-gui   # dual-mode binary; release artifact gets renamed to `dynobox[.exe]`
 cargo test --workspace
 ```
 
