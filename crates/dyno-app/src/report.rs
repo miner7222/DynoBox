@@ -59,6 +59,17 @@ pub struct LgsiRecord {
     pub skipped: Vec<LgsiSkip>,
     pub old_root_digest: String,
     pub new_root_digest: String,
+    /// Populated when `ZuiAntiCrossSell` flipped `true → false` and the
+    /// `ZuiSettings.apk LocaleListEditor` follow-up dex patch ran.
+    pub zui_settings_locale_patch: Option<ZuiSettingsLocalePatch>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ZuiSettingsLocalePatch {
+    pub dex_entry: String,
+    pub is_prc_sites_patched: usize,
+    pub is_row_sites_patched: usize,
+    pub invoke_offsets_in_apk: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -289,6 +300,39 @@ fn push_lgsi_section(out: &mut String, l: &LgsiRecord) {
         }
         out.push_str("</table>\n");
     }
+
+    if let Some(p) = &l.zui_settings_locale_patch {
+        out.push_str(
+            "<h3 style='margin-bottom:4px'>ZuiSettings.apk LocaleListEditor follow-up patch</h3>\n",
+        );
+        out.push_str("<p>Triggered by the <code>ZuiAntiCrossSell</code> true&rarr;false flip. The patch rewrites every <code>LenovoUtils.isPrcVersion()Z</code> / <code>isRowVersion()Z</code> invoke-static site inside <code>LocaleListEditor</code>'s methods so the PRC build picks the ROW UI path: full language picker (Add language, Edit menu, drag-reorder, Terms of Address) replaces the read-only PRC variant.</p>\n");
+        out.push_str(&format!(
+            "<p>Patched dex entry: <code>{}</code></p>\n",
+            esc(&p.dex_entry)
+        ));
+        out.push_str(
+            "<table>\n<tr><th>Method ref</th><th>Sites rewritten</th><th>Forced result</th></tr>\n",
+        );
+        out.push_str(&format!(
+            "<tr><td><code>LenovoUtils.isPrcVersion()Z</code></td><td>{}</td><td class='to'>false</td></tr>\n",
+            p.is_prc_sites_patched
+        ));
+        out.push_str(&format!(
+            "<tr><td><code>LenovoUtils.isRowVersion()Z</code></td><td>{}</td><td class='to'>true</td></tr>\n",
+            p.is_row_sites_patched
+        ));
+        out.push_str("</table>\n");
+        if !p.invoke_offsets_in_apk.is_empty() {
+            out.push_str(
+                "<details><summary>APK byte offsets of patched invoke-static opcodes</summary>\n",
+            );
+            out.push_str("<ul class='entries'>\n");
+            for off in &p.invoke_offsets_in_apk {
+                out.push_str(&format!("<li><code>{off:#010x}</code></li>\n"));
+            }
+            out.push_str("</ul>\n</details>\n");
+        }
+    }
 }
 
 fn push_signing_key_section(out: &mut String, sk: &SigningKeyChange) {
@@ -441,6 +485,7 @@ mod tests {
             }],
             old_root_digest: "deadbeef".to_string(),
             new_root_digest: "cafebabe".to_string(),
+            zui_settings_locale_patch: None,
         });
         let html = r.render_html();
         assert!(html.contains("DynoBox pipeline report"));

@@ -17,7 +17,7 @@ use crate::report::{
     LgsiChange as ReportLgsiChange, LgsiRecord as ReportLgsiRecord, LgsiSkip as ReportLgsiSkip,
     PipelineReport, RollbackRecord as ReportRollbackRecord,
     SigningKeyChange as ReportSigningKeyChange, SplRecord as ReportSplRecord,
-    format_unix_to_iso8601_utc,
+    ZuiSettingsLocalePatch as ReportZuiSettingsLocalePatch, format_unix_to_iso8601_utc,
 };
 use crate::vendor_spl::{
     VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl_with_progress,
@@ -1761,6 +1761,7 @@ where
                 skipped,
                 old_root_digest,
                 new_root_digest,
+                zui_settings_locale_patch,
             } => {
                 for change in &applied {
                     let LgsiFeatureChange {
@@ -1824,11 +1825,31 @@ where
                         }
                     })
                     .collect();
+                let report_zui_locale =
+                    zui_settings_locale_patch
+                        .as_ref()
+                        .map(|p| ReportZuiSettingsLocalePatch {
+                            dex_entry: p.dex_entry.clone(),
+                            is_prc_sites_patched: p.is_prc_sites_patched,
+                            is_row_sites_patched: p.is_row_sites_patched,
+                            invoke_offsets_in_apk: p.invoke_offsets_in_apk.clone(),
+                        });
+                if let Some(p) = &zui_settings_locale_patch {
+                    message(
+                        events,
+                        MessageLevel::Info,
+                        format!(
+                            "[lgsi] ZuiAntiCrossSell flip → ZuiSettings.apk/{} LocaleListEditor patched: {} isPrcVersion site(s) → false, {} isRowVersion site(s) → true",
+                            p.dex_entry, p.is_prc_sites_patched, p.is_row_sites_patched,
+                        ),
+                    );
+                }
                 report.lgsi = Some(ReportLgsiRecord {
                     applied: report_applied,
                     skipped: report_skipped,
                     old_root_digest: old_root_digest.clone(),
                     new_root_digest: new_root_digest.clone(),
+                    zui_settings_locale_patch: report_zui_locale,
                 });
                 fuck_lgsi_applied = Some((old_root_digest, new_root_digest));
             }

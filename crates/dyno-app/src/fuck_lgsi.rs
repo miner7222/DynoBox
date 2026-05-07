@@ -95,6 +95,16 @@ const SYSTEM_PARTITION: &str = "system";
 const FRAMEWORK_JAR_PATH: &[&str] = &["system", "framework", "framework.jar"];
 const PRODUCT_HTML_PATH: &[&str] = &["etc", "lgsi_build_info.html"];
 
+/// Feature whose true→false flip triggers the
+/// `LocaleListEditor.smali` follow-up patch in `ZuiSettings.apk`.
+const ANTI_CROSS_SELL_FEATURE_NAME: &str = "ZuiAntiCrossSell";
+
+const ZUI_SETTINGS_APK_PATH: &[&str] = &["system", "priv-app", "ZuiSettings", "ZuiSettings.apk"];
+const LOCALE_LIST_EDITOR_CLASS: &str = "Lcom/android/settings/localepicker/LocaleListEditor;";
+const LENOVO_UTILS_CLASS: &str = "Lcom/lenovo/common/utils/LenovoUtils;";
+const IS_PRC_VERSION_NAME: &str = "isPrcVersion";
+const IS_ROW_VERSION_NAME: &str = "isRowVersion";
+
 pub const WORKSPACE_JSON_NAME: &str = "lgsi_features.json";
 pub const WORKSPACE_HTML_NAME: &str = "lgsi_build_info.html";
 
@@ -122,11 +132,43 @@ pub enum FuckLgsiOutcome {
         skipped: Vec<LgsiFeatureSkip>,
         old_root_digest: String,
         new_root_digest: String,
+        /// Populated when `ZuiAntiCrossSell` flipped `true → false` and
+        /// the follow-up `ZuiSettings.apk LocaleListEditor` byte patch
+        /// ran. `None` when the trigger condition was absent or the
+        /// follow-up patch was a no-op.
+        zui_settings_locale_patch: Option<ZuiSettingsLocalePatch>,
     },
     /// 0 features changed (user made no edits, framework.jar was
     /// missing, or all candidates were skipped). `system.img` /
     /// `vbmeta_system.img` were not touched.
     NotApplicable { reason: String },
+}
+
+/// Result of the `LocaleListEditor.smali` follow-up patch inside
+/// `ZuiSettings.apk`.
+///
+/// The patch rewrites every `invoke-static {}, LenovoUtils->isPrcVersion()Z`
+/// and `isRowVersion()Z` site inside `LocaleListEditor`'s methods so the
+/// PRC build picks the ROW UI path: language picker shows
+/// `getUserLocaleList()` (user's enabled locales), the "Add language"
+/// button is visible, the Edit menu is shown, drag-reorder is enabled,
+/// and the standard `R$xml->languages` resource (with Terms of Address
+/// preference) is loaded. See `40_Session_Memory.md` for the full
+/// per-site analysis.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZuiSettingsLocalePatch {
+    /// Filename inside `ZuiSettings.apk` that carried the
+    /// `LocaleListEditor` class definition (typically `classes4.dex`).
+    pub dex_entry: String,
+    /// Number of `isPrcVersion()` invoke-static sites rewritten to a
+    /// hardcoded `false` constant.
+    pub is_prc_sites_patched: usize,
+    /// Number of `isRowVersion()` invoke-static sites rewritten to a
+    /// hardcoded `true` constant.
+    pub is_row_sites_patched: usize,
+    /// Byte offsets inside the APK of each rewritten `invoke-static`
+    /// opcode (helpful for cross-referencing with smali line numbers).
+    pub invoke_offsets_in_apk: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -414,6 +456,21 @@ pub fn apply_fuck_lgsi_with_progress(
     // 11. Write rewritten jar back to system.img.
     write_via_extents(input.system_image, &jar_bytes, &jar_extents, block_size)?;
 
+    // 11b. If the user flipped `ZuiAntiCrossSell` from true → false,
+    //      run the follow-up `LocaleListEditor.smali` patch inside
+    //      `ZuiSettings.apk`. The PRC build's region-gated language
+    //      picker (read-only, no Add/Edit/drag) is rewired to behave
+    //      like ROW (full picker UI) by hardcoding the
+    //      `LenovoUtils.isPrcVersion()` / `isRowVersion()` results
+    //      inside `LocaleListEditor`'s methods. Runs *before* verity
+    //      regen so a single SHA-256 walk covers framework.jar +
+    //      ZuiSettings.apk modifications.
+    let zui_settings_locale_patch = if anti_cross_sell_flipped_off(&applied) {
+        apply_zui_settings_locale_patch(input.system_image, block_size)?
+    } else {
+        None
+    };
+
     // 12. Regenerate dm-verity hash tree.
     let hashtree = read_hashtree_params(input.system_image, SYSTEM_PARTITION)?
         .ok_or_else(|| anyhow!("system.img has no Hashtree descriptor for `system`"))?;
@@ -447,7 +504,130 @@ pub fn apply_fuck_lgsi_with_progress(
         skipped,
         old_root_digest: hex_encode(&old_root_digest),
         new_root_digest: hex_encode(&new_root_digest),
+        zui_settings_locale_patch,
     })
+}
+
+/// Detect whether `ZuiAntiCrossSell` was flipped from `true` to
+/// `false` in the resolved diff. Used as the trigger for the
+/// `ZuiSettings.apk LocaleListEditor` follow-up patch.
+fn anti_cross_sell_flipped_off(applied: &[LgsiFeatureChange]) -> bool {
+    applied
+        .iter()
+        .any(|c| c.name == ANTI_CROSS_SELL_FEATURE_NAME && c.from && !c.to)
+}
+
+/// ext4-walks `system.img` to `/system/priv-app/ZuiSettings/ZuiSettings.apk`,
+/// finds the dex carrying `LocaleListEditor`, and rewrites every
+/// `LenovoUtils.isPrcVersion()Z` / `isRowVersion()Z` invoke-static
+/// site to a hardcoded `false` / `true` constant. Returns `None`
+/// when the APK or class is absent (older firmware build, refactored
+/// code) or when no patchable site was found; returns `Some(patch)`
+/// when the APK was rewritten in place.
+fn apply_zui_settings_locale_patch(
+    system_image: &Path,
+    block_size: u64,
+) -> Result<Option<ZuiSettingsLocalePatch>> {
+    // 1. Read APK bytes + extents.
+    let mut volume = open_ext4_volume(system_image)?;
+    let inode = match lookup_inode_at_path(&mut volume, ZUI_SETTINGS_APK_PATH)? {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+    if !inode.is_file() {
+        return Ok(None);
+    }
+    let (mut apk_bytes, apk_extents) = inode
+        .open_read_with_extents(&mut volume)
+        .map_err(|e| anyhow!("Failed to read ZuiSettings.apk from system.img: {e}"))?;
+    drop(volume);
+    if apk_extents.is_empty() {
+        return Ok(None);
+    }
+
+    // 2. Parse APK as ZIP. Walk every `classes*.dex` entry the same
+    //    way the framework.jar / LgsiFeatures path does — many dexes
+    //    *reference* `LocaleListEditor` as a type without defining the
+    //    class, only one carries the class_def + the patchable
+    //    `invoke-static` sites. Pick the first dex whose walker
+    //    returns a non-empty patch result.
+    let zip = parse_zip_central_directory(&apk_bytes)?;
+    let needle = build_dex_string_with_uleb_prefix(LOCALE_LIST_EDITOR_CLASS);
+    let mut chosen: Option<(ZipEntry, zui_settings_dex::LocalePatchResult)> = None;
+    for entry in &zip.entries {
+        if !entry.name.ends_with(".dex") {
+            continue;
+        }
+        if entry.compression_method != 0 || entry.uses_data_descriptor || entry.is_zip64 {
+            continue;
+        }
+        let dex_end = entry.data_start + entry.compressed_size;
+        if dex_end > apk_bytes.len() {
+            continue;
+        }
+        // Quick descriptor probe — most dexes don't reference
+        // LocaleListEditor at all; skip them without running the full
+        // walker.
+        if memmem::find(&apk_bytes[entry.data_start..dex_end], &needle).is_none() {
+            continue;
+        }
+        let dex_data_off = entry.data_start;
+        let dex_data_end = dex_data_off + entry.compressed_size;
+        let result = {
+            let dex_slice = &mut apk_bytes[dex_data_off..dex_data_end];
+            if dex_slice.len() < 0x70 {
+                continue;
+            }
+            zui_settings_dex::patch_locale_list_editor(dex_slice)?
+        };
+        if let Some(r) = result {
+            chosen = Some((entry.clone(), r));
+            break;
+        }
+    }
+    let Some((
+        target_entry,
+        zui_settings_dex::LocalePatchResult {
+            is_prc_sites,
+            is_row_sites,
+            invoke_offsets_in_dex,
+        },
+    )) = chosen
+    else {
+        return Ok(None);
+    };
+    let dex_data_off = target_entry.data_start;
+    let dex_data_end = dex_data_off + target_entry.compressed_size;
+    if is_prc_sites + is_row_sites == 0 {
+        return Ok(None);
+    }
+
+    // 4. Recompute dex header sums + apk CRC32.
+    {
+        let dex_slice = &mut apk_bytes[dex_data_off..dex_data_end];
+        recompute_dex_header_sums(dex_slice);
+    }
+    let new_crc = crc32_ieee(&apk_bytes[dex_data_off..dex_data_end]);
+    write_u32_le(
+        &mut apk_bytes,
+        target_entry.local_header_crc_offset,
+        new_crc,
+    );
+    write_u32_le(&mut apk_bytes, target_entry.cd_crc_offset, new_crc);
+
+    // 5. Write APK back via ext4 extents.
+    write_via_extents(system_image, &apk_bytes, &apk_extents, block_size)?;
+
+    let invoke_offsets_in_apk = invoke_offsets_in_dex
+        .into_iter()
+        .map(|o| (dex_data_off + o) as u64)
+        .collect();
+    Ok(Some(ZuiSettingsLocalePatch {
+        dex_entry: target_entry.name,
+        is_prc_sites_patched: is_prc_sites,
+        is_row_sites_patched: is_row_sites,
+        invoke_offsets_in_apk,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1591,6 +1771,16 @@ mod dex_walker {
         }
     }
 
+    /// Width in 16-bit code units for the given opcode. `0` is the
+    /// "unused / reserved opcode" sentinel; callers should treat it as
+    /// "bail out". Wrapper around the private [`DEX_INSN_WIDTH_UNITS`]
+    /// table so other modules in `fuck_lgsi.rs` (e.g. the
+    /// `zui_settings_dex` follow-up patcher) can walk dex insns
+    /// without duplicating the table.
+    pub fn insn_width_units(opcode: u8) -> u8 {
+        DEX_INSN_WIDTH_UNITS[opcode as usize]
+    }
+
     /// Instruction width in 16-bit code units, indexed by opcode.
     /// `0` marks unused / reserved opcodes; the walker bails on those.
     /// Source: Android Dalvik bytecode spec.
@@ -1904,6 +2094,459 @@ mod workspace {
             out.push((k.clone(), b));
         }
         Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ZuiSettings.apk LocaleListEditor follow-up dex patch
+// ---------------------------------------------------------------------------
+
+mod zui_settings_dex {
+    //! Byte-rewrite every `invoke-static {}, LenovoUtils->isPrcVersion()Z`
+    //! and `isRowVersion()Z` call site inside `LocaleListEditor`'s
+    //! methods. Triggered when `--fuck-lgsi` flips
+    //! `ZuiAntiCrossSell` from `true` → `false`; mirrors the
+    //! per-source-line analysis in
+    //! `40_Session_Memory.md (2026-05-02 evening)`.
+    //!
+    //! On TB322 the smali source for `LocaleListEditor` lives in
+    //! `smali_classes4/`, so the dex carrying its class_def is
+    //! typically `classes4.dex`; the LenovoUtils class lives in
+    //! `smali_classes5/`, but classes4.dex still has the type idx +
+    //! method idx for its `isPrcVersion()` / `isRowVersion()` because
+    //! those calls cross dex boundaries. Single-dex walk is enough.
+    //!
+    //! Patch shape (8 bytes per site):
+    //!
+    //! ```text
+    //!   71 00 BBBB 00 00       invoke-static {}, methodIdx@BBBB     (6)
+    //!   0A AA                  move-result vAA                       (2)
+    //!                                                               -----
+    //!                                                                  8
+    //! becomes
+    //!   13 AA LL HH            const/16 vAA, #+lit                   (4)
+    //!   00 00 00 00            nop nop                                (4)
+    //!                                                               -----
+    //!                                                                  8
+    //! ```
+    //!
+    //! `lit = 0x0000` for `isPrcVersion()` (force false) and
+    //! `lit = 0x0001` for `isRowVersion()` (force true). `vAA` covers
+    //! the full 8-bit register space, so this works regardless of
+    //! whether the smali source used `v0..v15` (would have fit
+    //! const/4) or higher.
+
+    use super::*;
+
+    pub struct LocalePatchResult {
+        pub is_prc_sites: usize,
+        pub is_row_sites: usize,
+        pub invoke_offsets_in_dex: Vec<usize>,
+    }
+
+    pub fn patch_locale_list_editor(dex: &mut [u8]) -> Result<Option<LocalePatchResult>> {
+        if dex.len() < 0x70 {
+            return Ok(None);
+        }
+        let string_ids_size = read_u32_le(dex, 0x38) as usize;
+        let string_ids_off = read_u32_le(dex, 0x3C) as usize;
+        let type_ids_size = read_u32_le(dex, 0x40) as usize;
+        let type_ids_off = read_u32_le(dex, 0x44) as usize;
+        let proto_ids_size = read_u32_le(dex, 0x48) as usize;
+        let proto_ids_off = read_u32_le(dex, 0x4C) as usize;
+        let method_ids_size = read_u32_le(dex, 0x58) as usize;
+        let method_ids_off = read_u32_le(dex, 0x5C) as usize;
+        let class_defs_size = read_u32_le(dex, 0x60) as usize;
+        let class_defs_off = read_u32_le(dex, 0x64) as usize;
+
+        // 1. Resolve type idx for LocaleListEditor (must have class_def
+        //    here) and LenovoUtils (referenced as type for the static
+        //    calls).
+        let Some(editor_type_idx) = find_type_idx_local(
+            dex,
+            string_ids_size,
+            string_ids_off,
+            type_ids_size,
+            type_ids_off,
+            LOCALE_LIST_EDITOR_CLASS,
+        )?
+        else {
+            return Ok(None);
+        };
+        let Some(utils_type_idx) = find_type_idx_local(
+            dex,
+            string_ids_size,
+            string_ids_off,
+            type_ids_size,
+            type_ids_off,
+            LENOVO_UTILS_CLASS,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        // 2. Resolve string idxs for the method names.
+        let Some(is_prc_name_idx) =
+            find_string_idx_local(dex, string_ids_size, string_ids_off, IS_PRC_VERSION_NAME)?
+        else {
+            return Ok(None);
+        };
+        let Some(is_row_name_idx) =
+            find_string_idx_local(dex, string_ids_size, string_ids_off, IS_ROW_VERSION_NAME)?
+        else {
+            return Ok(None);
+        };
+
+        // 3. Resolve proto idx for `()Z` (no params, returns boolean).
+        let Some(z_returning_no_args_proto) = find_proto_idx_no_args_returning_z(
+            dex,
+            string_ids_size,
+            string_ids_off,
+            type_ids_size,
+            type_ids_off,
+            proto_ids_size,
+            proto_ids_off,
+        )?
+        else {
+            return Ok(None);
+        };
+
+        // 4. Resolve method idxs for both calls.
+        let is_prc_method_idx = find_method_idx_local(
+            dex,
+            method_ids_size,
+            method_ids_off,
+            utils_type_idx,
+            is_prc_name_idx,
+            z_returning_no_args_proto,
+        )?;
+        let is_row_method_idx = find_method_idx_local(
+            dex,
+            method_ids_size,
+            method_ids_off,
+            utils_type_idx,
+            is_row_name_idx,
+            z_returning_no_args_proto,
+        )?;
+        if is_prc_method_idx.is_none() && is_row_method_idx.is_none() {
+            return Ok(None);
+        }
+
+        // 5. Find LocaleListEditor's class_data + walk every method's
+        //    code_item. For each invoke-static against either target
+        //    method idx, byte-patch the 8-byte invoke + move-result
+        //    pair to const/16 + 2x nop.
+        let Some(class_data_off) =
+            find_class_data_off_local(dex, class_defs_size, class_defs_off, editor_type_idx)?
+        else {
+            return Ok(None);
+        };
+        let methods = collect_method_code_offs(dex, class_data_off)?;
+        let mut is_prc_sites = 0usize;
+        let mut is_row_sites = 0usize;
+        let mut invoke_offsets_in_dex = Vec::new();
+        for code_off in methods {
+            patch_one_method(
+                dex,
+                code_off,
+                is_prc_method_idx,
+                is_row_method_idx,
+                &mut is_prc_sites,
+                &mut is_row_sites,
+                &mut invoke_offsets_in_dex,
+            )?;
+        }
+        Ok(Some(LocalePatchResult {
+            is_prc_sites,
+            is_row_sites,
+            invoke_offsets_in_dex,
+        }))
+    }
+
+    fn patch_one_method(
+        dex: &mut [u8],
+        code_off: usize,
+        is_prc_method_idx: Option<u32>,
+        is_row_method_idx: Option<u32>,
+        is_prc_sites: &mut usize,
+        is_row_sites: &mut usize,
+        invoke_offsets_in_dex: &mut Vec<usize>,
+    ) -> Result<()> {
+        if code_off + 16 > dex.len() {
+            return Ok(());
+        }
+        let insns_size = read_u32_le(dex, code_off + 12) as usize;
+        let insns_off = code_off + 16;
+        let insns_end = match insns_off.checked_add(insns_size.checked_mul(2).unwrap_or(0)) {
+            Some(e) if e <= dex.len() => e,
+            _ => return Ok(()),
+        };
+
+        // Walk insns linearly using the shared opcode width table from
+        // the LGSI dex walker. invoke-static (0x71) is fmt 35c, 6 bytes.
+        // The Dalvik spec requires `move-result*` to follow an
+        // invoke-* immediately, so the next 2 bytes are the
+        // `move-result vAA` pair we rewrite.
+        let mut pc = insns_off;
+        while pc + 1 < insns_end {
+            let opcode = dex[pc];
+            let width_units = dex_walker::insn_width_units(opcode);
+            if width_units == 0 {
+                // Unknown opcode — bail out silently for this method
+                // (better to skip than mis-stride and corrupt the dex).
+                return Ok(());
+            }
+            let width = width_units as usize * 2;
+            if pc + width > insns_end {
+                return Ok(());
+            }
+            if opcode == 0x71 && pc + 8 <= insns_end {
+                // invoke-static {}, method@BBBB. Bytes 2..3 = method idx.
+                let method_idx = u32::from(read_u16_le(dex, pc + 2));
+                let target = if Some(method_idx) == is_prc_method_idx {
+                    Some(0u8)
+                } else if Some(method_idx) == is_row_method_idx {
+                    Some(1u8)
+                } else {
+                    None
+                };
+                if let Some(literal) = target {
+                    // Next insn must be move-result vAA (opcode 0x0A).
+                    let mr_opcode = dex[pc + 6];
+                    if mr_opcode == 0x0A {
+                        let aa = dex[pc + 7];
+                        // Rewrite 8 bytes in place: const/16 vAA, #+lit
+                        // + 2x nop.
+                        dex[pc] = 0x13; // const/16 opcode
+                        dex[pc + 1] = aa;
+                        dex[pc + 2] = literal;
+                        dex[pc + 3] = 0x00;
+                        dex[pc + 4] = 0x00; // nop
+                        dex[pc + 5] = 0x00;
+                        dex[pc + 6] = 0x00; // nop
+                        dex[pc + 7] = 0x00;
+                        if literal == 0 {
+                            *is_prc_sites += 1;
+                        } else {
+                            *is_row_sites += 1;
+                        }
+                        invoke_offsets_in_dex.push(pc);
+                        // Advance past the rewritten 8-byte block.
+                        pc += 8;
+                        continue;
+                    }
+                }
+            }
+            pc += width;
+        }
+        Ok(())
+    }
+
+    fn collect_method_code_offs(dex: &[u8], class_data_off: usize) -> Result<Vec<usize>> {
+        let mut p = class_data_off;
+        let static_fields_size = read_uleb128_local(dex, &mut p)?;
+        let instance_fields_size = read_uleb128_local(dex, &mut p)?;
+        let direct_methods_size = read_uleb128_local(dex, &mut p)?;
+        let virtual_methods_size = read_uleb128_local(dex, &mut p)?;
+        for _ in 0..(static_fields_size + instance_fields_size) {
+            let _ = read_uleb128_local(dex, &mut p)?;
+            let _ = read_uleb128_local(dex, &mut p)?;
+        }
+        let mut out = Vec::new();
+        for size in [direct_methods_size, virtual_methods_size] {
+            for _ in 0..size {
+                let _diff = read_uleb128_local(dex, &mut p)?;
+                let _access = read_uleb128_local(dex, &mut p)?;
+                let code_off = read_uleb128_local(dex, &mut p)? as usize;
+                if code_off != 0 {
+                    out.push(code_off);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    fn find_proto_idx_no_args_returning_z(
+        dex: &[u8],
+        string_ids_size: usize,
+        string_ids_off: usize,
+        type_ids_size: usize,
+        type_ids_off: usize,
+        proto_ids_size: usize,
+        proto_ids_off: usize,
+    ) -> Result<Option<u32>> {
+        let Some(z_type_idx) = find_type_idx_local(
+            dex,
+            string_ids_size,
+            string_ids_off,
+            type_ids_size,
+            type_ids_off,
+            "Z",
+        )?
+        else {
+            return Ok(None);
+        };
+        let table_end = proto_ids_off
+            .checked_add(proto_ids_size.saturating_mul(12))
+            .ok_or_else(|| anyhow!("dex proto_ids overflow"))?;
+        if table_end > dex.len() {
+            bail!("dex proto_ids out of bounds");
+        }
+        for idx in 0..proto_ids_size {
+            let entry_off = proto_ids_off + idx * 12;
+            let return_type_idx = read_u32_le(dex, entry_off + 4);
+            let parameters_off = read_u32_le(dex, entry_off + 8) as usize;
+            if return_type_idx == z_type_idx && parameters_off == 0 {
+                return Ok(Some(idx as u32));
+            }
+        }
+        Ok(None)
+    }
+
+    // Local copies of helpers that already exist inside `dex_walker`
+    // but aren't `pub`. We could re-export them, but the duplication
+    // is small and keeps the module boundaries clear.
+    fn find_type_idx_local(
+        dex: &[u8],
+        string_ids_size: usize,
+        string_ids_off: usize,
+        type_ids_size: usize,
+        type_ids_off: usize,
+        descriptor: &str,
+    ) -> Result<Option<u32>> {
+        let Some(s_idx) = find_string_idx_local(dex, string_ids_size, string_ids_off, descriptor)?
+        else {
+            return Ok(None);
+        };
+        let table_end = type_ids_off
+            .checked_add(type_ids_size.saturating_mul(4))
+            .ok_or_else(|| anyhow!("dex type_ids overflow"))?;
+        if table_end > dex.len() {
+            bail!("dex type_ids out of bounds");
+        }
+        for idx in 0..type_ids_size {
+            let entry_off = type_ids_off + idx * 4;
+            let descriptor_idx = read_u32_le(dex, entry_off);
+            if descriptor_idx == s_idx {
+                return Ok(Some(idx as u32));
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_method_idx_local(
+        dex: &[u8],
+        method_ids_size: usize,
+        method_ids_off: usize,
+        class_type_idx: u32,
+        name_string_idx: u32,
+        proto_idx: u32,
+    ) -> Result<Option<u32>> {
+        let table_end = method_ids_off
+            .checked_add(method_ids_size.saturating_mul(8))
+            .ok_or_else(|| anyhow!("dex method_ids overflow"))?;
+        if table_end > dex.len() {
+            bail!("dex method_ids out of bounds");
+        }
+        for idx in 0..method_ids_size {
+            let entry_off = method_ids_off + idx * 8;
+            let class_idx = read_u16_le(dex, entry_off) as u32;
+            let proto_at_idx = read_u16_le(dex, entry_off + 2) as u32;
+            let name_idx = read_u32_le(dex, entry_off + 4);
+            if class_idx == class_type_idx
+                && proto_at_idx == proto_idx
+                && name_idx == name_string_idx
+            {
+                return Ok(Some(idx as u32));
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_class_data_off_local(
+        dex: &[u8],
+        class_defs_size: usize,
+        class_defs_off: usize,
+        class_type_idx: u32,
+    ) -> Result<Option<usize>> {
+        let table_end = class_defs_off
+            .checked_add(class_defs_size.saturating_mul(32))
+            .ok_or_else(|| anyhow!("dex class_defs overflow"))?;
+        if table_end > dex.len() {
+            bail!("dex class_defs out of bounds");
+        }
+        for idx in 0..class_defs_size {
+            let entry_off = class_defs_off + idx * 32;
+            let class_idx = read_u32_le(dex, entry_off);
+            if class_idx == class_type_idx {
+                let class_data_off = read_u32_le(dex, entry_off + 24) as usize;
+                if class_data_off == 0 {
+                    return Ok(None);
+                }
+                return Ok(Some(class_data_off));
+            }
+        }
+        Ok(None)
+    }
+
+    fn find_string_idx_local(
+        dex: &[u8],
+        string_ids_size: usize,
+        string_ids_off: usize,
+        needle: &str,
+    ) -> Result<Option<u32>> {
+        let needle_bytes = needle.as_bytes();
+        let table_end = string_ids_off
+            .checked_add(string_ids_size.saturating_mul(4))
+            .ok_or_else(|| anyhow!("dex string_ids overflow"))?;
+        if table_end > dex.len() {
+            bail!("dex string_ids out of bounds");
+        }
+        for idx in 0..string_ids_size {
+            let entry_off = string_ids_off + idx * 4;
+            let str_data_off = read_u32_le(dex, entry_off) as usize;
+            if str_data_off >= dex.len() {
+                continue;
+            }
+            let mut p = str_data_off;
+            loop {
+                if p >= dex.len() {
+                    bail!("dex string_data_item truncated at offset {p}");
+                }
+                let b = dex[p];
+                p += 1;
+                if b & 0x80 == 0 {
+                    break;
+                }
+            }
+            if p + needle_bytes.len() + 1 > dex.len() {
+                continue;
+            }
+            if &dex[p..p + needle_bytes.len()] == needle_bytes && dex[p + needle_bytes.len()] == 0 {
+                return Ok(Some(idx as u32));
+            }
+        }
+        Ok(None)
+    }
+
+    fn read_uleb128_local(dex: &[u8], p: &mut usize) -> Result<u64> {
+        let mut result: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            if *p >= dex.len() {
+                bail!("dex ULEB128 truncated at offset {p}", p = *p);
+            }
+            let b = dex[*p];
+            *p += 1;
+            result |= ((b & 0x7F) as u64) << shift;
+            if b & 0x80 == 0 {
+                return Ok(result);
+            }
+            shift += 7;
+            if shift >= 64 {
+                bail!("dex ULEB128 overflow");
+            }
+        }
     }
 }
 
