@@ -94,7 +94,11 @@ impl Default for DynoGui {
             input: None,
             output: None,
             ota_zips: Vec::new(),
-            do_resign: true,
+            // `resign` toggle is opt-in for Apply / Unpack / Repack;
+            // Resign mode itself ignores this flag and always runs
+            // the resign stage, so the default-off keeps casual
+            // unpack / apply runs from inadvertently re-signing.
+            do_resign: false,
             do_repack: true,
             do_complete: true,
             key: String::new(),
