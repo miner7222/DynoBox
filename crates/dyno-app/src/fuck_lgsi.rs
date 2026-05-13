@@ -115,6 +115,19 @@ const IS_ROW_VERSION_NAME: &str = "isRowVersion";
 /// Coverage:
 /// * `LocaleListEditor` — the language picker (5 PRC/ROW gates,
 ///   added 2026-05-02 in the original ZuiAntiCrossSell follow-up).
+/// * `LocaleListEditor$7` — anonymous inner class (1 `isRowVersion()`
+///   gate around the "Add a language" / suggested-locales list build,
+///   line 844). PRC build hides the entire list of newly added
+///   locales beyond zh/en.
+/// * `LocaleDragAndDropAdapter` — the `RecyclerView` adapter feeding
+///   `LocaleDragCell`s (1 PRC + 1 ROW gate). Without the rewrite the
+///   adapter falls into the PRC branch and stops binding the locale
+///   label / native-script field for non-zh/en rows, leaving each
+///   newly-enabled language row visually blank.
+/// * `LocaleDragCell` — single locale row view (2 PRC + 1 ROW gates
+///   in `setLabelAndDescription`, `setLocalized`, `setMiscellaneous`).
+///   These guard the three TextViews (label, localised name, "Default"
+///   tag); PRC-gated rows render with empty text.
 /// * `regionalpreferences/*` — the "Regional preferences" category
 ///   (region picker, temperature unit, measurement system, first day
 ///   of week). Two `getAvailabilityStatus()` controllers + four
@@ -125,6 +138,9 @@ const IS_ROW_VERSION_NAME: &str = "isRowVersion";
 ///   category + drops the four sub-pages from Settings search.
 const ZUI_SETTINGS_PATCH_TARGETS: &[&str] = &[
     "Lcom/android/settings/localepicker/LocaleListEditor;",
+    "Lcom/android/settings/localepicker/LocaleListEditor$7;",
+    "Lcom/android/settings/localepicker/LocaleDragAndDropAdapter;",
+    "Lcom/android/settings/localepicker/LocaleDragCell;",
     "Lcom/android/settings/regionalpreferences/RegionalPreferencesCategoryController;",
     "Lcom/android/settings/regionalpreferences/RegionalPreferencesController;",
     "Lcom/android/settings/regionalpreferences/RegionPickerFragment$1;",
