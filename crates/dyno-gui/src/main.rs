@@ -239,12 +239,35 @@ impl DynoGui {
     }
 
     fn run_in_terminal(&mut self) {
+        // Pre-flight the obvious empty-required-field cases before
+        // we bother spawning a terminal. The CLI would catch these
+        // too, but on Windows the spawned `.bat` only pauses on a
+        // successful exit — a clap parse error flashes by quickly
+        // and the user has no idea what they did wrong. Surfacing
+        // the validation inline in the GUI is friendlier.
+        if let Err(msg) = self.validate_for_run() {
+            self.last_status = Some(Err(msg));
+            return;
+        }
         let exe = Self::locate_dynobox_exe();
         let args = self.build_args();
         self.last_status = Some(match spawn_in_terminal(&exe, &args) {
             Ok(()) => Ok(format!("Launched: {} {}", exe.display(), args.join(" "))),
             Err(e) => Err(format!("Spawn failed: {e}")),
         });
+    }
+
+    /// Return `Err(msg)` when the current control state would
+    /// guarantee a CLI parse / pipeline failure. `Ok(())` lets
+    /// `run_in_terminal` proceed.
+    fn validate_for_run(&self) -> Result<(), String> {
+        if self.input.is_none() {
+            return Err("Missing --input directory".into());
+        }
+        if matches!(self.mode, Mode::Apply) && self.ota_zips.is_empty() {
+            return Err("Apply mode needs at least one OTA zip".into());
+        }
+        Ok(())
     }
 }
 
@@ -525,6 +548,16 @@ fn spl_row(ui: &mut egui::Ui, label: &str, value: &mut String, date: &mut Date, 
     ui.horizontal(|ui| {
         ui.label(label);
         ui.add(egui::TextEdit::singleline(value).hint_text("YYYY-MM-DD"));
+        // Seed the date picker from the text field before showing
+        // the popup. Without this, a user who typed `2024-12-01` and
+        // then opened the picker (still pinned to the struct's
+        // default `2026-01-01`) would have their typed value
+        // overwritten the instant they clicked any new day, because
+        // the picker's `*date` would jump from default -> clicked-day
+        // (not from typed-day -> clicked-day).
+        if let Ok(parsed) = parse_spl_date(value.trim()) {
+            *date = parsed;
+        }
         let prev = *date;
         ui.add(
             DatePickerButton::new(date)
@@ -536,6 +569,20 @@ fn spl_row(ui: &mut egui::Ui, label: &str, value: &mut String, date: &mut Date, 
             *value = format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day());
         }
     });
+}
+
+/// Parse a `YYYY-MM-DD` string into a `jiff::civil::Date`. Returns
+/// `Err(())` for any malformed input — the caller treats failure as
+/// "leave the picker's seed unchanged".
+fn parse_spl_date(s: &str) -> Result<Date, ()> {
+    let mut parts = s.split('-');
+    let y: i16 = parts.next().ok_or(())?.parse().map_err(|_| ())?;
+    let m: i8 = parts.next().ok_or(())?.parse().map_err(|_| ())?;
+    let d: i8 = parts.next().ok_or(())?.parse().map_err(|_| ())?;
+    if parts.next().is_some() {
+        return Err(());
+    }
+    Date::new(y, m, d).map_err(|_| ())
 }
 
 /// Spawn `exe args…` inside a brand-new OS terminal window so the
