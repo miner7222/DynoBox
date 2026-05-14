@@ -581,6 +581,29 @@ pub enum PatchPropertyOutcome {
     },
 }
 
+/// Read the *current* value of an AVB property descriptor matching
+/// `key` from `image_path`'s vbmeta blob. Returns:
+///
+///   * `Ok(Some(value))` — property exists, value decoded as UTF-8
+///     (lossy on bad bytes).
+///   * `Ok(None)` — the image carries no parseable AVB metadata, or
+///     no property descriptor matches `key`.
+///   * `Err(...)` — IO error or malformed header.
+///
+/// Centralises the `vbmeta_blob -> AvbVBMetaHeader -> descriptors
+/// slice -> property descriptor lookup` chain that `boot_spl` and
+/// `vendor_spl` previously open-coded against the same `BOOT_SPL_*`
+/// / `VENDOR_SPL_*` constants. Both modules now delegate here.
+pub fn read_property_value(image_path: &Path, key: &str) -> Result<Option<String>> {
+    let (_, vbmeta_blob) = read_vbmeta_blob(image_path)?;
+    if vbmeta_blob.len() < AVB_VBMETA_IMAGE_HEADER_SIZE {
+        return Ok(None);
+    }
+    let header = AvbVBMetaHeader::from_reader(&vbmeta_blob[..AVB_VBMETA_IMAGE_HEADER_SIZE])?;
+    let descriptors = descriptors_slice(&vbmeta_blob, &header)?;
+    Ok(find_property_descriptor(descriptors, key)?.map(|hit| hit.current_value))
+}
+
 /// Patch the `root_digest` of the Hashtree descriptor matching
 /// `target_partition`. Length-stable byte overwrite. Errors when the
 /// descriptor is absent or the existing digest length differs from

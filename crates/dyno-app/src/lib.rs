@@ -7,6 +7,7 @@ pub mod fuck_lgsi;
 pub mod pipeline;
 pub mod report;
 mod spl;
+pub mod time_format;
 pub mod vendor_spl;
 pub mod verify;
 

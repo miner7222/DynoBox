@@ -11,10 +11,7 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 
-use crate::avb_descriptor::{
-    PatchPropertyOutcome, find_property_descriptor, patch_property_value, read_vbmeta_blob,
-};
-use avbtool_rs::parser::{AVB_VBMETA_IMAGE_HEADER_SIZE, AvbVBMetaHeader};
+use crate::avb_descriptor::{PatchPropertyOutcome, patch_property_value};
 
 pub const BOOT_SPL_PROPERTY: &str = "com.android.build.boot.security_patch";
 
@@ -34,13 +31,7 @@ pub fn validate_spl_format(spl: &str) -> Result<()> {
 /// Read the current value of the boot security_patch property descriptor.
 /// Returns `Ok(None)` when the image has no AVB metadata or no such property.
 pub fn read_security_patch(image_path: &Path) -> Result<Option<String>> {
-    let (_, vbmeta_blob) = read_vbmeta_blob(image_path)?;
-    if vbmeta_blob.len() < AVB_VBMETA_IMAGE_HEADER_SIZE {
-        return Ok(None);
-    }
-    let header = AvbVBMetaHeader::from_reader(&vbmeta_blob[..AVB_VBMETA_IMAGE_HEADER_SIZE])?;
-    let descriptors = crate::avb_descriptor::descriptors_slice(&vbmeta_blob, &header)?;
-    Ok(find_property_descriptor(descriptors, BOOT_SPL_PROPERTY)?.map(|hit| hit.current_value))
+    crate::avb_descriptor::read_property_value(image_path, BOOT_SPL_PROPERTY)
 }
 
 /// Patch the `com.android.build.boot.security_patch` property descriptor in

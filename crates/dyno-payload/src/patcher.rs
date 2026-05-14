@@ -17,6 +17,10 @@ pub struct Patcher {
     block_size: u64,
 }
 
+std::thread_local! {
+    static SCRATCH_BUFFER: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl Patcher {
     pub fn new(block_size: u32) -> Self {
         Self {
@@ -181,7 +185,31 @@ impl Patcher {
         src_extents: &[Extent],
         dst_extents: &[Extent],
     ) -> Result<()> {
-        let mut buffer = vec![0u8; 1024 * 1024];
+        // Reuse the 1 MiB scratch buffer across `copy_extents`
+        // calls. Real OTAs ship tens of thousands of SOURCE_COPY
+        // ops and the previous per-call `vec![0u8; 1024*1024]`
+        // alloc + drop showed up as visible churn under perf
+        // profiling. `thread_local!` keeps the storage on the
+        // worker thread, which sidesteps the immutable `&self`
+        // borrow without rippling a `&mut self` requirement
+        // through every `apply_operation` call site.
+        SCRATCH_BUFFER.with(|cell| -> Result<()> {
+            let mut buf = cell.borrow_mut();
+            if buf.is_empty() {
+                buf.resize(1024 * 1024, 0);
+            }
+            self.copy_extents_with_buf(src, dst, src_extents, dst_extents, &mut buf)
+        })
+    }
+
+    fn copy_extents_with_buf(
+        &self,
+        src: &mut File,
+        dst: &mut File,
+        src_extents: &[Extent],
+        dst_extents: &[Extent],
+        buffer: &mut [u8],
+    ) -> Result<()> {
         let mut src_ext_idx = 0;
         let mut src_ext_offset = 0u64;
 
@@ -597,8 +625,17 @@ pub fn apply_partition_payload_with_progress(
 
     let patcher = Patcher::new(block_size);
 
+    // Reuse a single op-blob `Vec` across all operations. Real OTAs
+    // ship tens to hundreds of thousands of operations and the
+    // previous per-iteration `vec![0u8; data_length]` allocated +
+    // dropped a Vec for every one of them — including the many
+    // small SOURCE_COPY / ZERO ops where `data_length` is 0. Hoisting
+    // the buffer keeps the capacity high water mark and lets
+    // `resize` reuse the existing allocation.
+    let mut blob: Vec<u8> = Vec::new();
     for op in p_manifest.operations.iter() {
-        let mut blob = vec![0u8; op.data_length.unwrap_or(0) as usize];
+        let data_len = op.data_length.unwrap_or(0) as usize;
+        blob.resize(data_len, 0);
         if !blob.is_empty() {
             payload_file.seek(SeekFrom::Start(data_offset + op.data_offset.unwrap_or(0)))?;
             payload_file.read_exact(&mut blob)?;

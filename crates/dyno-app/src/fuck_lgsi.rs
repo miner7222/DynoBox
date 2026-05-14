@@ -2932,9 +2932,16 @@ mod sha1_hasher {
 // CRC32 (carryover)
 // ---------------------------------------------------------------------------
 
-fn crc32_ieee(data: &[u8]) -> u32 {
+/// IEEE CRC32 (ZIP / PNG polynomial 0xEDB88320). The lookup table
+/// is identical for every call, so it's built once at process
+/// startup via `LazyLock` rather than rebuilt per call. The
+/// `apply_zui_settings_locale_patch` loop hits this once per
+/// `classes*.dex` inside each patched APK; the previous
+/// per-call table rebuild was ~256 * 9 = ~2304 ops of pure waste
+/// per CRC computation.
+static CRC32_TABLE: std::sync::LazyLock<[u32; 256]> = std::sync::LazyLock::new(|| {
     let mut table = [0u32; 256];
-    for n in 0..256 {
+    for (n, slot) in table.iter_mut().enumerate() {
         let mut c = n as u32;
         for _ in 0..8 {
             c = if c & 1 != 0 {
@@ -2943,8 +2950,13 @@ fn crc32_ieee(data: &[u8]) -> u32 {
                 c >> 1
             };
         }
-        table[n] = c;
+        *slot = c;
     }
+    table
+});
+
+fn crc32_ieee(data: &[u8]) -> u32 {
+    let table = &*CRC32_TABLE;
     let mut crc = 0xFFFFFFFFu32;
     for &b in data {
         crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);

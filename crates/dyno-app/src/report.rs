@@ -398,32 +398,7 @@ fn now_iso8601() -> String {
 }
 
 pub fn format_unix_to_iso8601_utc(unix_secs: u64) -> String {
-    // Days since epoch.
-    let total_secs = unix_secs;
-    let secs_in_day = 86_400u64;
-    let days = total_secs / secs_in_day;
-    let secs_of_day = total_secs % secs_in_day;
-    let hour = secs_of_day / 3600;
-    let minute = (secs_of_day % 3600) / 60;
-    let second = secs_of_day % 60;
-    // Convert days since 1970-01-01 to (Y, M, D) using the algorithm
-    // from https://howardhinnant.github.io/date_algorithms.html
-    // (civil_from_days). Branch-free, no leap-day edge cases.
-    let z = days as i64 + 719468;
-    let era = if z >= 0 {
-        z / 146097
-    } else {
-        (z - 146096) / 146097
-    };
-    let doe = (z - era * 146097) as u64; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
-    let y = (yoe as i64) + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
-    let year = y + if m <= 2 { 1 } else { 0 };
-    format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
+    crate::time_format::format_unix_to_iso8601_utc(unix_secs)
 }
 
 #[cfg(test)]

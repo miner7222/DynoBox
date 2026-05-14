@@ -33,13 +33,12 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::avb_descriptor::{
-    PatchPropertyOutcome, SHA256_DIGEST_SIZE, VerityProgressCallback, find_property_descriptor,
-    hex_encode, patch_hashtree_root_digest, patch_property_value, read_hashtree_params,
-    read_vbmeta_blob, regenerate_hashtree_with_progress,
+    PatchPropertyOutcome, SHA256_DIGEST_SIZE, VerityProgressCallback, hex_encode,
+    patch_hashtree_root_digest, patch_property_value, read_hashtree_params,
+    regenerate_hashtree_with_progress,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, map_file_offset_to_disk, open_ext4_volume};
 use anyhow::{Context, Result, anyhow};
-use avbtool_rs::parser::{AVB_VBMETA_IMAGE_HEADER_SIZE, AvbVBMetaHeader};
 use memchr::memmem;
 
 pub const VENDOR_SPL_PROPERTY: &str = "com.android.build.vendor.security_patch";
@@ -261,13 +260,7 @@ fn patch_build_prop_spl_via_ext4(vendor_image: &Path, new_spl: &str) -> Result<(
 /// Read the current `com.android.build.vendor.security_patch` from
 /// `vendor.img`'s footer, or `Ok(None)` if absent.
 pub fn read_vendor_avb_property(vendor_image: &Path) -> Result<Option<String>> {
-    let (_, vbmeta_blob) = read_vbmeta_blob(vendor_image)?;
-    if vbmeta_blob.len() < AVB_VBMETA_IMAGE_HEADER_SIZE {
-        return Ok(None);
-    }
-    let header = AvbVBMetaHeader::from_reader(&vbmeta_blob[..AVB_VBMETA_IMAGE_HEADER_SIZE])?;
-    let descriptors = crate::avb_descriptor::descriptors_slice(&vbmeta_blob, &header)?;
-    Ok(find_property_descriptor(descriptors, VENDOR_SPL_PROPERTY)?.map(|hit| hit.current_value))
+    crate::avb_descriptor::read_property_value(vendor_image, VENDOR_SPL_PROPERTY)
 }
 
 #[cfg(test)]
