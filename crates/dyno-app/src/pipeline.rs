@@ -332,6 +332,7 @@ where
     S: EventSink,
     O: PipelineOps,
 {
+    assert_safe_to_wipe(&request.output, &[&request.input])?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Unpack,
         input: request.input.clone(),
@@ -406,6 +407,7 @@ where
     S: EventSink,
     O: PipelineOps,
 {
+    assert_safe_to_wipe(&request.output, &[&request.input])?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Apply,
         input: request.input.clone(),
@@ -476,6 +478,7 @@ where
     S: EventSink,
     O: PipelineOps,
 {
+    assert_safe_to_wipe(&request.output, &[&request.input])?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Resign,
         input: request.input.clone(),
@@ -557,6 +560,7 @@ where
     S: EventSink,
     O: PipelineOps,
 {
+    assert_safe_to_wipe(&request.output, &[&request.input])?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Repack,
         input: request.input.clone(),
@@ -831,7 +835,7 @@ where
     });
 
     let _workspace = dynobox_core::workspace::Workspace::new(input, out_dir)?;
-    recreate_dir(out_dir)?;
+    recreate_dir_safe(out_dir, &[input])?;
 
     let catalog = dynobox_xml::XmlCatalog::from_dir(input)?;
     let super_group = catalog
@@ -1001,7 +1005,7 @@ where
         stage: StageKind::Apply,
     });
 
-    recreate_dir(out_dir)?;
+    recreate_dir_safe(out_dir, &[input])?;
 
     let catalog = dynobox_xml::XmlCatalog::from_dir(input)?;
     let super_group = catalog.group_by_base_label(true).remove("super");
@@ -1543,7 +1547,7 @@ where
         validate_vendor_spl_format(spl)?;
     }
 
-    recreate_dir(out_dir)?;
+    recreate_dir_safe(out_dir, &[input])?;
 
     // Copy ALL input files to output first (preserves non-.img files like .elf, .mbn)
     copy_all_top_level_files(input, out_dir)?;
@@ -2206,6 +2210,29 @@ fn confirm_rollback_change(
 ) -> anyhow::Result<RollbackConfirmation> {
     use std::io::{IsTerminal, Write};
 
+    // Tty check happens FIRST so non-interactive runs (`--progress-
+    // format jsonl`, piped invocations, CI) never see the multi-line
+    // prompt text bleed into the structured event stream. The
+    // previous order printed the entire prompt to stdout then
+    // discovered stdin isn't a terminal, leaving JSONL consumers
+    // with non-JSON bytes ahead of the next event.
+    //
+    // `DYNOBOX_GUI=1` from the egui front-end opts out of the
+    // is-terminal short-circuit: the GUI pipes our stdin/stdout but
+    // stands in for a real tty by surfacing buttons that write to
+    // stdin on click.
+    let force_interactive = std::env::var_os("DYNOBOX_GUI").is_some();
+    if !force_interactive && !std::io::stdin().is_terminal() {
+        // Send the skip notice to stderr instead of stdout so a
+        // `--progress-format jsonl` consumer reading stdout never
+        // sees this notice interleaved with structured events.
+        let _ = writeln!(
+            std::io::stderr(),
+            "(stdin is not a terminal; skipping AVB rollback_index rewrite to new_ri={new_ri})"
+        );
+        return Ok(RollbackConfirmation::SkippedNonInteractive);
+    }
+
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     writeln!(handle, "About to rewrite AVB rollback_index:")?;
@@ -2229,22 +2256,6 @@ fn confirm_rollback_change(
     handle.flush()?;
     drop(handle);
 
-    // `DYNOBOX_GUI=1` from the egui front-end opts out of the
-    // is-terminal short-circuit: the GUI pipes our stdin/stdout but
-    // stands in for a real tty by surfacing buttons that write to
-    // stdin on click.
-    let force_interactive = std::env::var_os("DYNOBOX_GUI").is_some();
-    if !force_interactive && !std::io::stdin().is_terminal() {
-        let stdout = std::io::stdout();
-        let mut handle = stdout.lock();
-        writeln!(
-            handle,
-            "(stdin is not a terminal — skipping rollback rewrite)"
-        )?;
-        handle.flush()?;
-        return Ok(RollbackConfirmation::SkippedNonInteractive);
-    }
-
     let mut answer = String::new();
     std::io::stdin().read_line(&mut answer)?;
     let trimmed = answer.trim().to_ascii_lowercase();
@@ -2263,7 +2274,7 @@ where
         stage: StageKind::Repack,
     });
 
-    recreate_dir(out_dir)?;
+    recreate_dir_safe(out_dir, &[input])?;
     let catalog = dynobox_xml::XmlCatalog::from_dir(input)?;
     let super_group = catalog
         .group_by_base_label(true)
@@ -2372,31 +2383,38 @@ where
 fn collect_resignable_images(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
     let mut images = Vec::new();
     let split_fragments = collect_split_fragment_filenames(input);
-    if let Ok(entries) = std::fs::read_dir(input) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("img") {
-                continue;
-            }
+    // Surface the underlying I/O error instead of silently returning
+    // an empty list. A typo'd `--input` path or permission denied
+    // used to produce a green-light "Re-signed 0 images" run; the
+    // stage would then proceed to write an empty output directory.
+    let entries = std::fs::read_dir(input).with_context(|| {
+        format!(
+            "failed to enumerate resign input directory `{}`",
+            input.display()
+        )
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("img") {
+            continue;
+        }
 
-            let file_name = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default();
-            if file_name.starts_with("super_") {
-                continue;
-            }
-            if split_fragments.contains(file_name) {
-                continue;
-            }
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if file_name.starts_with("super_") {
+            continue;
+        }
+        if split_fragments.contains(file_name) {
+            continue;
+        }
 
-            if let Ok(img_type) = avbtool_rs::parser::detect_avb_image_type(&path) {
-                if img_type != avbtool_rs::parser::AvbImageType::None
-                    && image_has_parseable_descriptors(&path)
-                {
-                    images.push(path);
-                }
-            }
+        if let Ok(img_type) = avbtool_rs::parser::detect_avb_image_type(&path)
+            && img_type != avbtool_rs::parser::AvbImageType::None
+            && image_has_parseable_descriptors(&path)
+        {
+            images.push(path);
         }
     }
     Ok(images)
@@ -2881,12 +2899,80 @@ fn move_file_across_drives(src: &Path, dst: &Path) -> anyhow::Result<()> {
     }
 }
 
+/// Compute the absolute, lexically-normalised form of `path` for
+/// the overlap test in `assert_safe_to_wipe`.
+///
+/// Uses `std::path::absolute` **unconditionally** so both the
+/// non-existent output directory and the existing input directory
+/// share the same representation (CWD-rooted, `.`/`..` collapsed,
+/// no `\\?\` verbatim prefix). `canonicalize` was tempting — it
+/// resolves symlinks — but on Windows it returns `\\?\` verbatim
+/// paths while `std::path::absolute` returns plain `C:\…`, and
+/// mixing the two in `starts_with` produced false-negatives that
+/// defeated the safety guard.
+///
+/// Symlink resolution is not required here: the guard is a
+/// defence against typos / accidental overlap, not against
+/// adversarial directory layouts, and a user with the rights to
+/// symlink the output into their own input has already accepted
+/// the wipe.
+fn normalise_for_compare(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Refuse to `remove_dir_all` an output directory that overlaps a
+/// user-provided input / workspace path. Catches the case where a
+/// typo or absolute-path confusion makes the pipeline blow away
+/// the very firmware tree it's supposed to be reading from. Both
+/// paths are canonicalised before comparison so cosmetic
+/// differences (`./foo` vs `foo/`) don't slip through.
+fn assert_safe_to_wipe(target: &Path, protected: &[&Path]) -> anyhow::Result<()> {
+    let target = normalise_for_compare(target);
+    for p in protected {
+        let candidate = normalise_for_compare(p);
+        if target == candidate {
+            anyhow::bail!(
+                "refusing to recursively delete `{}`: it is the same as protected input `{}`",
+                target.display(),
+                candidate.display()
+            );
+        }
+        if target.starts_with(&candidate) {
+            anyhow::bail!(
+                "refusing to recursively delete `{}`: it lives inside protected input `{}`",
+                target.display(),
+                candidate.display()
+            );
+        }
+        if candidate.starts_with(&target) {
+            anyhow::bail!(
+                "refusing to recursively delete `{}`: protected input `{}` lives inside it",
+                target.display(),
+                candidate.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn recreate_dir(dir: &Path) -> anyhow::Result<PathBuf> {
     if dir.exists() {
         std::fs::remove_dir_all(dir)?;
     }
     std::fs::create_dir_all(dir)?;
     Ok(dir.to_path_buf())
+}
+
+/// `recreate_dir` variant that runs `assert_safe_to_wipe` first so a
+/// user-supplied output directory equal to / containing / contained
+/// by the input directory aborts before the destructive
+/// `remove_dir_all`. The pipeline entries (unpack, apply, resign,
+/// repack) use this; internal stage dirs (workspace, repack stage)
+/// stay on the plain `recreate_dir` since their paths are derived
+/// from a process-private temp root.
+fn recreate_dir_safe(dir: &Path, protected: &[&Path]) -> anyhow::Result<PathBuf> {
+    assert_safe_to_wipe(dir, protected)?;
+    recreate_dir(dir)
 }
 
 fn create_pipeline_temp_root(final_output_dir: &Path) -> anyhow::Result<TempDir> {
