@@ -19,14 +19,7 @@ pub struct PartitionRecord {
 
 impl PartitionRecord {
     pub fn slot_suffix(&self) -> Option<&'static str> {
-        let lowered = self.label.to_lowercase();
-        if lowered.ends_with("_a") {
-            Some("a")
-        } else if lowered.ends_with("_b") {
-            Some("b")
-        } else {
-            None
-        }
+        dynobox_core::ab_slot::slot_suffix(&self.label)
     }
 
     pub fn is_ab(&self) -> bool {
@@ -34,11 +27,7 @@ impl PartitionRecord {
     }
 
     pub fn base_label(&self) -> String {
-        if self.is_ab() {
-            self.label[..self.label.len() - 2].to_string()
-        } else {
-            self.label.clone()
-        }
+        dynobox_core::ab_slot::base_name(&self.label)
     }
 }
 

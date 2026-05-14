@@ -71,22 +71,11 @@ pub struct SuperPartition {
 
 impl SuperPartition {
     pub fn slot_suffix(&self) -> Option<&'static str> {
-        let lowered = self.name.to_lowercase();
-        if lowered.ends_with("_a") {
-            Some("a")
-        } else if lowered.ends_with("_b") {
-            Some("b")
-        } else {
-            None
-        }
+        dynobox_core::ab_slot::slot_suffix(&self.name)
     }
 
     pub fn base_name(&self) -> String {
-        if self.slot_suffix().is_some() {
-            self.name[..self.name.len() - 2].to_string()
-        } else {
-            self.name.clone()
-        }
+        dynobox_core::ab_slot::base_name(&self.name)
     }
 
     pub fn logical_size(&self) -> u64 {
