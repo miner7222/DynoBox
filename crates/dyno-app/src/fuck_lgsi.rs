@@ -112,7 +112,12 @@ const IS_ROW_VERSION_NAME: &str = "isRowVersion";
 /// `classes*.dex` inside the APK and patches every matching call site
 /// inside that class's methods.
 ///
-/// Coverage:
+/// Coverage. Each entry is `(class_descriptor, method_name_filter)`.
+/// `None` flips every PRC/ROW invoke-static site in the entire
+/// class; `Some(name)` narrows the rewrite to a single method,
+/// which is the right knob for `LenovoUtils` (a utility class with
+/// many unrelated PRC gates we explicitly do not want to flip).
+///
 /// * `LocaleListEditor` — the language picker (5 PRC/ROW gates,
 ///   added 2026-05-02 in the original ZuiAntiCrossSell follow-up).
 /// * `LocaleListEditor$7` — anonymous inner class (1 `isRowVersion()`
@@ -128,6 +133,16 @@ const IS_ROW_VERSION_NAME: &str = "isRowVersion";
 ///   in `setLabelAndDescription`, `setLocalized`, `setMiscellaneous`).
 ///   These guard the three TextViews (label, localised name, "Default"
 ///   tag); PRC-gated rows render with empty text.
+/// * `LenovoUtils.getChangedName` — the *source* of the blank labels:
+///   when `isRowVersion()` returns false (the PRC path), the method
+///   walks a hardcoded zh-Hans-CN / zh-Hant-TW / zh-Hant-HK / en-*
+///   if-ladder and returns `""` for everything else. Flipping the
+///   single `isRowVersion()` gate at smali line 416 to always-true
+///   makes the method return `localeInfo.getFullNameNative()` for
+///   every locale, restoring labels for newly-enabled languages.
+///   Only this method is patched — the class has 10+ other
+///   PRC/ROW sites that gate unrelated behaviour and must NOT be
+///   flipped.
 /// * `regionalpreferences/*` — the "Regional preferences" category
 ///   (region picker, temperature unit, measurement system, first day
 ///   of week). Two `getAvailabilityStatus()` controllers + four
@@ -136,17 +151,45 @@ const IS_ROW_VERSION_NAME: &str = "isRowVersion";
 ///   `FirstDayOfWeekItemFragment$2`) all gate visibility/search
 ///   indexing on `isPrcVersion()`. PRC build hides the entire
 ///   category + drops the four sub-pages from Settings search.
-const ZUI_SETTINGS_PATCH_TARGETS: &[&str] = &[
-    "Lcom/android/settings/localepicker/LocaleListEditor;",
-    "Lcom/android/settings/localepicker/LocaleListEditor$7;",
-    "Lcom/android/settings/localepicker/LocaleDragAndDropAdapter;",
-    "Lcom/android/settings/localepicker/LocaleDragCell;",
-    "Lcom/android/settings/regionalpreferences/RegionalPreferencesCategoryController;",
-    "Lcom/android/settings/regionalpreferences/RegionalPreferencesController;",
-    "Lcom/android/settings/regionalpreferences/RegionPickerFragment$1;",
-    "Lcom/android/settings/regionalpreferences/TemperatureUnitFragment$2;",
-    "Lcom/android/settings/regionalpreferences/MeasurementSystemItemFragment$2;",
-    "Lcom/android/settings/regionalpreferences/FirstDayOfWeekItemFragment$2;",
+const ZUI_SETTINGS_PATCH_TARGETS: &[(&str, Option<&str>)] = &[
+    ("Lcom/android/settings/localepicker/LocaleListEditor;", None),
+    (
+        "Lcom/android/settings/localepicker/LocaleListEditor$7;",
+        None,
+    ),
+    (
+        "Lcom/android/settings/localepicker/LocaleDragAndDropAdapter;",
+        None,
+    ),
+    ("Lcom/android/settings/localepicker/LocaleDragCell;", None),
+    (
+        "Lcom/lenovo/common/utils/LenovoUtils;",
+        Some("getChangedName"),
+    ),
+    (
+        "Lcom/android/settings/regionalpreferences/RegionalPreferencesCategoryController;",
+        None,
+    ),
+    (
+        "Lcom/android/settings/regionalpreferences/RegionalPreferencesController;",
+        None,
+    ),
+    (
+        "Lcom/android/settings/regionalpreferences/RegionPickerFragment$1;",
+        None,
+    ),
+    (
+        "Lcom/android/settings/regionalpreferences/TemperatureUnitFragment$2;",
+        None,
+    ),
+    (
+        "Lcom/android/settings/regionalpreferences/MeasurementSystemItemFragment$2;",
+        None,
+    ),
+    (
+        "Lcom/android/settings/regionalpreferences/FirstDayOfWeekItemFragment$2;",
+        None,
+    ),
 ];
 
 pub const WORKSPACE_JSON_NAME: &str = "lgsi_features.json";
@@ -652,13 +695,13 @@ fn apply_zui_settings_locale_patch(
         let dex_data_end = dex_data_off + entry.compressed_size;
         let mut dex_modified = false;
 
-        for class_descriptor in ZUI_SETTINGS_PATCH_TARGETS {
+        for (class_descriptor, method_filter) in ZUI_SETTINGS_PATCH_TARGETS {
             let result = {
                 let dex_slice = &mut apk_bytes[dex_data_off..dex_data_end];
                 if dex_slice.len() < 0x70 {
                     break;
                 }
-                zui_settings_dex::patch_class_in_dex(dex_slice, class_descriptor)?
+                zui_settings_dex::patch_class_in_dex(dex_slice, class_descriptor, *method_filter)?
             };
             let Some(r) = result else { continue };
             if r.is_prc_sites + r.is_row_sites == 0 {
@@ -1759,7 +1802,7 @@ mod dex_walker {
     }
 
     /// Decode the string at the given string idx.
-    fn read_string_at_idx(
+    pub(super) fn read_string_at_idx(
         dex: &[u8],
         string_ids_size: usize,
         string_ids_off: usize,
@@ -2231,9 +2274,16 @@ mod zui_settings_dex {
     /// idxs needed for matching. Returns `Ok(Some(result))` with
     /// per-site counts when the class was found and at least one
     /// match was rewritten.
+    ///
+    /// `method_name_filter` — when `Some(name)`, only patch the
+    /// method whose name string matches `name`. This is the
+    /// narrower mode used to target `LenovoUtils.getChangedName`
+    /// without flipping every other PRC/ROW gate inside the
+    /// LenovoUtils class. `None` patches all methods of the class.
     pub fn patch_class_in_dex(
         dex: &mut [u8],
         class_descriptor: &str,
+        method_name_filter: Option<&str>,
     ) -> Result<Option<LocalePatchResult>> {
         if dex.len() < 0x70 {
             return Ok(None);
@@ -2349,7 +2399,20 @@ mod zui_settings_dex {
         let mut is_prc_sites = 0usize;
         let mut is_row_sites = 0usize;
         let mut invoke_offsets_in_dex = Vec::new();
-        for code_off in methods {
+        for (method_idx, code_off) in methods {
+            if let Some(want_name) = method_name_filter {
+                let got_name = method_name_of_idx(
+                    dex,
+                    method_ids_size,
+                    method_ids_off,
+                    string_ids_size,
+                    string_ids_off,
+                    method_idx,
+                )?;
+                if got_name.as_deref() != Some(want_name) {
+                    continue;
+                }
+            }
             patch_one_method(
                 dex,
                 code_off,
@@ -2446,7 +2509,13 @@ mod zui_settings_dex {
         Ok(())
     }
 
-    fn collect_method_code_offs(dex: &[u8], class_data_off: usize) -> Result<Vec<usize>> {
+    /// Walk a class_data_item's direct + virtual method tables.
+    /// Returns `(method_idx, code_off)` for every method with a
+    /// non-zero code_off. `method_idx` is the absolute DEX
+    /// `method_ids[]` index reconstructed from the per-section
+    /// cumulative `method_idx_diff` ULEB128 (resets between the
+    /// direct and virtual sections per spec).
+    fn collect_method_code_offs(dex: &[u8], class_data_off: usize) -> Result<Vec<(u32, usize)>> {
         let mut p = class_data_off;
         let static_fields_size = super::dex_walker::read_uleb128(dex, &mut p)?;
         let instance_fields_size = super::dex_walker::read_uleb128(dex, &mut p)?;
@@ -2458,16 +2527,41 @@ mod zui_settings_dex {
         }
         let mut out = Vec::new();
         for size in [direct_methods_size, virtual_methods_size] {
+            let mut method_idx_acc: u64 = 0;
             for _ in 0..size {
-                let _diff = super::dex_walker::read_uleb128(dex, &mut p)?;
+                let diff = super::dex_walker::read_uleb128(dex, &mut p)?;
+                method_idx_acc += diff;
                 let _access = super::dex_walker::read_uleb128(dex, &mut p)?;
                 let code_off = super::dex_walker::read_uleb128(dex, &mut p)? as usize;
                 if code_off != 0 {
-                    out.push(code_off);
+                    out.push((method_idx_acc as u32, code_off));
                 }
             }
         }
         Ok(out)
+    }
+
+    /// Resolve `method_idx` to its method name string, returning
+    /// `Ok(None)` when the idx is out of bounds or the name string
+    /// is unreadable. Used by `patch_class_in_dex`'s optional
+    /// per-method filter.
+    fn method_name_of_idx(
+        dex: &[u8],
+        method_ids_size: usize,
+        method_ids_off: usize,
+        string_ids_size: usize,
+        string_ids_off: usize,
+        method_idx: u32,
+    ) -> Result<Option<String>> {
+        if (method_idx as usize) >= method_ids_size {
+            return Ok(None);
+        }
+        let method_off = method_ids_off + (method_idx as usize) * 8;
+        if method_off + 8 > dex.len() {
+            return Ok(None);
+        }
+        let name_idx = read_u32_le(dex, method_off + 4);
+        super::dex_walker::read_string_at_idx(dex, string_ids_size, string_ids_off, name_idx)
     }
 }
 
