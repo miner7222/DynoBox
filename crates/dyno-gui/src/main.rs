@@ -588,16 +588,53 @@ fn spawn_in_terminal(exe: &Path, args: &[String]) -> std::io::Result<()> {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            for term in [
-                "x-terminal-emulator",
-                "gnome-terminal",
-                "konsole",
-                "xfce4-terminal",
-                "alacritty",
-                "kitty",
-                "xterm",
-            ] {
-                if Command::new(term).arg("-e").arg(&script).spawn().is_ok() {
+            // Per-terminal argv differs:
+            //   * `gnome-terminal` deprecated `-e` long ago and now
+            //     requires `-- <argv>` to forward to the child.
+            //   * `kitty` takes a bare command + args (no `-e`).
+            //   * Most others still accept `-e <script>`.
+            //
+            // `$TERMINAL` is honoured first so an opinionated desktop
+            // env can override the candidate sweep.
+            let user_term = std::env::var("TERMINAL").ok();
+            let candidates: Vec<&str> = user_term
+                .as_deref()
+                .into_iter()
+                .chain(
+                    [
+                        "x-terminal-emulator",
+                        "gnome-terminal",
+                        "konsole",
+                        "xfce4-terminal",
+                        "alacritty",
+                        "kitty",
+                        "xterm",
+                    ]
+                    .iter()
+                    .copied(),
+                )
+                .collect();
+            for term in candidates {
+                // `$TERMINAL` may be a full path (e.g.
+                // `/usr/bin/gnome-terminal`); match on the basename
+                // so the special-case argv dispatch still fires.
+                let basename = std::path::Path::new(term)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(term);
+                let mut cmd = Command::new(term);
+                match basename {
+                    "gnome-terminal" => {
+                        cmd.arg("--").arg("bash").arg(&script);
+                    }
+                    "kitty" => {
+                        cmd.arg("bash").arg(&script);
+                    }
+                    _ => {
+                        cmd.arg("-e").arg(&script);
+                    }
+                }
+                if cmd.spawn().is_ok() {
                     return Ok(());
                 }
             }
@@ -638,6 +675,11 @@ fn write_windows_launcher(exe: &Path, args: &[String]) -> std::io::Result<PathBu
     content.push_str("echo.\r\n");
     content.push_str("echo DynoBox finished (exit %DYNOBOX_EXIT%). Press any key to close...\r\n");
     content.push_str("pause >nul\r\n");
+    // Self-delete after user presses a key. The `(goto) 2>nul & del`
+    // idiom releases the script's file handle so cmd can delete the
+    // file it's currently executing, sidestepping the temp-file leak
+    // that would otherwise pile up under `%TEMP%` across GUI runs.
+    content.push_str("(goto) 2>nul & del \"%~f0\"\r\n");
 
     std::fs::write(&path, content)?;
     Ok(path)
@@ -647,23 +689,31 @@ fn write_windows_launcher(exe: &Path, args: &[String]) -> std::io::Result<PathBu
 /// double-quotes whenever the string contains any of the cmd.exe
 /// metacharacters; embedded `"` doubles to `""` (the cmd convention
 /// for escaping a literal quote inside a quoted string).
+///
+/// `%` is **doubled first** even when no other quoting is needed —
+/// inside a `.bat` script `%VAR%` expands regardless of whether the
+/// surrounding context is double-quoted. Without the double, a
+/// Windows path containing `%USERPROFILE%` or similar would silently
+/// expand to the running user's profile dir instead of the literal
+/// path the GUI captured.
 #[cfg(target_os = "windows")]
 fn quote_bat(s: &str) -> String {
-    if s.is_empty() {
+    let escaped = s.replace('%', "%%");
+    if escaped.is_empty() {
         return "\"\"".into();
     }
-    let needs_quote = s.chars().any(|c| {
+    let needs_quote = escaped.chars().any(|c| {
         matches!(
             c,
-            ' ' | '\t' | '"' | '%' | '&' | '|' | '<' | '>' | '^' | '(' | ')'
+            ' ' | '\t' | '"' | '&' | '|' | '<' | '>' | '^' | '(' | ')'
         )
     });
     if !needs_quote {
-        return s.to_string();
+        return escaped;
     }
-    let mut out = String::with_capacity(s.len() + 2);
+    let mut out = String::with_capacity(escaped.len() + 2);
     out.push('"');
-    for ch in s.chars() {
+    for ch in escaped.chars() {
         if ch == '"' {
             out.push('"');
             out.push('"');
@@ -710,6 +760,11 @@ fn write_unix_launcher(
     script.push_str(
         "read -rp \"DynoBox finished (exit $status). Press Enter to close...\" _ || true\n",
     );
+    // Self-delete so the GUI doesn't leak `dynobox-gui-*.sh` /
+    // `.command` files under `$TMPDIR` across runs. `rm -- "$0"`
+    // works even while bash is interpreting the script — the shell
+    // has already read the source into memory.
+    script.push_str("rm -- \"$0\" 2>/dev/null || true\n");
 
     let mut f = std::fs::File::create(&path)?;
     f.write_all(script.as_bytes())?;
