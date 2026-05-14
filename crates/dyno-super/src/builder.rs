@@ -251,13 +251,20 @@ pub fn serialize_metadata(layout: &SuperLayout) -> Result<Vec<u8>> {
     // zero-filled reserved bytes, then primary geometry at 4096, backup geometry
     // at 8192, then the metadata slots. Omitting the reserved prefix produces a
     // super image that's 4096 bytes short of what OEM tooling emits.
+    //
+    // The same constants live in `metadata.rs` as
+    // `LP_PARTITION_RESERVED_BYTES` / `LP_METADATA_GEOMETRY_SIZE` /
+    // `LP_SUPER_HEADER_BYTES`; the repack planner consumes
+    // `LP_SUPER_HEADER_BYTES` so the two stay in sync.
     let mut full_prefix = Vec::new();
     let geom_bytes = geometry.as_bytes();
-    full_prefix.resize(4096, 0);
+    let reserved = LP_PARTITION_RESERVED_BYTES as usize;
+    let geom_size = LP_METADATA_GEOMETRY_SIZE as usize;
+    full_prefix.resize(reserved, 0);
     full_prefix.extend_from_slice(geom_bytes);
-    full_prefix.resize(8192, 0);
+    full_prefix.resize(reserved + geom_size, 0);
     full_prefix.extend_from_slice(geom_bytes);
-    full_prefix.resize(12288, 0);
+    full_prefix.resize(reserved + 2 * geom_size, 0);
 
     // Primary and Backup slots
     for _ in 0..layout.geometry.metadata_slot_count * 2 {

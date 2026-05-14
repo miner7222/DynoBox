@@ -2864,9 +2864,15 @@ where
 fn move_file_across_drives(src: &Path, dst: &Path) -> anyhow::Result<()> {
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(17) || e.raw_os_error() == Some(0x11) => {
-            // OS error 17 (EXDEV / ERROR_NOT_SAME_DEVICE): cross-drive rename.
-            // Fall back to copy + delete.
+        // Cross-device rename fallback. Both OS constants happen to
+        // be named "not on same device":
+        //   * Windows `ERROR_NOT_SAME_DEVICE` = 17 (= 0x11)
+        //   * Linux / *BSD / macOS `EXDEV`    = 18
+        // The previous match listed `17` and `0x11` (same value, two
+        // bases), missing Linux entirely — so a `/tmp` -> `/output`
+        // rename across `tmpfs` and `ext4` failed instead of falling
+        // back to copy+delete.
+        Err(e) if matches!(e.raw_os_error(), Some(17) | Some(18)) => {
             std::fs::copy(src, dst)?;
             std::fs::remove_file(src)?;
             Ok(())

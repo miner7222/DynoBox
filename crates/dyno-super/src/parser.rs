@@ -100,6 +100,46 @@ fn parse_table_descriptor(data: &[u8], start_offset: usize) -> TableDescriptor {
     }
 }
 
+/// Ensure the `[offset..offset + num_entries * entry_size]` window
+/// implied by `descriptor` fits inside `data.len()`, **and** that
+/// `entry_size` is at least `min_entry_size` so the per-field
+/// slice reads inside the iteration loops can't panic on an
+/// attacker-supplied undersized entry. Returns a typed
+/// `DynoError::Tool` instead of letting a downstream slice panic
+/// on a truncated or hostile super image.
+fn validate_table_range(
+    label: &str,
+    table_offset: usize,
+    descriptor: &TableDescriptor,
+    min_entry_size: usize,
+    data_len: usize,
+) -> Result<()> {
+    if descriptor.num_entries > 0 && descriptor.entry_size < min_entry_size {
+        return Err(DynoError::Tool(format!(
+            "{label} table entry_size = {} but parser requires at least {min_entry_size} bytes per entry",
+            descriptor.entry_size
+        )));
+    }
+    let table_bytes = descriptor
+        .num_entries
+        .checked_mul(descriptor.entry_size)
+        .ok_or_else(|| {
+            DynoError::Tool(format!(
+                "{label} table: num_entries * entry_size overflows usize"
+            ))
+        })?;
+    let end = table_offset
+        .checked_add(descriptor.offset)
+        .and_then(|x| x.checked_add(table_bytes))
+        .ok_or_else(|| DynoError::Tool(format!("{label} table: end offset overflows usize")))?;
+    if end > data_len {
+        return Err(DynoError::Tool(format!(
+            "{label} table extends past metadata blob (need {end} bytes, have {data_len})"
+        )));
+    }
+    Ok(())
+}
+
 fn decode_c_string(raw: &[u8]) -> String {
     let null_pos = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
     String::from_utf8_lossy(&raw[..null_pos]).into_owned()
@@ -136,6 +176,19 @@ fn parse_metadata(
     let data = read_metadata_region(path)?;
     let header_offset = find_header_offset(&data)?;
 
+    // A malformed / attacker-crafted super image can ship a header
+    // that claims `header_size + descriptor offsets` extending past
+    // the on-disk blob, which would panic deep in the slice
+    // unpacks below. Validate the header window + every table
+    // range up-front so we error cleanly instead.
+    if data.len() < header_offset + 132 {
+        return Err(DynoError::Tool(format!(
+            "Metadata blob is {} bytes; need at least {} for the LP header",
+            data.len(),
+            header_offset + 132
+        )));
+    }
+
     let magic = u32::from_le_bytes(data[header_offset..header_offset + 4].try_into().unwrap());
     if magic != LP_METADATA_HEADER_MAGIC {
         return Err(DynoError::Tool("Invalid LP metadata header magic".into()));
@@ -162,7 +215,23 @@ fn parse_metadata(
         0
     };
 
-    let table_offset = header_offset + header_size;
+    let table_offset = header_offset
+        .checked_add(header_size)
+        .ok_or_else(|| DynoError::Tool("header_offset + header_size overflows usize".into()))?;
+    // Per-table minimum entry sizes match the field offsets the
+    // loops below dereference (see `extents` etc.). An entry_size
+    // smaller than this would let an attacker straddle the next
+    // entry / unrelated trailing bytes through the slice reads.
+    validate_table_range("partitions", table_offset, &partitions_desc, 52, data.len())?;
+    validate_table_range("extents", table_offset, &extents_desc, 24, data.len())?;
+    validate_table_range("groups", table_offset, &groups_desc, 48, data.len())?;
+    validate_table_range(
+        "block_devices",
+        table_offset,
+        &block_devices_desc,
+        60,
+        data.len(),
+    )?;
 
     let mut extents = Vec::with_capacity(extents_desc.num_entries);
     for i in 0..extents_desc.num_entries {

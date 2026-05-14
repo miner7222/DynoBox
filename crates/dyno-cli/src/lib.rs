@@ -284,8 +284,13 @@ fn setup_logging() {
         .with_max_level(Level::INFO)
         .with_ansi(!plain)
         .finish();
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set up logging subscriber");
+    // `set_global_default` returns `SetGlobalDefaultError` when the
+    // subscriber is already installed. The CLI binary calls
+    // `cli_main` exactly once so the first call wins — but tests
+    // (and any future in-process re-entry from the GUI binary)
+    // would `.expect()` panic on the second call. Drop the error
+    // silently: the existing subscriber stays active.
+    let _ = tracing::subscriber::set_global_default(subscriber);
 }
 
 fn resolve_output_dir(output: Option<PathBuf>, default_name: &str) -> PathBuf {

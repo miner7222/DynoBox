@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::builder::serialize_metadata;
-use crate::metadata::{LP_TARGET_TYPE_LINEAR, SuperExtent, SuperLayout};
+use crate::metadata::{LP_SUPER_HEADER_BYTES, LP_TARGET_TYPE_LINEAR, SuperExtent, SuperLayout};
 use dynobox_core::error::{DynoError, Result};
 
 #[derive(Debug, Clone)]
@@ -22,12 +22,16 @@ pub fn repack_super_image(
 ) -> Result<Vec<PathBuf>> {
     let mut new_layout = source_layout.clone();
 
-    // 1. Update partition sizes and extents based on actual files
-    let mut current_data_offset_sectors = (8192
-        + (source_layout.geometry.metadata_max_size
-            * source_layout.geometry.metadata_slot_count
-            * 2) as u64)
-        / 512;
+    // 1. Update partition sizes and extents based on actual files.
+    //    Data region starts after the reserved prefix + two geometry
+    //    blocks + the metadata slot table. Previously this site used
+    //    `8192` (reserved + one geometry, missing the second
+    //    geometry block); see `LP_SUPER_HEADER_BYTES` in
+    //    `dyno-super/src/metadata.rs` for the canonical layout.
+    let metadata_table_bytes = (source_layout.geometry.metadata_max_size as u64)
+        * (source_layout.geometry.metadata_slot_count as u64)
+        * 2;
+    let mut current_data_offset_sectors = (LP_SUPER_HEADER_BYTES + metadata_table_bytes) / 512;
     // Align to 1MiB (2048 sectors)
     current_data_offset_sectors = (current_data_offset_sectors + 2047) & !2047;
 
@@ -65,13 +69,18 @@ pub fn repack_super_image(
     // 2. Serialize metadata
     let metadata_prefix = serialize_metadata(&new_layout)?;
 
-    // 3. Plan Flash Chunks
-    let flash_sector_size = source_layout.chunks[0].sector_size_bytes;
-    let base_start_sector = source_layout.chunks[0].start_sector;
+    // 3. Plan Flash Chunks. Use `.first()` instead of `[0]` so a
+    //    super layout with no chunks (malformed XML) returns a
+    //    typed error instead of an index-out-of-bounds panic.
+    let first_chunk = source_layout.chunks.first().ok_or_else(|| {
+        DynoError::Tool("super layout has no flash chunks; cannot plan repack".into())
+    })?;
+    let flash_sector_size = first_chunk.sector_size_bytes;
+    let base_start_sector = first_chunk.start_sector;
 
     let mut chunk_plans = vec![SuperFlashChunk {
-        filename: source_layout.chunks[0].filename.clone(),
-        start_sector: source_layout.chunks[0].start_sector,
+        filename: first_chunk.filename.clone(),
+        start_sector: first_chunk.start_sector,
         num_sectors: (metadata_prefix.len() as u64) / flash_sector_size,
         sector_size_bytes: flash_sector_size,
         source_offset_bytes: 0,
@@ -100,7 +109,18 @@ pub fn repack_super_image(
         std::fs::copy(&img_path, &out_path)?;
 
         let size_bytes = std::fs::metadata(&out_path)?.len();
-        let extent = &partition.extents[0];
+        // `partition.extents` is rebuilt to a single LINEAR extent
+        // earlier in this function (see the loop that fills the
+        // `partition.extents = vec![SuperExtent { .. }]` slot), so
+        // `.first()` is always `Some` in the well-formed path.
+        // Surface a clean error instead of an index panic for any
+        // future code path that forgets to populate the slot.
+        let extent = partition.extents.first().ok_or_else(|| {
+            DynoError::Tool(format!(
+                "partition `{}` has no extents after repack planning",
+                partition.base_name()
+            ))
+        })?;
 
         chunk_plans.push(SuperFlashChunk {
             filename,
@@ -154,6 +174,20 @@ fn rewrite_super_xml_entries(xml_paths: &[PathBuf], chunk_plans: &[SuperFlashChu
                 new_content.push('\n');
             } else {
                 new_content.push_str(line);
+                new_content.push('\n');
+            }
+        }
+
+        // EOF flush: if the XML's last `<program>` entries are all
+        // labelled `super`, the loop above never sees a sentinel
+        // non-super line to trigger the chunk rewrite — the pending
+        // super entries would silently disappear from the output.
+        // Emit the new chunk lines now so they survive the rewrite.
+        if in_super {
+            replaced = true;
+            for chunk in chunk_plans {
+                let new_line = line_rewriter.rewrite_line(&template, chunk);
+                new_content.push_str(&new_line);
                 new_content.push('\n');
             }
         }

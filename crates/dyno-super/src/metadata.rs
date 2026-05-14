@@ -8,6 +8,32 @@ pub const LP_SECTOR_SIZE: u64 = 512;
 pub const LP_TARGET_TYPE_LINEAR: u32 = 0;
 pub const LP_TARGET_TYPE_ZERO: u32 = 1;
 
+/// Bytes that the super-image header occupies before the metadata
+/// slots begin. Layout per AOSP `liblp/metadata_format.h`:
+///
+/// ```text
+///   0x0000 .. 0x1000   reserved zero prefix (`LP_PARTITION_RESERVED_BYTES`)
+///   0x1000 .. 0x2000   primary geometry
+///   0x2000 .. 0x3000   backup geometry
+///   0x3000 ..          metadata slot table (`metadata_max_size *
+///                      metadata_slot_count * 2`)
+/// ```
+///
+/// The data region starts immediately after the slot table, so the
+/// first byte of the first dynamic partition lives at
+/// `LP_PARTITION_RESERVED_BYTES + 2 * LP_METADATA_GEOMETRY_SIZE +
+/// metadata_max_size * metadata_slot_count * 2`.
+///
+/// Both the repack planner (`dyno-super/src/repack.rs`) and the
+/// metadata serialiser (`dyno-super/src/builder.rs`) consume this
+/// constant so they stay in sync — they previously disagreed by
+/// 4 KiB (`8192` vs the actual `12288`), which only matters when
+/// the metadata slot table grows past ~1 MiB but corrupts the
+/// super image silently when it does.
+pub const LP_PARTITION_RESERVED_BYTES: u64 = 4096;
+pub const LP_METADATA_GEOMETRY_SIZE: u64 = 4096;
+pub const LP_SUPER_HEADER_BYTES: u64 = LP_PARTITION_RESERVED_BYTES + 2 * LP_METADATA_GEOMETRY_SIZE;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SuperGeometry {
     pub metadata_max_size: u32,
