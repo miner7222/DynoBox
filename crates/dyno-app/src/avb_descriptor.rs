@@ -591,6 +591,14 @@ pub fn patch_hashtree_root_digest(
     new_digest: &[u8],
 ) -> Result<()> {
     let (vbmeta_offset, vbmeta_blob) = read_vbmeta_blob(image_path)?;
+    if vbmeta_blob.len() < AVB_VBMETA_IMAGE_HEADER_SIZE {
+        anyhow::bail!(
+            "{} vbmeta blob is {} bytes; need at least {} for the header",
+            image_path.display(),
+            vbmeta_blob.len(),
+            AVB_VBMETA_IMAGE_HEADER_SIZE
+        );
+    }
     let header = AvbVBMetaHeader::from_reader(&vbmeta_blob[..AVB_VBMETA_IMAGE_HEADER_SIZE])?;
     let descriptors_start = descriptors_start_offset_in_blob(&header)?;
     let descriptors = descriptors_slice(&vbmeta_blob, &header)?;

@@ -156,12 +156,23 @@ pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
         });
     }
 
+    // `block_size = 0` would propagate into the patcher and feed
+    // `Patcher::block_size` straight into `extent.num_blocks * 0 =
+    // 0`, plus AOSP's hashtree code in `regenerate_verity_hash_tree`
+    // divides by `block_size`. Reject malformed manifests up-front
+    // with a clear error rather than a downstream div-by-zero panic.
+    let block_size = manifest.block_size.unwrap_or(4096);
+    if block_size == 0 {
+        return Err(DynoError::Tool(
+            "Payload manifest declares block_size = 0".into(),
+        ));
+    }
     Ok(PayloadMetadata {
         version,
         manifest_size,
         metadata_signature_size,
         partitions,
-        block_size: manifest.block_size.unwrap_or(4096),
+        block_size,
         manifest_offset,
     })
 }

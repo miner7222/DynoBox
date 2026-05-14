@@ -120,15 +120,33 @@ impl Patcher {
     }
 
     fn write_extents(&self, file: &mut File, extents: &[Extent], data: &[u8]) -> Result<()> {
-        let mut data_offset = 0;
+        // Every destination byte must be covered by the supplied
+        // operation blob. The previous `min(size, data.len() -
+        // data_offset)` formulation both panicked on underflow when
+        // extents exceeded `data` *and* silently short-wrote the
+        // final extent when the blob was a few bytes light, leaving
+        // the output partition partially-zero with no error
+        // surfaced to the caller. We now require `remaining >= size`
+        // per extent and bail before any I/O so the caller can
+        // treat the half-written file as a hard failure.
+        let total_required: u64 = extents
+            .iter()
+            .map(|e| e.num_blocks.unwrap_or(0) * self.block_size)
+            .sum();
+        if (data.len() as u64) < total_required {
+            return Err(DynoError::Tool(format!(
+                "REPLACE data is {} bytes but destination extents need {} bytes",
+                data.len(),
+                total_required
+            )));
+        }
+        let mut data_offset = 0usize;
         for extent in extents {
             let offset = extent.start_block.unwrap_or(0) * self.block_size;
-            let size = extent.num_blocks.unwrap_or(0) * self.block_size;
-
+            let size = (extent.num_blocks.unwrap_or(0) * self.block_size) as usize;
             file.seek(SeekFrom::Start(offset))?;
-            let to_write = std::cmp::min(size as usize, data.len() - data_offset);
-            file.write_all(&data[data_offset..data_offset + to_write])?;
-            data_offset += to_write;
+            file.write_all(&data[data_offset..data_offset + size])?;
+            data_offset += size;
         }
         Ok(())
     }
@@ -180,10 +198,25 @@ impl Patcher {
 
                 let src_ext = &src_extents[src_ext_idx];
                 let src_ext_size = src_ext.num_blocks.unwrap_or(0) * self.block_size;
+                // A zero-block src extent + remaining dst would
+                // spin forever — `to_copy == 0` never advances
+                // `dst_remaining`. Skip the empty extent (which
+                // shouldn't happen with well-formed manifests but
+                // an attacker-crafted payload could supply one).
+                if src_ext_size == 0 {
+                    src_ext_idx += 1;
+                    src_ext_offset = 0;
+                    continue;
+                }
                 let src_available = src_ext_size - src_ext_offset;
 
                 let to_copy = std::cmp::min(dst_remaining, src_available);
                 let to_copy = std::cmp::min(to_copy, buffer.len() as u64);
+                if to_copy == 0 {
+                    return Err(DynoError::Tool(
+                        "SOURCE_COPY made no progress; refusing to loop indefinitely".into(),
+                    ));
+                }
 
                 src.seek(SeekFrom::Start(
                     src_ext.start_block.unwrap_or(0) * self.block_size + src_ext_offset,
@@ -402,6 +435,16 @@ pub fn apply_partition_payload_with_progress(
     use crate::payload::parse_payload_metadata;
     use prost::Message;
 
+    // Caller-supplied `block_size` is also used as a divisor inside
+    // `regenerate_verity_hash_tree` (and as a multiplier feeding all
+    // extent arithmetic). A zero value triggers a div-by-zero panic
+    // deep in the hashtree code; reject it at the entry point.
+    if block_size == 0 {
+        return Err(DynoError::Tool(
+            "Patcher block_size = 0; cannot apply payload".into(),
+        ));
+    }
+
     let metadata = parse_payload_metadata(payload_path)?;
     let mut payload_file = File::open(payload_path)?;
 
@@ -428,12 +471,25 @@ pub fn apply_partition_payload_with_progress(
         None
     };
 
+    // `new_partition_info` and `size` are both `Option`s on the
+    // proto. A vendor delta build that omits either field would
+    // crash the patcher with a bare `Option::unwrap` panic;
+    // surface a typed error instead so the CLI can report which
+    // partition is missing the field.
     let new_size = p_manifest
         .new_partition_info
         .as_ref()
-        .unwrap()
+        .ok_or_else(|| {
+            DynoError::Tool(format!(
+                "partition `{partition_name}` missing new_partition_info in manifest"
+            ))
+        })?
         .size
-        .unwrap();
+        .ok_or_else(|| {
+            DynoError::Tool(format!(
+                "partition `{partition_name}` missing new_partition_info.size in manifest"
+            ))
+        })?;
 
     let mut dst_file = OpenOptions::new()
         .read(true)

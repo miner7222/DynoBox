@@ -53,6 +53,8 @@ pub enum Ext4Error {
     ExtentTreeTooDeep { depth: u8 },
     #[error("detected extent tree cycle at block {block}")]
     ExtentCycleDetected { block: u64 },
+    #[error("ext4 superblock is corrupt: {0}")]
+    CorruptSuperblock(&'static str),
 }
 
 pub type Result<T> = std::result::Result<T, Ext4Error>;
@@ -442,6 +444,15 @@ impl<R: Read + Seek> Ext4Volume<R> {
         }
 
         let group_desc_table_offset = (1024 / block_size + 1) * block_size;
+        // A malformed / attacker-crafted superblock with
+        // `s_inodes_per_group == 0` would panic here via div-by-zero;
+        // reject up-front with a clear error. Valid ext4 images
+        // never set this to zero — minimum is `inodes_per_block`.
+        if superblock.s_inodes_per_group == 0 {
+            return Err(Ext4Error::CorruptSuperblock(
+                "s_inodes_per_group = 0 (corrupt or non-ext4 image)",
+            ));
+        }
         let num_groups = superblock
             .s_inodes_count
             .div_ceil(superblock.s_inodes_per_group);
