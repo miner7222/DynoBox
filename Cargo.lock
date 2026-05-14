@@ -889,7 +889,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dynobox-app"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "avbtool-rs",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-cli"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "avbtool-rs",
@@ -923,14 +923,14 @@ dependencies = [
 
 [[package]]
 name = "dynobox-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "dynobox-gui"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "anyhow",
  "dynobox-cli",
@@ -943,7 +943,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-payload"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "brotli",
  "brotli-sys",
@@ -965,7 +965,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-super"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "crc32fast",
  "dynobox-core",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-xml"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "aes",
  "cbc",
