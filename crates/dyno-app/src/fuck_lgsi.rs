@@ -60,7 +60,7 @@
 //!      vbmeta_system.img. Resign loop refreshes the vbmeta signature.
 //!  15. Optionally remove the workspace files (`--fuck-lgsi-cleanup`).
 //!
-//! Scripted mode (`--fuck-lgsi-config <path>`) skips steps 7–9: the
+//! Scripted mode (`--fuck-lgsi <JSON_PATH>`) skips steps 7–9: the
 //! caller-supplied JSON is read from the given path. Steps 1–6 still run
 //! so we know the dex layout + cross-ref. Steps 10–14 still run.
 //!
@@ -2088,7 +2088,7 @@ mod workspace {
         let force_interactive = std::env::var_os("DYNOBOX_GUI").is_some();
         if !force_interactive && !stdin.is_terminal() {
             bail!(
-                "--fuck-lgsi needs an interactive terminal; pass --fuck-lgsi-config <path> instead"
+                "--fuck-lgsi needs an interactive terminal; pass --fuck-lgsi <JSON_PATH> instead"
             );
         }
         let json_path = workspace_dir.join(WORKSPACE_JSON_NAME);
