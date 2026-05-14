@@ -16,7 +16,7 @@ egui_extras = { version = "0.34.2", features = ["datepicker"] }
 # `egui_extras::DatePickerButton` switched from chrono to jiff in
 # 0.33+. Use the same crate directly for the SPL field state.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
-rfd = "0.15"
+rfd = "0.17"
 
 [[bin]]
 name = "dynobox-gui"
