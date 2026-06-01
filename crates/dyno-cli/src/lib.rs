@@ -92,6 +92,16 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl, requires = "resign")]
         vendor_spl: Option<String>,
 
+        /// Bump system.img `ro.build.version.security_patch` (the Android
+        /// security update Settings shows) and the matching
+        /// `com.android.build.system.security_patch` AVB property to this
+        /// YYYY-MM-DD date during resign. Patches `/system/build.prop`,
+        /// regenerates the dm-verity hash tree, and propagates the new value
+        /// and root digest into vbmeta_system.img so the resign loop signs
+        /// over them.
+        #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_system_spl, requires = "resign")]
+        system_spl: Option<String>,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -147,6 +157,16 @@ enum Commands {
         /// and root digest into vbmeta.img so the resign loop signs over them.
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl)]
         vendor_spl: Option<String>,
+
+        /// Bump system.img `ro.build.version.security_patch` (the Android
+        /// security update Settings shows) and the matching
+        /// `com.android.build.system.security_patch` AVB property to this
+        /// YYYY-MM-DD date during resign. Patches `/system/build.prop`,
+        /// regenerates the dm-verity hash tree, and propagates the new value
+        /// and root digest into vbmeta_system.img so the resign loop signs
+        /// over them.
+        #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_system_spl)]
+        system_spl: Option<String>,
 
         /// Per-feature toggle for Lenovo's LGSI feature flags inside
         /// system.img. Extracts `lgsi_build_info.html` from product.img,
@@ -210,6 +230,16 @@ enum Commands {
         /// and root digest into vbmeta.img so the resign loop signs over them.
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_vendor_spl)]
         vendor_spl: Option<String>,
+
+        /// Bump system.img `ro.build.version.security_patch` (the Android
+        /// security update Settings shows) and the matching
+        /// `com.android.build.system.security_patch` AVB property to this
+        /// YYYY-MM-DD date during resign. Patches `/system/build.prop`,
+        /// regenerates the dm-verity hash tree, and propagates the new value
+        /// and root digest into vbmeta_system.img so the resign loop signs
+        /// over them.
+        #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_system_spl)]
+        system_spl: Option<String>,
 
         /// Per-feature toggle for Lenovo's LGSI feature flags inside
         /// system.img. Extracts `lgsi_build_info.html` from product.img,
@@ -327,6 +357,7 @@ struct ApplyResignOptions<'a> {
     rollback_index: &'a Option<u64>,
     boot_spl: &'a Option<String>,
     vendor_spl: &'a Option<String>,
+    system_spl: &'a Option<String>,
     fuck_lgsi: &'a Option<String>,
 }
 
@@ -338,6 +369,7 @@ impl ApplyResignOptions<'_> {
             || self.rollback_index.is_some()
             || self.boot_spl.is_some()
             || self.vendor_spl.is_some()
+            || self.system_spl.is_some()
             || self.fuck_lgsi.is_some()
     }
 }
@@ -395,6 +427,7 @@ fn resolve_fuck_lgsi_mode(fuck_lgsi: Option<String>) -> Option<FuckLgsiMode> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn make_resign_config(
     key: Option<String>,
     algorithm: Option<String>,
@@ -402,6 +435,7 @@ fn make_resign_config(
     rollback_index: Option<u64>,
     boot_spl: Option<String>,
     vendor_spl: Option<String>,
+    system_spl: Option<String>,
     fuck_lgsi: Option<FuckLgsiMode>,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
@@ -411,6 +445,7 @@ fn make_resign_config(
         rollback_index,
         boot_spl,
         vendor_spl,
+        system_spl,
         fuck_lgsi,
     })
 }
@@ -423,6 +458,12 @@ fn parse_boot_spl(value: &str) -> Result<String, String> {
 
 fn parse_vendor_spl(value: &str) -> Result<String, String> {
     dynobox_app::vendor_spl::validate_spl_format(value)
+        .map(|_| value.to_string())
+        .map_err(|e| e.to_string())
+}
+
+fn parse_system_spl(value: &str) -> Result<String, String> {
+    dynobox_app::system_spl::validate_spl_format(value)
         .map(|_| value.to_string())
         .map_err(|e| e.to_string())
 }
@@ -666,6 +707,7 @@ where
             rollback,
             boot_spl,
             vendor_spl,
+            system_spl,
             complete,
         } => {
             if resign && key.is_none() {
@@ -684,6 +726,7 @@ where
                     rollback,
                     boot_spl,
                     vendor_spl,
+                    system_spl,
                     None::<FuckLgsiMode>,
                 ),
                 repack,
@@ -706,6 +749,7 @@ where
             rollback,
             boot_spl,
             vendor_spl,
+            system_spl,
             fuck_lgsi,
             complete,
             ota_zips,
@@ -727,6 +771,7 @@ where
                 rollback_index: &rollback,
                 boot_spl: &boot_spl,
                 vendor_spl: &vendor_spl,
+                system_spl: &system_spl,
                 fuck_lgsi: &fuck_lgsi,
             };
             validate_apply_resign_options(resign, &resign_options)?;
@@ -740,7 +785,7 @@ where
                 ota_zips: real_zips,
                 force_unpack: unpack,
                 resign: make_resign_config(
-                    key, algorithm, force, rollback, boot_spl, vendor_spl, lgsi_mode,
+                    key, algorithm, force, rollback, boot_spl, vendor_spl, system_spl, lgsi_mode,
                 ),
                 repack,
                 complete,
@@ -759,6 +804,7 @@ where
             rollback,
             boot_spl,
             vendor_spl,
+            system_spl,
             fuck_lgsi,
             repack,
         } => {
@@ -774,6 +820,7 @@ where
                     rollback_index: rollback,
                     boot_spl,
                     vendor_spl,
+                    system_spl,
                     fuck_lgsi: lgsi_mode,
                 },
                 repack,
@@ -914,6 +961,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &None,
             vendor_spl: &None,
+            system_spl: &None,
             fuck_lgsi: &None,
         };
         let err = validate_apply_resign_options(false, &options)
@@ -932,6 +980,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &boot_spl,
             vendor_spl: &None,
+            system_spl: &None,
             fuck_lgsi: &None,
         };
         let err = validate_apply_resign_options(false, &options)
@@ -949,6 +998,7 @@ mod tests {
             rollback_index: &None,
             boot_spl: &None,
             vendor_spl: &None,
+            system_spl: &None,
             fuck_lgsi: &None,
         };
         let err = validate_apply_resign_options(true, &options)
@@ -964,6 +1014,7 @@ mod tests {
         let rollback_index = Some(1);
         let boot_spl = Some("2026-04-30".to_string());
         let vendor_spl = Some("2026-04-30".to_string());
+        let system_spl = Some("2026-04-30".to_string());
         let options = ApplyResignOptions {
             key: &key,
             algorithm: &algorithm,
@@ -971,6 +1022,7 @@ mod tests {
             rollback_index: &rollback_index,
             boot_spl: &boot_spl,
             vendor_spl: &vendor_spl,
+            system_spl: &system_spl,
             fuck_lgsi: &Some(String::new()),
         };
         validate_apply_resign_options(true, &options).expect("resign with key should be accepted");

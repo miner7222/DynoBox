@@ -19,6 +19,10 @@ use crate::report::{
     SigningKeyChange as ReportSigningKeyChange, SplRecord as ReportSplRecord,
     ZuiSettingsLocalePatch as ReportZuiSettingsLocalePatch, format_unix_to_iso8601_utc,
 };
+use crate::system_spl::{
+    SYSTEM_SPL_PROPERTY, SystemSplOutcome, apply_system_spl_with_progress,
+    validate_spl_format as validate_system_spl_format,
+};
 use crate::vendor_spl::{
     VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl_with_progress,
     validate_spl_format as validate_vendor_spl_format,
@@ -46,6 +50,14 @@ pub struct ResignConfig {
     /// so the resign loop signs over the new bytes. Skipped (warn-only) when
     /// the requested date is not strictly newer than the existing value.
     pub vendor_spl: Option<String>,
+    /// New `com.android.build.system.security_patch` value (YYYY-MM-DD) for
+    /// system.img. Triggers an offline byte patch on `/system/build.prop`'s
+    /// `ro.build.version.security_patch` (the value Settings shows as the
+    /// Android security update), dm-verity hash tree regeneration, and a
+    /// propagation pass into vbmeta_system.img so the resign loop signs over
+    /// the new bytes. Skipped (warn-only) when the requested date is not
+    /// strictly newer than the existing value.
+    pub system_spl: Option<String>,
     /// When set, run `--fuck-lgsi`: extract `lgsi_build_info.html` from
     /// product.img, render the per-feature `Enabled State` table as
     /// `<out>/lgsi_features.json`, optionally pause for the user to edit
@@ -1546,6 +1558,9 @@ where
     if let Some(spl) = config.vendor_spl.as_deref() {
         validate_vendor_spl_format(spl)?;
     }
+    if let Some(spl) = config.system_spl.as_deref() {
+        validate_system_spl_format(spl)?;
+    }
 
     recreate_dir_safe(out_dir, &[input])?;
 
@@ -1727,6 +1742,95 @@ where
         // tries to combine --vendor-spl with another filter.
         if vendor_spl_applied.is_some() {
             ensure_image_in_resign_list(&mut images, out_dir, "vbmeta.img");
+        }
+    }
+
+    // --system-spl mirrors --vendor-spl on system.img + vbmeta_system.img.
+    // It runs before the --fuck-lgsi block (which also mutates system.img):
+    // each feature re-walks the entire image to regenerate dm-verity, so
+    // when both flags are set fuck-lgsi's later verity pass folds in this
+    // build.prop edit and re-stamps the hashtree root digest, while the SPL
+    // property written here is left untouched and survives to the resign.
+    let mut system_spl_applied: Option<(String, String, String)> = None;
+    if let Some(new_spl) = config.system_spl.as_deref() {
+        require_images_exist(
+            "--system-spl",
+            out_dir,
+            &["system.img", "vbmeta_system.img"],
+        )?;
+        ensure_images_local(
+            &mut local_inode_cache,
+            out_dir,
+            &["system.img", "vbmeta_system.img"],
+        )?;
+        let system_path = out_dir.join("system.img");
+        let vbmeta_system_path = out_dir.join("vbmeta_system.img");
+        let outcome = run_with_verity_progress(
+            events,
+            "system.img verity regen",
+            &system_path,
+            "system",
+            |progress| {
+                apply_system_spl_with_progress(&system_path, &vbmeta_system_path, new_spl, progress)
+            },
+        )?;
+        match outcome {
+            SystemSplOutcome::Patched {
+                old,
+                new,
+                old_root_digest,
+                new_root_digest,
+            } => {
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!(
+                        "system.img {} bumped from {} to {} (build.prop + AVB property + dm-verity root digest {} -> {})",
+                        SYSTEM_SPL_PROPERTY,
+                        old,
+                        new,
+                        &old_root_digest[..16.min(old_root_digest.len())],
+                        &new_root_digest[..16.min(new_root_digest.len())]
+                    ),
+                );
+                report.system_spl = Some(ReportSplRecord {
+                    property: SYSTEM_SPL_PROPERTY.to_string(),
+                    from: Some(old.clone()),
+                    to: new.clone(),
+                    applied: true,
+                    reason: String::new(),
+                });
+                system_spl_applied = Some((old, new, new_root_digest));
+            }
+            SystemSplOutcome::SkippedNotNewer { old, requested } => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    format!(
+                        "system.img {} not bumped: requested {} is not newer than current {}; re-signing without SPL change",
+                        SYSTEM_SPL_PROPERTY, requested, old
+                    ),
+                );
+                report.system_spl = Some(ReportSplRecord {
+                    property: SYSTEM_SPL_PROPERTY.to_string(),
+                    from: Some(old.clone()),
+                    to: requested.clone(),
+                    applied: false,
+                    reason: format!("requested {requested} is not newer than current {old}"),
+                });
+            }
+            SystemSplOutcome::NotFound => {
+                return Err(anyhow::anyhow!(
+                    "system.img has no {} property descriptor; cannot apply --system-spl",
+                    SYSTEM_SPL_PROPERTY
+                ));
+            }
+        }
+        // The vbmeta_system.img patch above leaves a stale signature behind;
+        // make sure the resign loop will pick it up below even if a future
+        // caller tries to combine --system-spl with another filter.
+        if system_spl_applied.is_some() {
+            ensure_image_in_resign_list(&mut images, out_dir, "vbmeta_system.img");
         }
     }
 
@@ -2039,6 +2143,25 @@ where
                             "Post-resign verification failed for {}: {} is {:?} but expected {:?}",
                             filename,
                             VENDOR_SPL_PROPERTY,
+                            other,
+                            expected_spl
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some((_, ref expected_spl, _)) = system_spl_applied {
+            if filename == "vbmeta_system.img" {
+                let actual = crate::system_spl::read_system_avb_property(&out_path)
+                    .with_context(|| format!("Failed to re-read system SPL from {}", filename))?;
+                match actual.as_deref() {
+                    Some(value) if value == expected_spl => {}
+                    other => {
+                        return Err(anyhow::anyhow!(
+                            "Post-resign verification failed for {}: {} is {:?} but expected {:?}",
+                            filename,
+                            SYSTEM_SPL_PROPERTY,
                             other,
                             expected_spl
                         ));
@@ -3350,6 +3473,7 @@ mod tests {
             rollback_index: None,
             boot_spl: None,
             vendor_spl: None,
+            system_spl: None,
             fuck_lgsi: None,
         }
     }

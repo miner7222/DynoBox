@@ -27,6 +27,7 @@ pub struct PipelineReport {
     pub resigned_images: Vec<String>,
     pub boot_spl: Option<SplRecord>,
     pub vendor_spl: Option<SplRecord>,
+    pub system_spl: Option<SplRecord>,
     pub rollback: Option<RollbackRecord>,
     pub lgsi: Option<LgsiRecord>,
     pub signing_key_change: Option<SigningKeyChange>,
@@ -115,6 +116,7 @@ impl PipelineReport {
         !self.resigned_images.is_empty()
             || self.boot_spl.is_some()
             || self.vendor_spl.is_some()
+            || self.system_spl.is_some()
             || self.rollback.is_some()
             || self.lgsi.is_some()
             || self.signing_key_change.is_some()
@@ -146,6 +148,9 @@ impl PipelineReport {
         }
         if let Some(spl) = &self.vendor_spl {
             push_spl_section(&mut out, "vendor.img security_patch", spl);
+        }
+        if let Some(spl) = &self.system_spl {
+            push_spl_section(&mut out, "system.img security_patch", spl);
         }
         if let Some(rb) = &self.rollback {
             push_rollback_section(&mut out, rb);

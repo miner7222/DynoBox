@@ -73,8 +73,10 @@ struct DynoGui {
     rollback: String,
     boot_spl: String,
     vendor_spl: String,
+    system_spl: String,
     boot_spl_date: Date,
     vendor_spl_date: Date,
+    system_spl_date: Date,
     fuck_lgsi: bool,
     fuck_lgsi_config: Option<PathBuf>,
 
@@ -107,8 +109,10 @@ impl Default for DynoGui {
             rollback: String::new(),
             boot_spl: String::new(),
             vendor_spl: String::new(),
+            system_spl: String::new(),
             boot_spl_date: today_default,
             vendor_spl_date: today_default,
+            system_spl_date: today_default,
             fuck_lgsi: false,
             fuck_lgsi_config: None,
             last_status: None,
@@ -217,6 +221,10 @@ impl DynoGui {
         if !self.vendor_spl.trim().is_empty() {
             a.push("--vendor-spl".into());
             a.push(self.vendor_spl.trim().to_string());
+        }
+        if !self.system_spl.trim().is_empty() {
+            a.push("--system-spl".into());
+            a.push(self.system_spl.trim().to_string());
         }
         if self.fuck_lgsi {
             // `--fuck-lgsi` is declared `num_args = 0..=1` with
@@ -475,6 +483,13 @@ impl DynoGui {
                 &mut self.vendor_spl,
                 &mut self.vendor_spl_date,
                 "vendor-spl-picker",
+            );
+            spl_row(
+                ui,
+                "System SPL:",
+                &mut self.system_spl,
+                &mut self.system_spl_date,
+                "system-spl-picker",
             );
 
             ui.checkbox(&mut self.fuck_lgsi, "--fuck-lgsi");

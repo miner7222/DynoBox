@@ -1,0 +1,297 @@
+//! Patch system.img security_patch + propagate to vbmeta_system.img.
+//!
+//! Walks the ext4 filesystem inside `system.img` to locate
+//! `/system/build.prop`, resolves the disk byte range that backs the
+//! `ro.build.version.security_patch=` line through the inode's extent
+//! tree, and overwrites the 10-byte date in place. Going through the
+//! ext4 reader (rather than a blind `memchr` scan over the partition
+//! image) is what makes the rewrite hit the live data block instead of
+//! whichever stale fragment in unallocated space happens to share the
+//! same string. `ro.build.version.security_patch` is the value Settings
+//! surfaces as "Android security update".
+//!
+//! After the data-area edit:
+//!   1. Re-emit the dm-verity hash tree from the modified data and write
+//!      it back at `tree_offset` in system.img.
+//!   2. Patch the AVB Hashtree descriptor's `root_digest` and the AVB
+//!      Property descriptor's `com.android.build.system.security_patch`
+//!      value in system.img's footer. system.img is `algorithm = NONE`,
+//!      so the descriptor body is rewritten in place and stays
+//!      length-stable (32-byte digest, 10-byte date) — no signature to
+//!      invalidate.
+//!   3. Patch the same fields in vbmeta_system.img (which carries
+//!      system's Hashtree descriptor and the matching property).
+//!      vbmeta_system.img is signed, so the regular resign loop re-signs
+//!      it after this module returns; the in-place edit pre-loads the
+//!      new bytes the fresh signature then covers.
+//!
+//! FEC blocks are intentionally left untouched: dm-verity validates
+//! against the new `root_digest` only, and FEC is consulted as a recovery
+//! code for damaged blocks. A stale FEC region does not break boot.
+//!
+//! Mirrors [`crate::vendor_spl`]; the only differences are the build.prop
+//! key, the ext4 path (`/system/build.prop` vs `/build.prop`), the AVB
+//! property key, and the partition name.
+
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
+use std::path::Path;
+
+use crate::avb_descriptor::{
+    PatchPropertyOutcome, SHA256_DIGEST_SIZE, VerityProgressCallback, hex_encode,
+    patch_hashtree_root_digest, patch_property_value, read_hashtree_params,
+    regenerate_hashtree_with_progress,
+};
+use crate::ext4_helpers::{lookup_inode_at_path, map_file_offset_to_disk, open_ext4_volume};
+use anyhow::{Context, Result, anyhow};
+use memchr::memmem;
+
+pub const SYSTEM_SPL_PROPERTY: &str = "com.android.build.system.security_patch";
+const SYSTEM_PARTITION_NAME: &str = "system";
+/// Path of the canonical build.prop inside system.img. The image uses the
+/// system-as-root layout (its top-level directory holds a `system/`
+/// subtree), so the build.prop Settings reads lives at
+/// `/system/build.prop`, mirroring `/system/framework/framework.jar` that
+/// `--fuck-lgsi` walks.
+const BUILD_PROP_PATH: &[&str] = &["system", "build.prop"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SystemSplOutcome {
+    Patched {
+        old: String,
+        new: String,
+        old_root_digest: String,
+        new_root_digest: String,
+    },
+    SkippedNotNewer {
+        old: String,
+        requested: String,
+    },
+    NotFound,
+}
+
+/// Validate `spl` is a strict `YYYY-MM-DD` ASCII string. The in-place patch
+/// relies on the new value matching the existing length.
+pub fn validate_spl_format(spl: &str) -> Result<()> {
+    crate::spl::validate_spl_format("--system-spl", spl)
+}
+
+/// Apply --system-spl to system.img and propagate the change to
+/// vbmeta_system.img. Caller is responsible for re-signing
+/// vbmeta_system.img after this returns.
+///
+/// Equivalent to [`apply_system_spl_with_progress`] called with
+/// `verity_progress = None`.
+pub fn apply_system_spl(
+    system_image: &Path,
+    vbmeta_system_image: &Path,
+    new_spl: &str,
+) -> Result<SystemSplOutcome> {
+    apply_system_spl_with_progress(system_image, vbmeta_system_image, new_spl, None)
+}
+
+/// Like [`apply_system_spl`] but invokes `verity_progress` with
+/// per-leaf-block delta byte counts during the dm-verity regeneration
+/// phase. The other phases (build.prop ext4 byte patch, AVB descriptor
+/// rewrites) are sub-second; the SHA-256 walk over a multi-GiB
+/// `system.img` is the only stage long enough to need a progress bar.
+pub fn apply_system_spl_with_progress(
+    system_image: &Path,
+    vbmeta_system_image: &Path,
+    new_spl: &str,
+    verity_progress: Option<VerityProgressCallback>,
+) -> Result<SystemSplOutcome> {
+    validate_spl_format(new_spl)?;
+
+    // 1. Read current system security_patch property from system.img footer.
+    let current_avb = match read_system_avb_property(system_image)? {
+        Some(value) => value,
+        None => return Ok(SystemSplOutcome::NotFound),
+    };
+    if new_spl <= current_avb.as_str() {
+        return Ok(SystemSplOutcome::SkippedNotNewer {
+            old: current_avb,
+            requested: new_spl.to_string(),
+        });
+    }
+
+    // 2. Read hashtree descriptor params (need image_size for the rebuild
+    //    and the salt/algorithm for verity regeneration after).
+    let hashtree = read_hashtree_params(system_image, SYSTEM_PARTITION_NAME)?
+        .ok_or_else(|| anyhow!("system.img has no Hashtree descriptor for partition `system`"))?;
+    let old_root_digest = hashtree.root_digest.clone();
+    if hashtree.root_digest.len() != SHA256_DIGEST_SIZE {
+        return Err(anyhow!(
+            "system.img Hashtree descriptor uses an unexpected root_digest length {} (expected {})",
+            hashtree.root_digest.len(),
+            SHA256_DIGEST_SIZE
+        ));
+    }
+
+    // 3. Walk system.img as an ext4 filesystem, resolve
+    //    `/system/build.prop`'s disk-byte range via the inode extent
+    //    tree, and overwrite the SPL value in place. A blind
+    //    partition-wide `memchr` scan would happily land on a stale copy
+    //    of the same string in unallocated space and leave the live
+    //    build.prop unchanged.
+    patch_build_prop_spl_via_ext4(system_image, new_spl)?;
+
+    // 4. Regenerate dm-verity hash tree from the modified data and write it
+    //    back at `tree_offset`. The hand-rolled walker in
+    //    `avb_descriptor::regenerate_hashtree_with_progress` mirrors
+    //    `avbtool_rs::footer::generate_hash_tree` byte-for-byte but exposes
+    //    a per-leaf-block progress hook so the CLI bar can advance through
+    //    what would otherwise be a multi-minute opaque SHA-256 walk on a
+    //    multi-GiB system.img.
+    let new_root_digest =
+        regenerate_hashtree_with_progress(system_image, &hashtree, verity_progress)?;
+    if new_root_digest.len() != SHA256_DIGEST_SIZE {
+        return Err(anyhow!(
+            "Regenerated hash tree returned unexpected root_digest length {}",
+            new_root_digest.len()
+        ));
+    }
+
+    // 5. Patch system.img footer descriptors (NONE algorithm: no signature).
+    patch_property_or_explain(system_image, SYSTEM_SPL_PROPERTY, new_spl)?;
+    patch_hashtree_root_digest(system_image, SYSTEM_PARTITION_NAME, &new_root_digest)?;
+
+    // 6. Patch vbmeta_system.img descriptors. The signed blob is left with
+    //    a stale signature that the resign stage will refresh.
+    patch_property_or_explain(vbmeta_system_image, SYSTEM_SPL_PROPERTY, new_spl)?;
+    patch_hashtree_root_digest(vbmeta_system_image, SYSTEM_PARTITION_NAME, &new_root_digest)?;
+
+    Ok(SystemSplOutcome::Patched {
+        old: current_avb,
+        new: new_spl.to_string(),
+        old_root_digest: hex_encode(&old_root_digest),
+        new_root_digest: hex_encode(&new_root_digest),
+    })
+}
+
+/// Wrap `avb_descriptor::patch_property_value` with system-spl-flavoured
+/// error messages so callers don't have to repeat the dispatch.
+fn patch_property_or_explain(image_path: &Path, target_key: &str, new_value: &str) -> Result<()> {
+    match patch_property_value(image_path, target_key, new_value.as_bytes())? {
+        PatchPropertyOutcome::Patched { .. } => Ok(()),
+        PatchPropertyOutcome::NotFound => Err(anyhow!(
+            "{} is missing the {} property descriptor",
+            image_path.display(),
+            target_key
+        )),
+        PatchPropertyOutcome::LengthMismatch {
+            current_value,
+            current_len,
+            requested_len,
+        } => Err(anyhow!(
+            "{} {} property is {} bytes ({:?}); cannot replace with {} bytes",
+            image_path.display(),
+            target_key,
+            current_len,
+            current_value,
+            requested_len
+        )),
+    }
+}
+
+/// Walk system.img as an ext4 filesystem, locate `/system/build.prop`,
+/// and rewrite the value of the `ro.build.version.security_patch` line in
+/// place. The lookup goes through the inode extent tree — ext4-aware —
+/// so the byte rewrite always lands on the file's live data block(s),
+/// never on a stale copy of the same string left over in an
+/// unallocated block.
+fn patch_build_prop_spl_via_ext4(system_image: &Path, new_spl: &str) -> Result<()> {
+    let mut volume = open_ext4_volume(system_image)?;
+    let inode = lookup_inode_at_path(&mut volume, BUILD_PROP_PATH)?
+        .ok_or_else(|| anyhow!("system.img has no /system/build.prop"))?;
+    if !inode.is_file() {
+        return Err(anyhow!(
+            "system.img /system/build.prop is not a regular file"
+        ));
+    }
+    // Single tree walk that returns both the file content and its
+    // extent mapping; avoids walking the inode twice for the same
+    // small (~30 KiB) build.prop.
+    let (content, extents) = inode
+        .open_read_with_extents(&mut volume)
+        .map_err(|e| anyhow!("Failed to read /system/build.prop from system.img: {e}"))?;
+
+    let needle = b"ro.build.version.security_patch=";
+    let pos = memmem::find(&content, needle).ok_or_else(|| {
+        anyhow!("system /system/build.prop has no ro.build.version.security_patch= line")
+    })?;
+    let value_start = pos + needle.len();
+    let mut value_end = value_start;
+    while value_end < content.len() && content[value_end] != b'\n' && content[value_end] != b'\r' {
+        value_end += 1;
+    }
+    let value_len = value_end - value_start;
+    if value_len != new_spl.len() {
+        return Err(anyhow!(
+            "system /system/build.prop SPL value is {} bytes; cannot in-place replace with {} bytes (only same-length YYYY-MM-DD substitutions are supported)",
+            value_len,
+            new_spl.len()
+        ));
+    }
+
+    let block_size = volume.block_size;
+    if extents.is_empty() {
+        return Err(anyhow!(
+            "system /system/build.prop has no extents (likely inline data not yet supported here)"
+        ));
+    }
+
+    let new_bytes = new_spl.as_bytes();
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(system_image)
+        .with_context(|| {
+            format!(
+                "Failed to open {} for build.prop patch",
+                system_image.display()
+            )
+        })?;
+
+    // Walk byte-by-byte across the extents, writing each new SPL byte at
+    // its mapped on-disk position. The needle is small (10 bytes) so the
+    // loop is trivially cheap; doing it per-byte keeps the code correct
+    // even when the value happens to straddle an extent boundary.
+    for (i, byte) in new_bytes.iter().enumerate() {
+        let file_offset = (value_start + i) as u64;
+        let disk_offset =
+            map_file_offset_to_disk(&extents, file_offset, block_size).ok_or_else(|| {
+                anyhow!(
+                    "Could not map /system/build.prop file offset {} to a disk block (extent gap?)",
+                    file_offset
+                )
+            })?;
+        file.seek(SeekFrom::Start(disk_offset))?;
+        file.write_all(std::slice::from_ref(byte))?;
+    }
+    file.flush()?;
+    Ok(())
+}
+
+/// Read the current `com.android.build.system.security_patch` from
+/// `system.img`'s footer, or `Ok(None)` if absent.
+pub fn read_system_avb_property(system_image: &Path) -> Result<Option<String>> {
+    crate::avb_descriptor::read_property_value(system_image, SYSTEM_SPL_PROPERTY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_spl_format_round_trip() {
+        assert!(validate_spl_format("2026-04-05").is_ok());
+        assert!(validate_spl_format("2026-4-05").is_err());
+        assert!(validate_spl_format("2026/04/05").is_err());
+        assert!(validate_spl_format("").is_err());
+        assert!(validate_spl_format("2026-00-05").is_err());
+        assert!(validate_spl_format("2026-13-05").is_err());
+        assert!(validate_spl_format("2026-04-31").is_err());
+        assert!(validate_spl_format("2025-02-29").is_err());
+    }
+}
