@@ -3037,6 +3037,47 @@ fn normalise_for_compare(path: &Path) -> PathBuf {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Component strings of a path, used for the overlap comparisons below.
+fn path_component_strs(path: &Path) -> Vec<String> {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Compare two path components for equality. Windows file systems are
+/// case-insensitive, so `C:\Foo` and `C:\foo` name the same directory and
+/// must compare equal; otherwise the wipe guard below could be defeated by a
+/// mere case difference. Other platforms compare exactly.
+#[cfg(windows)]
+fn path_component_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+#[cfg(not(windows))]
+fn path_component_eq(a: &str, b: &str) -> bool {
+    a == b
+}
+
+/// `a` and `b` refer to the same path, comparing components with
+/// platform-appropriate case sensitivity.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    let (ca, cb) = (path_component_strs(a), path_component_strs(b));
+    ca.len() == cb.len()
+        && ca
+            .iter()
+            .zip(cb.iter())
+            .all(|(x, y)| path_component_eq(x, y))
+}
+
+/// `haystack` lies at or beneath `prefix` (i.e. `prefix` is an ancestor of
+/// `haystack`, or they are equal), comparing components with
+/// platform-appropriate case sensitivity. Mirrors `Path::starts_with` but
+/// case-folds on Windows.
+fn path_starts_with(haystack: &Path, prefix: &Path) -> bool {
+    let (h, p) = (path_component_strs(haystack), path_component_strs(prefix));
+    h.len() >= p.len() && p.iter().zip(h.iter()).all(|(x, y)| path_component_eq(x, y))
+}
+
 /// Refuse to `remove_dir_all` an output directory that overlaps a
 /// user-provided input / workspace path. Catches the case where a
 /// typo or absolute-path confusion makes the pipeline blow away
@@ -3047,21 +3088,21 @@ fn assert_safe_to_wipe(target: &Path, protected: &[&Path]) -> anyhow::Result<()>
     let target = normalise_for_compare(target);
     for p in protected {
         let candidate = normalise_for_compare(p);
-        if target == candidate {
+        if paths_equal(&target, &candidate) {
             anyhow::bail!(
                 "refusing to recursively delete `{}`: it is the same as protected input `{}`",
                 target.display(),
                 candidate.display()
             );
         }
-        if target.starts_with(&candidate) {
+        if path_starts_with(&target, &candidate) {
             anyhow::bail!(
                 "refusing to recursively delete `{}`: it lives inside protected input `{}`",
                 target.display(),
                 candidate.display()
             );
         }
-        if candidate.starts_with(&target) {
+        if path_starts_with(&candidate, &target) {
             anyhow::bail!(
                 "refusing to recursively delete `{}`: protected input `{}` lives inside it",
                 target.display(),
@@ -3532,6 +3573,38 @@ mod tests {
         assert_eq!(fragments[0].offset, 0);
         assert_eq!(fragments[0].size, 29725 * 4096);
         assert_eq!(fragments[1].offset, (173034 - 140266) * 4096);
+    }
+
+    #[test]
+    fn assert_safe_to_wipe_rejects_exact_and_nested_overlap() {
+        let base = std::env::temp_dir().join("dynobox_wipe_guard");
+        let input = base.join("image");
+        // target == protected input
+        assert!(assert_safe_to_wipe(&input, &[&input]).is_err());
+        // target lives inside protected input
+        assert!(assert_safe_to_wipe(&input.join("sub"), &[&input]).is_err());
+        // protected input lives inside target
+        assert!(assert_safe_to_wipe(&base, &[&input]).is_err());
+        // disjoint sibling is allowed
+        assert!(assert_safe_to_wipe(&base.join("output"), &[&input]).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn assert_safe_to_wipe_is_case_insensitive_on_windows() {
+        // `C:\...\Image` and `C:\...\image` name the same directory on
+        // Windows; the guard must catch the overlap despite the case
+        // difference, otherwise `remove_dir_all` could wipe the input.
+        let protected = std::env::temp_dir()
+            .join("dynobox_wipe_guard_case")
+            .join("Image");
+        let target = std::env::temp_dir()
+            .join("dynobox_wipe_guard_case")
+            .join("image");
+        assert!(
+            assert_safe_to_wipe(&target, &[&protected]).is_err(),
+            "case-differing path to the same dir must be refused"
+        );
     }
 
     fn sample_resign_config() -> ResignConfig {
