@@ -446,8 +446,20 @@ fn compute_hash_tree(
     let mut image = std::fs::File::open(image_path)
         .with_context(|| format!("Failed to open {} for verity walk", image_path.display()))?;
     let block_size_usize = block_size as usize;
-    let mut hash_ret = vec![0u8; tree_size as usize];
-    let mut hash_src_size = image_size as usize;
+    // `tree_size` / `image_size` come from AVB descriptor arithmetic. A
+    // malformed descriptor must not drive a wild allocation or silently
+    // truncate on a 32-bit `usize`. The hash tree is always smaller than the
+    // data it covers, so bound it by the image size before allocating.
+    if tree_size > image_size.saturating_add(block_size as u64) {
+        return Err(anyhow!(
+            "AVB hashtree size {tree_size} exceeds image size {image_size}; refusing to allocate"
+        ));
+    }
+    let tree_size_usize = usize::try_from(tree_size)
+        .map_err(|_| anyhow!("AVB hashtree size {tree_size} exceeds addressable memory"))?;
+    let mut hash_ret = vec![0u8; tree_size_usize];
+    let mut hash_src_size = usize::try_from(image_size)
+        .map_err(|_| anyhow!("AVB image size {image_size} exceeds addressable memory"))?;
     let mut level_num = 0usize;
 
     if hash_src_size == block_size_usize {

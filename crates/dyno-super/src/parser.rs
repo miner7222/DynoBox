@@ -149,9 +149,18 @@ fn read_metadata_region(path: &Path) -> Result<Vec<u8>> {
     let header_data = read_header_region(path)?;
     let header_offset = find_header_offset(&header_data).unwrap_or(0);
 
+    const DEFAULT_METADATA_SPAN: usize = 4 * 1024 * 1024;
     let required_bytes = match parse_geometry(&header_data) {
-        Ok(geom) => header_offset + (geom.metadata_max_size * geom.metadata_slot_count) as usize,
-        Err(_) => 4 * 1024 * 1024,
+        // `metadata_max_size * metadata_slot_count` is u32 * u32 and would
+        // overflow (panic in debug, wrap in release) on a malformed geometry.
+        // Compute in u64 with checked arithmetic and fall back to the default
+        // span when the result is implausible.
+        Ok(geom) => (geom.metadata_max_size as u64)
+            .checked_mul(geom.metadata_slot_count as u64)
+            .and_then(|span| span.checked_add(header_offset as u64))
+            .and_then(|total| usize::try_from(total).ok())
+            .unwrap_or(DEFAULT_METADATA_SPAN),
+        Err(_) => DEFAULT_METADATA_SPAN,
     };
 
     if header_data.len() >= required_bytes {
@@ -159,7 +168,14 @@ fn read_metadata_region(path: &Path) -> Result<Vec<u8>> {
     }
 
     let mut file = File::open(path)?;
-    let mut buf = vec![0u8; required_bytes];
+    // A malformed geometry can yield a `required_bytes` that is huge yet still
+    // fits in `usize` (e.g. multi-GiB). Never allocate more than the file
+    // actually holds, and clamp to a sane upper bound so a corrupt super image
+    // can't drive a giant allocation before the parse fails downstream.
+    const MAX_METADATA_SPAN: usize = 64 * 1024 * 1024;
+    let file_len = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
+    let to_read = required_bytes.min(file_len).min(MAX_METADATA_SPAN);
+    let mut buf = vec![0u8; to_read];
     let n = file.read(&mut buf)?;
     buf.truncate(n);
     Ok(buf)
@@ -498,8 +514,20 @@ pub fn parse_super_layout(
             .parse::<u64>()
             .unwrap_or(LP_SECTOR_SIZE);
 
-        let start_byte = start_sector * sector_size_bytes;
-        let size_bytes = num_sectors * sector_size_bytes;
+        // Sector counts and sizes come from the XML; a hostile or corrupt
+        // catalog must not overflow these u64 products.
+        let start_byte = start_sector.checked_mul(sector_size_bytes).ok_or_else(|| {
+            DynoError::Tool(format!(
+                "super chunk start offset overflow for {}",
+                chunk_path.display()
+            ))
+        })?;
+        let size_bytes = num_sectors.checked_mul(sector_size_bytes).ok_or_else(|| {
+            DynoError::Tool(format!(
+                "super chunk size overflow for {}",
+                chunk_path.display()
+            ))
+        })?;
         let actual_size_bytes = std::fs::metadata(&chunk_path)?.len();
 
         if actual_size_bytes != size_bytes {

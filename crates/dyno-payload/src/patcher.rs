@@ -632,12 +632,31 @@ pub fn apply_partition_payload_with_progress(
     // small SOURCE_COPY / ZERO ops where `data_length` is 0. Hoisting
     // the buffer keeps the capacity high water mark and lets
     // `resize` reuse the existing allocation.
+    let payload_len = payload_file.metadata()?.len();
     let mut blob: Vec<u8> = Vec::new();
     for op in p_manifest.operations.iter() {
-        let data_len = op.data_length.unwrap_or(0) as usize;
+        let data_length = op.data_length.unwrap_or(0);
+        // `data_length` / `data_offset` are manifest-controlled. Validate the
+        // requested byte range against the payload file before allocating so
+        // a malformed manifest cannot drive an OOM allocation or seek past
+        // EOF.
+        let blob_start = data_offset
+            .checked_add(op.data_offset.unwrap_or(0))
+            .ok_or_else(|| DynoError::Tool("Operation data offset overflow".into()))?;
+        let blob_end = blob_start
+            .checked_add(data_length)
+            .ok_or_else(|| DynoError::Tool("Operation data range overflow".into()))?;
+        if blob_end > payload_len {
+            return Err(DynoError::Tool(format!(
+                "Operation data range {blob_start}..{blob_end} exceeds payload length {payload_len}"
+            )));
+        }
+        let data_len = usize::try_from(data_length).map_err(|_| {
+            DynoError::Tool("Operation data length exceeds addressable memory".into())
+        })?;
         blob.resize(data_len, 0);
         if !blob.is_empty() {
-            payload_file.seek(SeekFrom::Start(data_offset + op.data_offset.unwrap_or(0)))?;
+            payload_file.seek(SeekFrom::Start(blob_start))?;
             payload_file.read_exact(&mut blob)?;
         }
 

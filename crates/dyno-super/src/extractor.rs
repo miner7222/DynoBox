@@ -103,18 +103,28 @@ pub fn extract_partition_images_with_progress(
         // Total bytes for this partition = sum of every extent's logical
         // size, regardless of LINEAR vs ZERO. Callers use this to size a
         // determinate progress bar.
+        // Progress estimate only; saturate rather than panic on a malformed
+        // extent so the real copy loop below reaches its own checked guard.
         let total_bytes: u64 = partition
             .extents
             .iter()
-            .map(|extent| extent.num_sectors * LP_SECTOR_SIZE)
-            .sum();
+            .map(|extent| extent.num_sectors.saturating_mul(LP_SECTOR_SIZE))
+            .fold(0u64, |acc, n| acc.saturating_add(n));
         let mut done_bytes: u64 = 0;
         if let Some(cb) = progress.as_deref_mut() {
             cb(&base_name, 0, total_bytes);
         }
 
         for extent in &partition.extents {
-            let extent_size_bytes = extent.num_sectors * LP_SECTOR_SIZE;
+            let extent_size_bytes =
+                extent
+                    .num_sectors
+                    .checked_mul(LP_SECTOR_SIZE)
+                    .ok_or_else(|| {
+                        DynoError::Tool(format!(
+                            "super extent size overflow while extracting {base_name}"
+                        ))
+                    })?;
 
             if extent.target_type == LP_TARGET_TYPE_ZERO {
                 let mut zero_remaining = extent_size_bytes;

@@ -112,7 +112,7 @@ pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
     // ChromeOS/Android Version 2+ logic
     // 4. Metadata Signature Size (4 bytes, Big Endian)
     let mut metadata_signature_size = 0;
-    let manifest_offset = if version >= 2 {
+    let manifest_offset: u64 = if version >= 2 {
         let mut sig_size_bytes = [0u8; 4];
         file.read_exact(&mut sig_size_bytes)?;
         metadata_signature_size = u32::from_be_bytes(sig_size_bytes);
@@ -122,7 +122,22 @@ pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
     };
 
     // 5. Read Manifest
-    let mut manifest_buf = vec![0u8; manifest_size as usize];
+    // `manifest_size` is an attacker/corruption-controlled u64 from the
+    // header. Validate it against the actual file length before allocating
+    // so a malformed payload cannot trigger a multi-GB allocation or
+    // truncate on a 32-bit `usize`.
+    let file_len = file.metadata()?.len();
+    let manifest_end = manifest_offset
+        .checked_add(manifest_size)
+        .ok_or_else(|| DynoError::Tool("Payload manifest offset/size overflow".into()))?;
+    if manifest_end > file_len {
+        return Err(DynoError::Tool(format!(
+            "Payload manifest size {manifest_size} exceeds file length {file_len}"
+        )));
+    }
+    let manifest_size_usize = usize::try_from(manifest_size)
+        .map_err(|_| DynoError::Tool("Payload manifest size exceeds addressable memory".into()))?;
+    let mut manifest_buf = vec![0u8; manifest_size_usize];
     file.read_exact(&mut manifest_buf)?;
 
     use prost::Message;
@@ -192,15 +207,41 @@ pub fn inspect_payload(payload_path: &Path) -> Result<PayloadPreflightReport> {
     let mut operation_counts = BTreeMap::new();
     let mut unsupported_operations = Vec::new();
     let data_offset = metadata.data_offset();
+    let payload_len = payload_file.metadata()?.len();
 
     for partition in &manifest.partitions {
         for (operation_index, operation) in partition.operations.iter().enumerate() {
-            let mut blob = vec![0u8; operation.data_length.unwrap_or(0) as usize];
-            if !blob.is_empty() {
-                payload_file.seek(SeekFrom::Start(
-                    data_offset + operation.data_offset.unwrap_or(0),
-                ))?;
-                payload_file.read_exact(&mut blob)?;
+            // Only PUFFDIFF classification inspects the operation blob; every
+            // other type is decided from `operation.r#type` alone. Skipping the
+            // read for the common case avoids streaming the whole payload data
+            // section during preflight and removes a manifest-controlled
+            // allocation (a malformed `data_length` could otherwise OOM).
+            let needs_blob = matches!(
+                proto::install_operation::Type::try_from(operation.r#type),
+                Ok(proto::install_operation::Type::Puffdiff)
+            );
+            let mut blob = Vec::new();
+            if needs_blob {
+                let data_length = operation.data_length.unwrap_or(0);
+                let blob_start = data_offset
+                    .checked_add(operation.data_offset.unwrap_or(0))
+                    .ok_or_else(|| DynoError::Tool("Operation data offset overflow".into()))?;
+                let blob_end = blob_start
+                    .checked_add(data_length)
+                    .ok_or_else(|| DynoError::Tool("Operation data range overflow".into()))?;
+                if blob_end > payload_len {
+                    return Err(DynoError::Tool(format!(
+                        "Operation data range {blob_start}..{blob_end} exceeds payload length {payload_len}"
+                    )));
+                }
+                let data_len = usize::try_from(data_length).map_err(|_| {
+                    DynoError::Tool("Operation data length exceeds addressable memory".into())
+                })?;
+                blob.resize(data_len, 0);
+                if !blob.is_empty() {
+                    payload_file.seek(SeekFrom::Start(blob_start))?;
+                    payload_file.read_exact(&mut blob)?;
+                }
             }
 
             let support = inspect_operation_support(operation, &blob)?;

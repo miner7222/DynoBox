@@ -143,9 +143,13 @@ pub fn serialize_metadata(layout: &SuperLayout) -> Result<Vec<u8>> {
         // first_logical_sector is the first sector after metadata,
         // aligned up to `alignment` per AOSP lpmake convention.
         let alignment: u64 = 1048576;
-        let metadata_end_bytes = 4096
-            + 4096 * 2
-            + (layout.geometry.metadata_max_size * layout.geometry.metadata_slot_count * 2) as u64;
+        // Widen to u64 before multiplying: `metadata_max_size *
+        // metadata_slot_count * 2` is otherwise a u32 product that can
+        // overflow on an unusual geometry.
+        let metadata_span = (layout.geometry.metadata_max_size as u64)
+            * (layout.geometry.metadata_slot_count as u64)
+            * 2;
+        let metadata_end_bytes = 4096 + 4096 * 2 + metadata_span;
         let aligned_bytes = (metadata_end_bytes + alignment - 1) & !(alignment - 1);
         let first_logical_sector = aligned_bytes / 512;
 

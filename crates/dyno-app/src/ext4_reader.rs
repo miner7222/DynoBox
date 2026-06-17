@@ -463,9 +463,14 @@ impl<R: Read + Seek> Ext4Volume<R> {
             let is_64bit = (superblock.s_feature_incompat & INCOMPAT_64BIT) != 0;
             if !is_64bit {
                 let mut gd_bytes = vec![0u8; std::mem::size_of::<Ext4GroupDescriptor32>()];
-                if stream.read_exact(&mut gd_bytes).is_err() {
-                    break;
-                }
+                stream.read_exact(&mut gd_bytes).map_err(|_| {
+                    Ext4Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "truncated ext4: group descriptor table ended at {i} of {num_groups}"
+                        ),
+                    ))
+                })?;
                 let gd32 =
                     Ext4GroupDescriptor32::try_read_from_bytes(&gd_bytes[..]).map_err(|_| {
                         Ext4Error::Io(std::io::Error::new(
@@ -476,9 +481,14 @@ impl<R: Read + Seek> Ext4Volume<R> {
                 group_descriptors.push(gd32.into());
             } else {
                 let mut gd_bytes = vec![0u8; desc_size as usize];
-                if stream.read_exact(&mut gd_bytes).is_err() {
-                    break;
-                }
+                stream.read_exact(&mut gd_bytes).map_err(|_| {
+                    Ext4Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "truncated ext4: group descriptor table ended at {i} of {num_groups}"
+                        ),
+                    ))
+                })?;
                 let gd = Ext4GroupDescriptor::try_read_from_bytes(&gd_bytes[..]).map_err(|_| {
                     Ext4Error::Io(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
