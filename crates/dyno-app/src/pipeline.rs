@@ -607,14 +607,9 @@ where
         Ok(c) => c,
         Err(_) => return Ok(None),
     };
-    let super_group = match catalog.group_by_base_label(true).remove("super") {
-        Some(g) => g,
-        None => return Ok(None),
-    };
-    let records: Vec<_> = super_group.records().into_iter().cloned().collect();
-    let layout = match dynobox_super::parse_super_layout(&records, input) {
-        Ok(l) => l,
-        Err(_) => return Ok(None),
+    let layout = match load_super_layout(&catalog, input) {
+        Ok(Some(l)) => l,
+        _ => return Ok(None),
     };
     let dynamic_names = layout.dynamic_partition_names();
     if dynamic_names.is_empty() {
@@ -850,13 +845,8 @@ where
     recreate_dir_safe(out_dir, &[input])?;
 
     let catalog = dynobox_xml::XmlCatalog::from_dir(input)?;
-    let super_group = catalog
-        .group_by_base_label(true)
-        .remove("super")
+    let layout = load_super_layout(&catalog, input)?
         .ok_or_else(|| anyhow::anyhow!("Super partition group not found in XML catalog."))?;
-
-    let records: Vec<_> = super_group.records().into_iter().cloned().collect();
-    let layout = dynobox_super::parse_super_layout(&records, input)?;
     message(
         events,
         MessageLevel::Info,
@@ -1020,13 +1010,7 @@ where
     recreate_dir_safe(out_dir, &[input])?;
 
     let catalog = dynobox_xml::XmlCatalog::from_dir(input)?;
-    let super_group = catalog.group_by_base_label(true).remove("super");
-    let super_layout = if let Some(group) = super_group {
-        let records: Vec<_> = group.records().into_iter().cloned().collect();
-        Some(dynobox_super::parse_super_layout(&records, input)?)
-    } else {
-        None
-    };
+    let super_layout = load_super_layout(&catalog, input)?;
 
     let auto_unpack_dir = scratch_dir.join("_auto_unpack_super");
     let mut auto_unpack_announced = false;
@@ -1310,6 +1294,23 @@ fn copy_rawprogram_xml_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<(
         }
     }
     Ok(())
+}
+
+/// Parse the super layout from a catalog's `super` partition group, reading
+/// chunk files from `dir`. Returns `Ok(None)` when the catalog has no
+/// file-bearing `super` group, and `Err` when the group exists but parsing
+/// its layout fails. Centralises the
+/// `group_for("super") -> records -> parse_super_layout` dance repeated
+/// across the unpack / apply / repack / verify stages.
+fn load_super_layout(
+    catalog: &dynobox_xml::XmlCatalog,
+    dir: &Path,
+) -> anyhow::Result<Option<dynobox_super::SuperLayout>> {
+    let Some(group) = catalog.group_for("super") else {
+        return Ok(None);
+    };
+    let records: Vec<_> = group.records().into_iter().cloned().collect();
+    Ok(Some(dynobox_super::parse_super_layout(&records, dir)?))
 }
 
 fn resolve_partition_source_candidates(
@@ -2393,10 +2394,13 @@ where
 
     recreate_dir_safe(out_dir, &[input])?;
     let catalog = dynobox_xml::XmlCatalog::from_dir(input)?;
-    let super_group = catalog
-        .group_by_base_label(true)
-        .remove("super")
-        .ok_or_else(|| anyhow::anyhow!("Super partition group not found in XML catalog."))?;
+    // Validate the super group exists up-front with the historical message;
+    // the layout itself is parsed below after the rawprogram XMLs are staged.
+    if catalog.group_for("super").is_none() {
+        return Err(anyhow::anyhow!(
+            "Super partition group not found in XML catalog."
+        ));
+    }
 
     let mut xml_paths = Vec::new();
     if let Ok(entries) = std::fs::read_dir(input) {
@@ -2413,8 +2417,8 @@ where
         }
     }
 
-    let records: Vec<_> = super_group.records().into_iter().cloned().collect();
-    let source_layout = dynobox_super::parse_super_layout(&records, input)?;
+    let source_layout = load_super_layout(&catalog, input)?
+        .ok_or_else(|| anyhow::anyhow!("Super partition group not found in XML catalog."))?;
     dynobox_super::repack_super_image(&source_layout, input, out_dir, &xml_paths)?;
 
     events.emit(ProgressEvent::StageCompleted {
@@ -2470,27 +2474,24 @@ where
     // Remove standalone dynamic partition images from output — they are now
     // packed inside the super_*.img chunks produced by repack.
     let catalog = dynobox_xml::XmlCatalog::from_dir(&repack_stage_dir)?;
-    if let Some(super_group) = catalog.group_by_base_label(true).remove("super") {
-        let records: Vec<_> = super_group.records().into_iter().cloned().collect();
-        if let Ok(layout) = dynobox_super::parse_super_layout(&records, &repack_stage_dir) {
-            let mut removed = 0usize;
-            for name in layout.dynamic_partition_names() {
-                let img_path = final_output_dir.join(format!("{name}.img"));
-                if img_path.exists() {
-                    std::fs::remove_file(&img_path)?;
-                    removed += 1;
-                }
+    if let Ok(Some(layout)) = load_super_layout(&catalog, &repack_stage_dir) {
+        let mut removed = 0usize;
+        for name in layout.dynamic_partition_names() {
+            let img_path = final_output_dir.join(format!("{name}.img"));
+            if img_path.exists() {
+                std::fs::remove_file(&img_path)?;
+                removed += 1;
             }
-            if removed > 0 {
-                message(
-                    events,
-                    MessageLevel::Info,
-                    format!(
-                        "Cleaned up {} standalone dynamic partition image(s) from output (now inside super).",
-                        removed
-                    ),
-                );
-            }
+        }
+        if removed > 0 {
+            message(
+                events,
+                MessageLevel::Info,
+                format!(
+                    "Cleaned up {} standalone dynamic partition image(s) from output (now inside super).",
+                    removed
+                ),
+            );
         }
     }
 
@@ -2625,29 +2626,21 @@ fn prepare_image_workspace_from_unpack(
     Ok(transfers)
 }
 
-fn copy_top_level_img_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<TransferStats> {
-    workspace_prepare_output_dir(dst_dir)?;
-    let mut transfers = TransferStats::default();
-    for entry in std::fs::read_dir(src_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("img") {
-            let file_name = path.file_name().unwrap();
-            let file_name_str = file_name.to_string_lossy();
-            if !file_name_str.starts_with("super_") {
-                transfers.record(materialize_file_with_fallback(
-                    &path,
-                    &dst_dir.join(file_name),
-                )?);
-            }
-        }
-    }
-    Ok(transfers)
-}
-
-/// Copy ALL top-level files from src_dir to dst_dir, skipping super_*.img chunks
-/// and encrypted .x sources (those are consumed by auto-decrypt).
-fn copy_all_top_level_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<TransferStats> {
+/// Materialize selected top-level files from `src_dir` into `dst_dir`
+/// (hard-link with copy fallback via [`materialize_file_with_fallback`]).
+/// `keep` decides per file whether to include it, receiving the entry path
+/// and its file-name string. When `skip_existing` is set, files already
+/// present in `dst_dir` are left untouched. Subdirectories are always
+/// skipped. Shared by the workspace-prep copy passes below.
+fn materialize_top_level_files<F>(
+    src_dir: &Path,
+    dst_dir: &Path,
+    skip_existing: bool,
+    mut keep: F,
+) -> anyhow::Result<TransferStats>
+where
+    F: FnMut(&Path, &str) -> anyhow::Result<bool>,
+{
     workspace_prepare_output_dir(dst_dir)?;
     let mut transfers = TransferStats::default();
     for entry in std::fs::read_dir(src_dir)? {
@@ -2658,48 +2651,44 @@ fn copy_all_top_level_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<Tr
         }
         let file_name = path.file_name().unwrap();
         let file_name_str = file_name.to_string_lossy();
-        if file_name_str.starts_with("super_") && file_name_str.ends_with(".img") {
-            continue;
-        }
-        if file_name_str.to_ascii_lowercase().ends_with(".x") {
+        if !keep(&path, &file_name_str)? {
             continue;
         }
         let dst = dst_dir.join(file_name);
-        if !dst.exists() {
-            transfers.record(materialize_file_with_fallback(&path, &dst)?);
+        if skip_existing && dst.exists() {
+            continue;
         }
+        transfers.record(materialize_file_with_fallback(&path, &dst)?);
     }
     Ok(transfers)
 }
 
+fn copy_top_level_img_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<TransferStats> {
+    materialize_top_level_files(src_dir, dst_dir, false, |path, name| {
+        Ok(path.extension().and_then(|e| e.to_str()) == Some("img") && !name.starts_with("super_"))
+    })
+}
+
+/// Copy ALL top-level files from src_dir to dst_dir, skipping super_*.img chunks
+/// and encrypted .x sources (those are consumed by auto-decrypt).
+fn copy_all_top_level_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<TransferStats> {
+    materialize_top_level_files(src_dir, dst_dir, true, |_path, name| {
+        let is_super_chunk = name.starts_with("super_") && name.ends_with(".img");
+        let is_encrypted_xml = name.to_ascii_lowercase().ends_with(".x");
+        Ok(!is_super_chunk && !is_encrypted_xml)
+    })
+}
+
 fn copy_avb_top_level_img_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<TransferStats> {
-    workspace_prepare_output_dir(dst_dir)?;
-    let mut transfers = TransferStats::default();
-    for entry in std::fs::read_dir(src_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("img") {
-            continue;
+    materialize_top_level_files(src_dir, dst_dir, false, |path, name| {
+        if path.extension().and_then(|e| e.to_str()) != Some("img") || name.starts_with("super_") {
+            return Ok(false);
         }
-
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default();
-        if file_name.starts_with("super_") {
-            continue;
-        }
-
-        if let Ok(img_type) = avbtool_rs::parser::detect_avb_image_type(&path) {
-            if img_type != avbtool_rs::parser::AvbImageType::None {
-                transfers.record(materialize_file_with_fallback(
-                    &path,
-                    &dst_dir.join(file_name),
-                )?);
-            }
-        }
-    }
-    Ok(transfers)
+        Ok(matches!(
+            avbtool_rs::parser::detect_avb_image_type(path),
+            Ok(img_type) if img_type != avbtool_rs::parser::AvbImageType::None
+        ))
+    })
 }
 
 fn workspace_prepare_output_dir(dir: &Path) -> anyhow::Result<()> {

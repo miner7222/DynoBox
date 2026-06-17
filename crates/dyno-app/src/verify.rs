@@ -109,7 +109,7 @@ pub fn verify_input(input: &Path) -> anyhow::Result<VerificationReport> {
     if report.rawprogram_xml_count > 0 {
         match dynobox_xml::XmlCatalog::from_dir(input) {
             Ok(catalog) => {
-                if let Some(super_group) = catalog.group_by_base_label(true).remove("super") {
+                if let Some(super_group) = catalog.group_for("super") {
                     let records: Vec<_> = super_group.records().into_iter().cloned().collect();
                     match dynobox_super::parse_super_layout(&records, input) {
                         Ok(layout) => {

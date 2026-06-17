@@ -260,6 +260,18 @@ impl XmlCatalog {
         )))
     }
 
+    /// Build the [`PartitionGroup`] for a single base label, with the same
+    /// files-only semantics as `group_by_base_label(true).remove(base_label)`
+    /// but cloning only the matching records instead of every record in the
+    /// catalog. Returns `None` when no record matches or none carry a file.
+    pub fn group_for(&self, base_label: &str) -> Option<PartitionGroup> {
+        let mut group = PartitionGroup::new(base_label.to_string());
+        for record in self.records.iter().filter(|r| r.base_label() == base_label) {
+            group.add(record.clone());
+        }
+        if group.has_files() { Some(group) } else { None }
+    }
+
     pub fn group_by_base_label(&self, with_files_only: bool) -> HashMap<String, PartitionGroup> {
         let mut groups: HashMap<String, PartitionGroup> = HashMap::new();
 
