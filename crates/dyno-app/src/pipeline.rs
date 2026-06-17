@@ -1376,6 +1376,24 @@ fn find_split_source_fragments(
     } else {
         matches.to_vec()
     };
+    // A partition can appear in both the sparse manifest (`rawprogramN.xml`,
+    // which may list a single whole-partition file such as `vm-bootsys.img`)
+    // and the unsparse manifest (`rawprogram_unsparseN.xml`, which lists the
+    // raw `name_1.img..name_N.img` chunks actually present on disk). Blending
+    // the two yields a phantom whole-partition fragment whose file does not
+    // exist, which makes the caller's `all_present` check fail and silently
+    // disables split reconstruction. When unsparse records exist for this
+    // partition, they are the authoritative chunk layout — use them alone.
+    let unsparse: Vec<_> = selected
+        .iter()
+        .copied()
+        .filter(|r| r.source_xml.to_lowercase().contains("unsparse"))
+        .collect();
+    let selected = if !unsparse.is_empty() {
+        unsparse
+    } else {
+        selected
+    };
     let mut parsed: Vec<(String, u64, u64, u64)> = selected
         .into_iter()
         .filter(|r| !r.filename.trim().is_empty())
@@ -3463,6 +3481,57 @@ mod tests {
         let catalog = dynobox_xml::XmlCatalog::from_dir(temp.path()).unwrap();
         let candidates = resolve_partition_source_candidates(&catalog, "qweslicstore");
         assert_eq!(candidates, vec!["qweslicstore.bin"]);
+    }
+
+    #[test]
+    fn find_split_source_fragments_prefers_unsparse_over_whole_partition_record() {
+        // Reproduces the TB320FC `vm-bootsys not found` failure: the sparse
+        // manifest lists a single whole-partition `vm-bootsys.img` (absent on
+        // disk), while the unsparse manifest lists the real chunk files. The
+        // fragment set must come from the unsparse chunks only, otherwise the
+        // phantom whole-partition file breaks the caller's all-present check.
+        let temp = tempdir().unwrap();
+        fs::write(
+            temp.path().join("rawprogram4.xml"),
+            r#"<?xml version="1.0"?>
+<data>
+  <program label="vm-bootsys_a" filename="vm-bootsys.img" physical_partition_number="4" start_sector="140266" num_partition_sectors="67109" SECTOR_SIZE_IN_BYTES="4096" />
+  <program label="vm-bootsys_b" filename="" physical_partition_number="4" start_sector="406355" num_partition_sectors="67109" SECTOR_SIZE_IN_BYTES="4096" />
+</data>"#,
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join("rawprogram_unsparse4.xml"),
+            r#"<?xml version="1.0"?>
+<data>
+  <program label="vm-bootsys_a" filename="vm-bootsys_1.img" physical_partition_number="4" start_sector="140266" num_partition_sectors="29725" SECTOR_SIZE_IN_BYTES="4096" />
+  <program label="vm-bootsys_a" filename="vm-bootsys_2.img" physical_partition_number="4" start_sector="173034" num_partition_sectors="2" SECTOR_SIZE_IN_BYTES="4096" />
+  <program label="vm-bootsys_a" filename="vm-bootsys_3.img" physical_partition_number="4" start_sector="173059" num_partition_sectors="2" SECTOR_SIZE_IN_BYTES="4096" />
+  <program label="vm-bootsys_a" filename="vm-bootsys_4.img" physical_partition_number="4" start_sector="173405" num_partition_sectors="32399" SECTOR_SIZE_IN_BYTES="4096" />
+  <program label="vm-bootsys_a" filename="vm-bootsys_5.img" physical_partition_number="4" start_sector="206148" num_partition_sectors="17" SECTOR_SIZE_IN_BYTES="4096" />
+</data>"#,
+        )
+        .unwrap();
+
+        let catalog = dynobox_xml::XmlCatalog::from_dir(temp.path()).unwrap();
+        let fragments = find_split_source_fragments(&catalog, "vm-bootsys");
+
+        let names: Vec<_> = fragments.iter().map(|f| f.filename.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "vm-bootsys_1.img",
+                "vm-bootsys_2.img",
+                "vm-bootsys_3.img",
+                "vm-bootsys_4.img",
+                "vm-bootsys_5.img",
+            ],
+            "split set must be the unsparse chunks, not the whole-partition file"
+        );
+        // First chunk is the base; offsets are relative to its start_sector.
+        assert_eq!(fragments[0].offset, 0);
+        assert_eq!(fragments[0].size, 29725 * 4096);
+        assert_eq!(fragments[1].offset, (173034 - 140266) * 4096);
     }
 
     fn sample_resign_config() -> ResignConfig {
