@@ -14,6 +14,7 @@ use crate::fuck_lgsi::{
     apply_fuck_lgsi_with_progress,
 };
 use crate::report::{
+    DebloatPartition as ReportDebloatPartition, DebloatRecord as ReportDebloatRecord,
     LgsiChange as ReportLgsiChange, LgsiRecord as ReportLgsiRecord, LgsiSkip as ReportLgsiSkip,
     PipelineReport, RollbackRecord as ReportRollbackRecord,
     SigningKeyChange as ReportSigningKeyChange, SplRecord as ReportSplRecord,
@@ -71,6 +72,16 @@ pub struct ResignConfig {
     /// non-interactive scripted mode reading a pre-edited JSON
     /// ([`FuckLgsiMode::Config`]). No-ops when no edits are made.
     pub fuck_lgsi: Option<FuckLgsiMode>,
+    /// When set, run `--debloat`: scan the unpacked super partitions
+    /// (`system.img`/`product.img`/`vendor.img` …) in the working dir, write
+    /// every path to `<out>/blobs.txt`, create an empty `<out>/debloat.txt`,
+    /// pause for the user to list files/folders to remove, then hide those
+    /// dirents from the ext4 images (no mount), regenerate dm-verity, and
+    /// propagate the new root digests into the owning vbmeta images so the
+    /// resign loop signs over them. Invalid paths are ignored. The mode
+    /// selects interactive (edit `debloat.txt` + Enter) or list-file (read a
+    /// caller-provided path list) removal input.
+    pub debloat: Option<crate::debloat::DebloatMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1556,6 +1567,318 @@ fn trim_trailing_zero_padding(out_path: &Path, input_file: &Path) -> anyhow::Res
 
 const ROLLBACK_TARGETS: &[&str] = &["boot.img", "vbmeta_system.img"];
 
+/// Find the vbmeta image in `out_dir` that carries the Hashtree descriptor
+/// for `partition_name` (e.g. `vbmeta_system.img` for `system`). Returns the
+/// first match. Used to propagate a regenerated verity root digest into the
+/// signed vbmeta the bootloader actually checks.
+fn find_owning_vbmeta(out_dir: &Path, partition_name: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(out_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        let lower = name.to_ascii_lowercase();
+        if !(lower.starts_with("vbmeta") && lower.ends_with(".img")) {
+            continue;
+        }
+        if let Ok(Some(_)) = read_hashtree_params(&path, partition_name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// `--debloat`: scan the unpacked super partitions in `out_dir`, write
+/// `blobs.txt` (every path) and an empty `debloat.txt`, pause for the user to
+/// list files/folders to remove, then hide those dirents from the ext4
+/// images, regenerate dm-verity, and propagate the new root digests into the
+/// owning vbmeta images (added to the resign list). Invalid paths are ignored.
+fn run_debloat<S>(
+    out_dir: &Path,
+    mode: &crate::debloat::DebloatMode,
+    events: &mut S,
+    images: &mut Vec<PathBuf>,
+    local_inode_cache: &mut LocalInodeCache,
+    report: &mut PipelineReport,
+) -> anyhow::Result<()>
+where
+    S: EventSink + ?Sized,
+{
+    use std::io::{IsTerminal, Write};
+
+    // 1. Scan every ext4 partition image in the output dir.
+    let mut blob_lines: Vec<String> = Vec::new();
+    // Names of partitions we actually scanned. Removal-list stems are matched
+    // against this set so a crafted `debloat.txt` line cannot make us open an
+    // image outside `out_dir` (path traversal / absolute stem).
+    let mut scanned_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let entries = std::fs::read_dir(out_dir)
+        .with_context(|| format!("reading {} for debloat scan", out_dir.display()))?;
+    let mut img_paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("img"))
+        .collect();
+    img_paths.sort();
+    for path in &img_paths {
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        match crate::debloat::list_partition_paths(path) {
+            Ok(paths) => {
+                scanned_stems.insert(stem.to_string());
+                for p in paths {
+                    blob_lines.push(format!("{stem}:{p}"));
+                }
+            }
+            // Not a supported ext4 image (boot/vbmeta/erofs/super chunk): skip.
+            Err(_) => continue,
+        }
+    }
+    let scanned = scanned_stems.len();
+
+    if scanned == 0 {
+        message(
+            events,
+            MessageLevel::Warning,
+            "--debloat: no supported ext4 partitions found in output; nothing to do.".to_string(),
+        );
+        return Ok(());
+    }
+
+    // Always write blobs.txt so the user can see what is removable.
+    let blobs_path = out_dir.join("blobs.txt");
+    std::fs::write(&blobs_path, format!("{}\n", blob_lines.join("\n")))
+        .with_context(|| format!("writing {}", blobs_path.display()))?;
+    message(
+        events,
+        MessageLevel::Info,
+        format!(
+            "--debloat: wrote {} ({} path(s) across {} partition(s)).",
+            blobs_path.display(),
+            blob_lines.len(),
+            scanned
+        ),
+    );
+
+    // 2. Resolve the removal list, either from a caller-provided file
+    //    (non-interactive) or by prompting the user to edit debloat.txt.
+    let content = match mode {
+        crate::debloat::DebloatMode::ListFile(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading debloat list file {}", path.display()))?,
+        crate::debloat::DebloatMode::Interactive => {
+            let debloat_path = out_dir.join("debloat.txt");
+            if !debloat_path.exists() {
+                std::fs::write(
+                    &debloat_path,
+                    "# One path per line, format: partition:/absolute/path\n\
+                     # e.g.  system:/system/app/Bloatware\n\
+                     # Lines starting with # are ignored; invalid paths are ignored.\n",
+                )
+                .with_context(|| format!("writing {}", debloat_path.display()))?;
+            }
+            if std::io::stdin().is_terminal() {
+                // Prompt on stderr so it never corrupts a `--progress-format
+                // jsonl` event stream on stdout.
+                eprint!(
+                    "Edit {}, then press Enter to continue (leave empty to skip)... ",
+                    debloat_path.display()
+                );
+                let _ = std::io::stderr().flush();
+                let mut line = String::new();
+                let _ = std::io::stdin().read_line(&mut line);
+            } else {
+                message(
+                    events,
+                    MessageLevel::Info,
+                    "--debloat: stdin is not a terminal; using debloat.txt as-is.".to_string(),
+                );
+            }
+            std::fs::read_to_string(&debloat_path).unwrap_or_default()
+        }
+    };
+
+    // 3. Parse the removal list into partition -> paths.
+    let mut targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((stem, path)) = line.split_once(':') else {
+            message(
+                events,
+                MessageLevel::Warning,
+                format!("--debloat: ignoring malformed line (need partition:/path): {line}"),
+            );
+            continue;
+        };
+        let stem = stem.trim();
+        let path = path.trim();
+        if stem.is_empty() || path.is_empty() {
+            continue;
+        }
+        targets
+            .entry(stem.to_string())
+            .or_default()
+            .push(path.to_string());
+    }
+
+    if targets.is_empty() {
+        message(
+            events,
+            MessageLevel::Info,
+            "--debloat: debloat.txt has no entries; nothing removed.".to_string(),
+        );
+        return Ok(());
+    }
+
+    // 4. Apply hides per partition, then regenerate verity + propagate.
+    let mut records: Vec<ReportDebloatPartition> = Vec::new();
+    for (stem, paths) in targets {
+        // Only operate on partitions we actually scanned in `out_dir`. This
+        // rejects crafted stems (`../input/system`, absolute paths) that would
+        // otherwise make `out_dir.join(..)` escape the output directory.
+        if !scanned_stems.contains(&stem) {
+            message(
+                events,
+                MessageLevel::Warning,
+                format!(
+                    "--debloat: `{stem}` is not a scanned partition in the output; skipping its entries."
+                ),
+            );
+            continue;
+        }
+        let img_name = format!("{stem}.img");
+        let img_path = out_dir.join(&img_name);
+        if !img_path.exists() {
+            message(
+                events,
+                MessageLevel::Warning,
+                format!("--debloat: no such partition image `{img_name}`; skipping its entries."),
+            );
+            continue;
+        }
+        // Break any hard-link to the input before mutating.
+        ensure_images_local(local_inode_cache, out_dir, &[img_name.as_str()])?;
+
+        let mut removed = 0usize;
+        let mut not_found = 0usize;
+        for path in &paths {
+            match crate::debloat::hide_path(&img_path, path)? {
+                crate::debloat::HideOutcome::Removed => removed += 1,
+                crate::debloat::HideOutcome::NotFound => {
+                    not_found += 1;
+                    message(
+                        events,
+                        MessageLevel::Warning,
+                        format!("--debloat: {stem}:{path} not found; ignored."),
+                    );
+                }
+            }
+        }
+        message(
+            events,
+            MessageLevel::Info,
+            format!("--debloat: {stem}: hid {removed} path(s), ignored {not_found}."),
+        );
+        if removed == 0 {
+            continue;
+        }
+
+        // The partition image was mutated. Make sure it re-enters the resign
+        // loop even when an unrelated filter (e.g. --rollback) narrowed the
+        // list, so a signed footer doesn't keep a stale signature.
+        ensure_image_in_resign_list(images, out_dir, &img_name);
+
+        // Regenerate dm-verity for the modified partition and propagate the
+        // new root digest. The Hashtree descriptor may live in the partition's
+        // own AVB footer, or (footerless layouts) only in the owning vbmeta —
+        // check both so a vbmeta-owned partition isn't left with a stale root
+        // digest, which would fail verification. When neither has it, the
+        // partition isn't verity-protected and hiding the dirents suffices.
+        let owning_vbmeta = find_owning_vbmeta(out_dir, &stem);
+        let params_source = match read_hashtree_params(&img_path, &stem).ok().flatten() {
+            Some(params) => Some((params, true)),
+            None => owning_vbmeta
+                .as_ref()
+                .and_then(|vb| read_hashtree_params(vb, &stem).ok().flatten())
+                .map(|params| (params, false)),
+        };
+        match params_source {
+            Some((params, from_footer)) => {
+                let old_digest = crate::avb_descriptor::hex_encode(&params.root_digest);
+                let new_digest = run_with_verity_progress(
+                    events,
+                    &format!("{img_name} verity regen"),
+                    &img_path,
+                    &stem,
+                    |progress| {
+                        crate::avb_descriptor::regenerate_hashtree_with_progress(
+                            &img_path, &params, progress,
+                        )
+                    },
+                )?;
+                // Patch the partition footer only when it actually carries the
+                // descriptor; a footerless partition has nothing to patch here.
+                if from_footer {
+                    crate::avb_descriptor::patch_hashtree_root_digest(
+                        &img_path,
+                        &stem,
+                        &new_digest,
+                    )?;
+                }
+                if let Some(vbmeta) = &owning_vbmeta {
+                    if let Some(vbname) = vbmeta.file_name().and_then(|n| n.to_str()) {
+                        ensure_images_local(local_inode_cache, out_dir, &[vbname])?;
+                        crate::avb_descriptor::patch_hashtree_root_digest(
+                            vbmeta,
+                            &stem,
+                            &new_digest,
+                        )?;
+                        ensure_image_in_resign_list(images, out_dir, vbname);
+                    }
+                }
+                records.push(ReportDebloatPartition {
+                    partition: stem.clone(),
+                    removed,
+                    not_found,
+                    old_root_digest: old_digest,
+                    new_root_digest: crate::avb_descriptor::hex_encode(&new_digest),
+                });
+            }
+            None => {
+                // No AVB footer and no vbmeta descriptor: not verity-protected.
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!("--debloat: {stem} has no verity descriptor; no verity regen needed."),
+                );
+                records.push(ReportDebloatPartition {
+                    partition: stem.clone(),
+                    removed,
+                    not_found,
+                    old_root_digest: String::new(),
+                    new_root_digest: String::new(),
+                });
+            }
+        }
+    }
+
+    if !records.is_empty() {
+        report.debloat = Some(ReportDebloatRecord {
+            partitions: records,
+        });
+    }
+    Ok(())
+}
+
 fn run_resign_stage<S>(
     input: &Path,
     out_dir: &Path,
@@ -1988,6 +2311,17 @@ where
         if fuck_lgsi_applied.is_some() {
             ensure_image_in_resign_list(&mut images, out_dir, "vbmeta_system.img");
         }
+    }
+
+    if let Some(debloat_mode) = config.debloat.as_ref() {
+        run_debloat(
+            out_dir,
+            debloat_mode,
+            events,
+            &mut images,
+            &mut local_inode_cache,
+            &mut report,
+        )?;
     }
 
     let mut boot_spl_applied: Option<(String, String)> = None;
@@ -3606,6 +3940,7 @@ mod tests {
             vendor_spl: None,
             system_spl: None,
             fuck_lgsi: None,
+            debloat: None,
         }
     }
 

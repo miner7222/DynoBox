@@ -566,6 +566,19 @@ impl<R: Read + Seek> Ext4Volume<R> {
     pub fn root(&mut self) -> Result<Inode> {
         self.get_inode(2)
     }
+
+    /// `s_feature_ro_compat` from the superblock (read-only-compat feature
+    /// flags: `metadata_csum` = 0x400, `gdt_csum` = 0x10, etc.).
+    pub fn ro_compat_features(&self) -> u32 {
+        self.superblock.s_feature_ro_compat
+    }
+
+    /// `s_feature_incompat` from the superblock (incompat feature flags:
+    /// `FILETYPE` = 0x2, `EXTENTS` = 0x40, `64BIT` = 0x80,
+    /// `INLINE_DATA` = 0x8000, etc.).
+    pub fn incompat_features(&self) -> u32 {
+        self.superblock.s_feature_incompat
+    }
 }
 
 impl Inode {

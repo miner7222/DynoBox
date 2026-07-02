@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use dynobox_app::debloat::DebloatMode;
 use dynobox_app::events::ProgressUnit;
 use dynobox_app::fuck_lgsi::FuckLgsiMode;
 use dynobox_app::{
@@ -102,6 +103,14 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_system_spl, requires = "resign")]
         system_spl: Option<String>,
 
+        /// Scan unpacked super partitions and write blobs.txt, then hide the
+        /// listed files/folders from the ext4 images (no mount) and re-sign.
+        /// Bare `--debloat` pauses for you to edit `<out>/debloat.txt`; pass a
+        /// path (`--debloat list.txt`) to run non-interactively from that file
+        /// (format: partition:/path). Requires --resign. Invalid paths ignored.
+        #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "", requires = "resign")]
+        debloat: Option<String>,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -181,6 +190,14 @@ enum Commands {
         #[arg(long, value_name = "JSON_PATH", num_args = 0..=1, default_missing_value = "")]
         fuck_lgsi: Option<String>,
 
+        /// Scan unpacked super partitions and write blobs.txt, then hide the
+        /// listed files/folders from the ext4 images (no mount) and re-sign.
+        /// Bare `--debloat` pauses for you to edit `<out>/debloat.txt`; pass a
+        /// path (`--debloat list.txt`) to run non-interactively from that file
+        /// (format: partition:/path). Requires --resign. Invalid paths ignored.
+        #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
+        debloat: Option<String>,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -256,6 +273,14 @@ enum Commands {
         /// are made.
         #[arg(long, value_name = "JSON_PATH", num_args = 0..=1, default_missing_value = "")]
         fuck_lgsi: Option<String>,
+
+        /// Scan unpacked super partitions and write blobs.txt, then hide the
+        /// listed files/folders from the ext4 images (no mount) and re-sign.
+        /// Bare `--debloat` pauses for you to edit `<out>/debloat.txt`; pass a
+        /// path (`--debloat list.txt`) to run non-interactively from that file
+        /// (format: partition:/path). Invalid paths are ignored.
+        #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
+        debloat: Option<String>,
 
         /// Repack dynamic partitions back into super after resign
         #[arg(long)]
@@ -359,6 +384,7 @@ struct ApplyResignOptions<'a> {
     vendor_spl: &'a Option<String>,
     system_spl: &'a Option<String>,
     fuck_lgsi: &'a Option<String>,
+    debloat: bool,
 }
 
 impl ApplyResignOptions<'_> {
@@ -371,6 +397,7 @@ impl ApplyResignOptions<'_> {
             || self.vendor_spl.is_some()
             || self.system_spl.is_some()
             || self.fuck_lgsi.is_some()
+            || self.debloat
     }
 }
 
@@ -427,6 +454,18 @@ fn resolve_fuck_lgsi_mode(fuck_lgsi: Option<String>) -> Option<FuckLgsiMode> {
     }
 }
 
+/// Map the `--debloat` flag to a [`DebloatMode`]:
+/// * `None` — flag absent, no debloat.
+/// * `Some("")` — bare `--debloat`, interactive edit-then-Enter flow.
+/// * `Some(path)` — `--debloat <path>`, non-interactive from that list file.
+fn resolve_debloat_mode(debloat: Option<String>) -> Option<DebloatMode> {
+    match debloat {
+        None => None,
+        Some(s) if s.is_empty() => Some(DebloatMode::Interactive),
+        Some(path) => Some(DebloatMode::ListFile(PathBuf::from(path))),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn make_resign_config(
     key: Option<String>,
@@ -437,6 +476,7 @@ fn make_resign_config(
     vendor_spl: Option<String>,
     system_spl: Option<String>,
     fuck_lgsi: Option<FuckLgsiMode>,
+    debloat: Option<DebloatMode>,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
         key,
@@ -447,6 +487,7 @@ fn make_resign_config(
         vendor_spl,
         system_spl,
         fuck_lgsi,
+        debloat,
     })
 }
 
@@ -708,6 +749,7 @@ where
             boot_spl,
             vendor_spl,
             system_spl,
+            debloat,
             complete,
         } => {
             if resign && key.is_none() {
@@ -728,6 +770,7 @@ where
                     vendor_spl,
                     system_spl,
                     None::<FuckLgsiMode>,
+                    resolve_debloat_mode(debloat),
                 ),
                 repack,
                 complete,
@@ -751,6 +794,7 @@ where
             vendor_spl,
             system_spl,
             fuck_lgsi,
+            debloat,
             complete,
             ota_zips,
         } => {
@@ -773,10 +817,12 @@ where
                 vendor_spl: &vendor_spl,
                 system_spl: &system_spl,
                 fuck_lgsi: &fuck_lgsi,
+                debloat: debloat.is_some(),
             };
             validate_apply_resign_options(resign, &resign_options)?;
 
             let lgsi_mode = resolve_fuck_lgsi_mode(fuck_lgsi);
+            let debloat_mode = resolve_debloat_mode(debloat);
 
             let out_dir = resolve_output_dir(output, default_output_name_for_apply(resign, repack));
             let request = ApplyRequest {
@@ -785,7 +831,15 @@ where
                 ota_zips: real_zips,
                 force_unpack: unpack,
                 resign: make_resign_config(
-                    key, algorithm, force, rollback, boot_spl, vendor_spl, system_spl, lgsi_mode,
+                    key,
+                    algorithm,
+                    force,
+                    rollback,
+                    boot_spl,
+                    vendor_spl,
+                    system_spl,
+                    lgsi_mode,
+                    debloat_mode,
                 ),
                 repack,
                 complete,
@@ -806,6 +860,7 @@ where
             vendor_spl,
             system_spl,
             fuck_lgsi,
+            debloat,
             repack,
         } => {
             let out_dir = resolve_output_dir(output, default_output_name_for_resign(repack));
@@ -822,6 +877,7 @@ where
                     vendor_spl,
                     system_spl,
                     fuck_lgsi: lgsi_mode,
+                    debloat: resolve_debloat_mode(debloat),
                 },
                 repack,
             };
@@ -963,6 +1019,7 @@ mod tests {
             vendor_spl: &None,
             system_spl: &None,
             fuck_lgsi: &None,
+            debloat: false,
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("key without resign should be rejected");
@@ -982,6 +1039,7 @@ mod tests {
             vendor_spl: &None,
             system_spl: &None,
             fuck_lgsi: &None,
+            debloat: false,
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("boot SPL without resign should be rejected");
@@ -1000,6 +1058,7 @@ mod tests {
             vendor_spl: &None,
             system_spl: &None,
             fuck_lgsi: &None,
+            debloat: false,
         };
         let err = validate_apply_resign_options(true, &options)
             .expect_err("resign without key should be rejected");
@@ -1024,6 +1083,7 @@ mod tests {
             vendor_spl: &vendor_spl,
             system_spl: &system_spl,
             fuck_lgsi: &Some(String::new()),
+            debloat: false,
         };
         validate_apply_resign_options(true, &options).expect("resign with key should be accepted");
     }

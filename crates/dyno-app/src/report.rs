@@ -31,6 +31,23 @@ pub struct PipelineReport {
     pub rollback: Option<RollbackRecord>,
     pub lgsi: Option<LgsiRecord>,
     pub signing_key_change: Option<SigningKeyChange>,
+    pub debloat: Option<DebloatRecord>,
+}
+
+/// `--debloat` summary: one row per partition whose ext4 tree had entries
+/// hidden, plus the verity root-digest change.
+#[derive(Debug, Clone)]
+pub struct DebloatRecord {
+    pub partitions: Vec<DebloatPartition>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DebloatPartition {
+    pub partition: String,
+    pub removed: usize,
+    pub not_found: usize,
+    pub old_root_digest: String,
+    pub new_root_digest: String,
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +137,7 @@ impl PipelineReport {
             || self.rollback.is_some()
             || self.lgsi.is_some()
             || self.signing_key_change.is_some()
+            || self.debloat.is_some()
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -160,6 +178,9 @@ impl PipelineReport {
         }
         if let Some(sk) = &self.signing_key_change {
             push_signing_key_section(&mut out, sk);
+        }
+        if let Some(db) = &self.debloat {
+            push_debloat_section(&mut out, db);
         }
         push_resigned_section(&mut out, &self.resigned_images);
 
@@ -360,6 +381,25 @@ fn push_signing_key_section(out: &mut String, sk: &SigningKeyChange) {
         esc(&sk.new_pubkey_sha1)
     ));
     out.push_str("</tr>\n</table>\n");
+}
+
+fn push_debloat_section(out: &mut String, db: &DebloatRecord) {
+    out.push_str("<h2>Debloat (hidden paths)</h2>\n");
+    out.push_str("<p>Selected files/folders were hidden from the partition's ext4 directory tree (dirent removal; blocks are not reclaimed). The dm-verity hash tree was regenerated and the AVB root digest updated.</p>\n");
+    out.push_str("<table>\n<tr><th>Partition</th><th>Hidden</th><th>Ignored (not found)</th><th>verity root (old → new)</th></tr>\n");
+    for p in &db.partitions {
+        out.push_str("<tr>");
+        out.push_str(&format!("<td><code>{}</code></td>", esc(&p.partition)));
+        out.push_str(&format!("<td class='to'>{}</td>", p.removed));
+        out.push_str(&format!("<td class='skipped'>{}</td>", p.not_found));
+        out.push_str(&format!(
+            "<td><span class='from'>{}</span> → <span class='to'>{}</span></td>",
+            esc(&p.old_root_digest[..16.min(p.old_root_digest.len())]),
+            esc(&p.new_root_digest[..16.min(p.new_root_digest.len())])
+        ));
+        out.push_str("</tr>\n");
+    }
+    out.push_str("</table>\n");
 }
 
 fn push_resigned_section(out: &mut String, images: &[String]) {

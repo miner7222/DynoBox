@@ -79,6 +79,8 @@ struct DynoGui {
     system_spl_date: Date,
     fuck_lgsi: bool,
     fuck_lgsi_config: Option<PathBuf>,
+    debloat: bool,
+    debloat_list: Option<PathBuf>,
 
     // Last spawn result, surfaced inline next to the Run button so
     // the user knows whether the terminal launched OK.
@@ -115,6 +117,8 @@ impl Default for DynoGui {
             system_spl_date: today_default,
             fuck_lgsi: false,
             fuck_lgsi_config: None,
+            debloat: false,
+            debloat_list: None,
             last_status: None,
         }
     }
@@ -236,6 +240,16 @@ impl DynoGui {
                 a.push(format!("--fuck-lgsi={}", p.display()));
             } else {
                 a.push("--fuck-lgsi=".into());
+            }
+        }
+        if self.debloat {
+            // Same `num_args = 0..=1` binding rule as `--fuck-lgsi`: attach
+            // the optional list file with `=` so a bare toggle stays
+            // interactive without swallowing the next positional argument.
+            if let Some(p) = &self.debloat_list {
+                a.push(format!("--debloat={}", p.display()));
+            } else {
+                a.push("--debloat=".into());
             }
         }
     }
@@ -509,6 +523,28 @@ impl DynoGui {
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "(interactive — Enter in terminal)".to_string());
                     drag_scroll_path(ui, &text, "fuck-lgsi-config");
+                });
+            });
+
+            ui.checkbox(&mut self.debloat, "--debloat");
+            ui.add_enabled_ui(self.debloat, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("List file:");
+                    if ui.button("📁").clicked()
+                        && let Some(p) = rfd::FileDialog::new()
+                            .add_filter("Text", &["txt"])
+                            .pick_file()
+                    {
+                        self.debloat_list = Some(p);
+                    }
+                    let text = self
+                        .debloat_list
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| {
+                            "(interactive — edit debloat.txt in terminal)".to_string()
+                        });
+                    drag_scroll_path(ui, &text, "debloat-list");
                 });
             });
         });
