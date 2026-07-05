@@ -298,18 +298,26 @@ pub enum SkipReason {
     /// Dex entry's E and F bool tracker came up unknown — couldn't
     /// safely flip a nibble.
     UnknownDexBool,
+    /// The nibble byte-patch could not be computed for this feature
+    /// (e.g. neither tracked register currently holds the requested
+    /// bool, so there is no register number to swap in). The string
+    /// carries the detailed reason from the patch step. The remaining
+    /// features in the same run are still patched — this one is skipped
+    /// with a warning instead of aborting the whole resign stage.
+    Unpatchable(String),
 }
 
-impl SkipReason {
+impl std::fmt::Display for SkipReason {
     /// Human-readable summary of the skip reason. Used by both the
     /// resign-stage `Warning` event emissions and the pipeline
     /// `report.html` LGSI sub-section so the wording stays in sync.
-    pub fn as_str(&self) -> &'static str {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SkipReason::NotInDex => "JSON entry not present in dex",
-            SkipReason::NotInDexFromHtml => "HTML feature missing from dex",
-            SkipReason::NotInHtml => "dex feature missing from HTML",
-            SkipReason::UnknownDexBool => "dex register tracker inconclusive",
+            SkipReason::NotInDex => f.write_str("JSON entry not present in dex"),
+            SkipReason::NotInDexFromHtml => f.write_str("HTML feature missing from dex"),
+            SkipReason::NotInHtml => f.write_str("dex feature missing from HTML"),
+            SkipReason::UnknownDexBool => f.write_str("dex register tracker inconclusive"),
+            SkipReason::Unpatchable(detail) => f.write_str(detail),
         }
     }
 }
@@ -543,6 +551,16 @@ pub fn apply_fuck_lgsi_with_progress(
     }
 
     // 9. Apply per-feature byte patches inside the jar buffer.
+    //
+    //    A feature that cleared phase-1 selection can still fail the
+    //    byte-level nibble computation here — e.g. both tracked registers
+    //    hold the same bool, so neither holds the requested value and
+    //    there is no register number to swap in. When that happens the
+    //    feature is demoted to `skipped` (surfaced as a `Warning`) and the
+    //    loop moves on to the next one, instead of aborting the whole
+    //    resign stage. `patch::apply_change` runs all of its bounds and
+    //    register checks before it writes a byte, so a failed feature
+    //    leaves the dex slice untouched.
     {
         let dex_slice = &mut jar_bytes[dex_data_off..dex_data_end];
         if dex_slice.len() < 0x70 {
@@ -551,11 +569,28 @@ pub fn apply_fuck_lgsi_with_progress(
                 dex_slice.len()
             ));
         }
-        for change in &applied {
+        let pending = std::mem::take(&mut applied);
+        for change in pending {
             let dex_feat = dex_index
                 .get(change.name.as_str())
                 .expect("change.name was sourced from dex_index");
-            patch::apply_change(dex_slice, dex_feat, enabled_nibble, change.to)?;
+            match patch::apply_change(dex_slice, dex_feat, enabled_nibble, change.to) {
+                Ok(()) => applied.push(change),
+                Err(e) => {
+                    // Strip the leading `feature <name>: ` from the patch
+                    // error so the pipeline's `[lgsi] <name>: skipped (…)`
+                    // wrapper doesn't repeat the feature name.
+                    let msg = e.to_string();
+                    let detail = msg
+                        .strip_prefix(&format!("feature {}: ", change.name))
+                        .unwrap_or(&msg)
+                        .to_string();
+                    skipped.push(LgsiFeatureSkip {
+                        name: change.name,
+                        reason: SkipReason::Unpatchable(detail),
+                    });
+                }
+            }
         }
         recompute_dex_header_sums(dex_slice);
     }
@@ -3093,6 +3128,22 @@ mod tests {
         assert_eq!(adler32(b""), 1);
         assert_eq!(adler32(b"abc"), 0x024D0127);
         assert_eq!(adler32(b"Wikipedia"), 0x11E60398);
+    }
+
+    #[test]
+    fn skip_reason_display_wraps_static_and_dynamic() {
+        assert_eq!(
+            SkipReason::NotInDex.to_string(),
+            "JSON entry not present in dex"
+        );
+        // The Unpatchable variant carries the detailed patch-step reason
+        // verbatim so the resign-stage warning and report.html stay
+        // specific about why the feature was left alone.
+        assert_eq!(
+            SkipReason::Unpatchable("no tracked register currently holds true".to_string())
+                .to_string(),
+            "no tracked register currently holds true"
+        );
     }
 
     /// Smoke test against a real TB323 framework.jar if the dump is on

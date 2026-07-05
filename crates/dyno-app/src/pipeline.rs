@@ -2233,7 +2233,7 @@ where
                     message(
                         events,
                         MessageLevel::Warning,
-                        format!("[lgsi] {name}: skipped ({})", reason.as_str()),
+                        format!("[lgsi] {name}: skipped ({reason})"),
                     );
                 }
                 message(
@@ -2258,7 +2258,7 @@ where
                     .iter()
                     .map(|s| ReportLgsiSkip {
                         name: s.name.clone(),
-                        reason: s.reason.as_str().to_string(),
+                        reason: s.reason.to_string(),
                     })
                     .collect();
                 let report_zui_locale =
