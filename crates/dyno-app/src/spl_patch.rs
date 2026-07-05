@@ -67,6 +67,70 @@ pub enum SplOutcome {
     NotFound,
 }
 
+/// Result of the data-only SPL mutation (build.prop byte patch + AVB Property
+/// descriptor date on the partition footer and vbmeta), *before* dm-verity is
+/// regenerated. The verity hash tree + Hashtree `root_digest` are handled
+/// separately (deferred to a single per-partition pass by the resign stage) so
+/// combining several ops on the same partition doesn't re-walk it repeatedly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplMutationOutcome {
+    Patched { old: String, new: String },
+    SkippedNotNewer { old: String, requested: String },
+    NotFound,
+}
+
+/// Apply the SPL change to `image` + `vbmeta_image` **without** regenerating
+/// dm-verity: patch the build.prop date bytes and the AVB Property descriptor
+/// date (both digest-independent and length-stable). The partition's data is
+/// left "dirty"; the caller must regenerate the dm-verity hash tree and
+/// re-stamp the Hashtree `root_digest` afterwards.
+pub fn apply_spl_mutation(
+    spec: &SplPatchSpec,
+    image: &Path,
+    vbmeta_image: &Path,
+    new_spl: &str,
+) -> Result<SplMutationOutcome> {
+    validate_spl_format(spec, new_spl)?;
+
+    let current_avb = match read_avb_property(spec, image)? {
+        Some(value) => value,
+        None => return Ok(SplMutationOutcome::NotFound),
+    };
+    if new_spl <= current_avb.as_str() {
+        return Ok(SplMutationOutcome::SkippedNotNewer {
+            old: current_avb,
+            requested: new_spl.to_string(),
+        });
+    }
+
+    // Validate the Hashtree descriptor is present + well-formed up front so we
+    // fail before touching bytes, matching the old all-in-one path.
+    let hashtree = read_hashtree_params(image, spec.partition_name)?.ok_or_else(|| {
+        anyhow!(
+            "{} has no Hashtree descriptor for partition `{}`",
+            spec.image_label,
+            spec.partition_name
+        )
+    })?;
+    if hashtree.root_digest.len() != SHA256_DIGEST_SIZE {
+        return Err(anyhow!(
+            "{} Hashtree descriptor uses an unexpected root_digest length {} (expected {})",
+            spec.image_label,
+            hashtree.root_digest.len(),
+            SHA256_DIGEST_SIZE
+        ));
+    }
+
+    patch_build_prop_spl_via_ext4(spec, image, new_spl)?;
+    patch_property_or_explain(image, spec.avb_property, new_spl)?;
+    patch_property_or_explain(vbmeta_image, spec.avb_property, new_spl)?;
+
+    Ok(SplMutationOutcome::Patched {
+        old: current_avb,
+        new: new_spl.to_string(),
+    })
+}
+
 /// Validate `spl` is a strict `YYYY-MM-DD` ASCII string. The in-place patch
 /// relies on the new value matching the existing length.
 pub fn validate_spl_format(spec: &SplPatchSpec, spl: &str) -> Result<()> {

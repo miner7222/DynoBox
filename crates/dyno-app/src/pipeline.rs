@@ -20,12 +20,13 @@ use crate::report::{
     SigningKeyChange as ReportSigningKeyChange, SplRecord as ReportSplRecord,
     ZuiSettingsLocalePatch as ReportZuiSettingsLocalePatch, format_unix_to_iso8601_utc,
 };
+use crate::spl_patch::SplMutationOutcome;
 use crate::system_spl::{
-    SYSTEM_SPL_PROPERTY, SystemSplOutcome, apply_system_spl_with_progress,
+    SYSTEM_SPL_PROPERTY, apply_system_spl_mutation,
     validate_spl_format as validate_system_spl_format,
 };
 use crate::vendor_spl::{
-    VENDOR_SPL_PROPERTY, VendorSplOutcome, apply_vendor_spl_with_progress,
+    VENDOR_SPL_PROPERTY, apply_vendor_spl_mutation,
     validate_spl_format as validate_vendor_spl_format,
 };
 use crate::verify::run_verify_stage;
@@ -1593,6 +1594,86 @@ fn find_owning_vbmeta(out_dir: &Path, partition_name: &str) -> Option<PathBuf> {
     None
 }
 
+/// Regenerate the dm-verity hash tree for one modified partition and propagate
+/// the new root digest wherever the Hashtree descriptor lives — the partition
+/// footer and/or the owning vbmeta — adding both to the resign list. Returns
+/// `(old_hex, new_hex)`, or `None` when the partition carries no Hashtree
+/// descriptor (not verity-protected).
+///
+/// Called once per dirty partition after all mutating ops (SPL / fuck-lgsi /
+/// debloat) have run, so a partition touched by several ops is walked a single
+/// time instead of once per op.
+fn finalize_partition_verity<S>(
+    events: &mut S,
+    out_dir: &Path,
+    partition_name: &str,
+    image_path: &Path,
+    local_inode_cache: &mut LocalInodeCache,
+    images: &mut Vec<PathBuf>,
+) -> anyhow::Result<Option<(String, String)>>
+where
+    S: EventSink + ?Sized,
+{
+    let img_label = image_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(partition_name)
+        .to_string();
+    let owning_vbmeta = find_owning_vbmeta(out_dir, partition_name);
+    // Descriptor source: the partition's own footer, or (footerless layouts)
+    // the owning vbmeta.
+    let params_source = match read_hashtree_params(image_path, partition_name)
+        .ok()
+        .flatten()
+    {
+        Some(params) => Some((params, true)),
+        None => owning_vbmeta
+            .as_ref()
+            .and_then(|vb| read_hashtree_params(vb, partition_name).ok().flatten())
+            .map(|params| (params, false)),
+    };
+    let Some((params, from_footer)) = params_source else {
+        return Ok(None);
+    };
+
+    let old_hex = crate::avb_descriptor::hex_encode(&params.root_digest);
+    let new_digest = run_with_verity_progress(
+        events,
+        &format!("{img_label} verity regen"),
+        image_path,
+        partition_name,
+        |progress| {
+            crate::avb_descriptor::regenerate_hashtree_with_progress(image_path, &params, progress)
+        },
+    )?;
+    if from_footer {
+        // The partition footer descriptor is patched in place. These footers
+        // are algorithm NONE (no signature over the descriptor), so they need
+        // no resign — and adding them to the resign list would be wrong when
+        // `--rollback` narrowed it, since the rollback override would be
+        // applied to (and post-checked against) an unsigned image.
+        crate::avb_descriptor::patch_hashtree_root_digest(image_path, partition_name, &new_digest)?;
+    }
+    if let Some(vbmeta) = &owning_vbmeta {
+        if let Some(vbname) = vbmeta.file_name().and_then(|n| n.to_str()) {
+            ensure_images_local(local_inode_cache, out_dir, &[vbname])?;
+            crate::avb_descriptor::patch_hashtree_root_digest(vbmeta, partition_name, &new_digest)?;
+            ensure_image_in_resign_list(images, out_dir, vbname);
+        }
+    }
+    let new_hex = crate::avb_descriptor::hex_encode(&new_digest);
+    message(
+        events,
+        MessageLevel::Info,
+        format!(
+            "{img_label} dm-verity root digest {} -> {}",
+            &old_hex[..16.min(old_hex.len())],
+            &new_hex[..16.min(new_hex.len())]
+        ),
+    );
+    Ok(Some((old_hex, new_hex)))
+}
+
 /// `--debloat`: scan the unpacked super partitions in `out_dir`, write
 /// `blobs.txt` (every path) and an empty `debloat.txt`, pause for the user to
 /// list files/folders to remove, then hide those dirents from the ext4
@@ -1602,8 +1683,8 @@ fn run_debloat<S>(
     out_dir: &Path,
     mode: &crate::debloat::DebloatMode,
     events: &mut S,
-    images: &mut Vec<PathBuf>,
     local_inode_cache: &mut LocalInodeCache,
+    dirty_partitions: &mut BTreeMap<String, PathBuf>,
     report: &mut PipelineReport,
 ) -> anyhow::Result<()>
 where
@@ -1792,83 +1873,19 @@ where
             continue;
         }
 
-        // The partition image was mutated. Make sure it re-enters the resign
-        // loop even when an unrelated filter (e.g. --rollback) narrowed the
-        // list, so a signed footer doesn't keep a stale signature.
-        ensure_image_in_resign_list(images, out_dir, &img_name);
-
-        // Regenerate dm-verity for the modified partition and propagate the
-        // new root digest. The Hashtree descriptor may live in the partition's
-        // own AVB footer, or (footerless layouts) only in the owning vbmeta —
-        // check both so a vbmeta-owned partition isn't left with a stale root
-        // digest, which would fail verification. When neither has it, the
-        // partition isn't verity-protected and hiding the dirents suffices.
-        let owning_vbmeta = find_owning_vbmeta(out_dir, &stem);
-        let params_source = match read_hashtree_params(&img_path, &stem).ok().flatten() {
-            Some(params) => Some((params, true)),
-            None => owning_vbmeta
-                .as_ref()
-                .and_then(|vb| read_hashtree_params(vb, &stem).ok().flatten())
-                .map(|params| (params, false)),
-        };
-        match params_source {
-            Some((params, from_footer)) => {
-                let old_digest = crate::avb_descriptor::hex_encode(&params.root_digest);
-                let new_digest = run_with_verity_progress(
-                    events,
-                    &format!("{img_name} verity regen"),
-                    &img_path,
-                    &stem,
-                    |progress| {
-                        crate::avb_descriptor::regenerate_hashtree_with_progress(
-                            &img_path, &params, progress,
-                        )
-                    },
-                )?;
-                // Patch the partition footer only when it actually carries the
-                // descriptor; a footerless partition has nothing to patch here.
-                if from_footer {
-                    crate::avb_descriptor::patch_hashtree_root_digest(
-                        &img_path,
-                        &stem,
-                        &new_digest,
-                    )?;
-                }
-                if let Some(vbmeta) = &owning_vbmeta {
-                    if let Some(vbname) = vbmeta.file_name().and_then(|n| n.to_str()) {
-                        ensure_images_local(local_inode_cache, out_dir, &[vbname])?;
-                        crate::avb_descriptor::patch_hashtree_root_digest(
-                            vbmeta,
-                            &stem,
-                            &new_digest,
-                        )?;
-                        ensure_image_in_resign_list(images, out_dir, vbname);
-                    }
-                }
-                records.push(ReportDebloatPartition {
-                    partition: stem.clone(),
-                    removed,
-                    not_found,
-                    old_root_digest: old_digest,
-                    new_root_digest: crate::avb_descriptor::hex_encode(&new_digest),
-                });
-            }
-            None => {
-                // No AVB footer and no vbmeta descriptor: not verity-protected.
-                message(
-                    events,
-                    MessageLevel::Info,
-                    format!("--debloat: {stem} has no verity descriptor; no verity regen needed."),
-                );
-                records.push(ReportDebloatPartition {
-                    partition: stem.clone(),
-                    removed,
-                    not_found,
-                    old_root_digest: String::new(),
-                    new_root_digest: String::new(),
-                });
-            }
-        }
+        // The partition image was mutated: mark it dirty so the resign stage
+        // regenerates its dm-verity hash tree once (coalesced with any other
+        // op that touched the same partition). Report digests are back-filled
+        // after that single regen. Empty digests here mean "not verity
+        // protected"; the deferred pass leaves them empty if so.
+        dirty_partitions.insert(stem.clone(), img_path.clone());
+        records.push(ReportDebloatPartition {
+            partition: stem.clone(),
+            removed,
+            not_found,
+            old_root_digest: String::new(),
+            new_root_digest: String::new(),
+        });
     }
 
     if !records.is_empty() {
@@ -2008,7 +2025,13 @@ where
 
     let mut local_inode_cache = LocalInodeCache::default();
 
-    let mut vendor_spl_applied: Option<(String, String, String)> = None;
+    // Partitions whose ext4 data was mutated by SPL / fuck-lgsi / debloat.
+    // dm-verity is regenerated for each exactly once, after all mutating ops,
+    // instead of once per op — see the deferred pass below. Maps the AVB
+    // partition name (e.g. "system") to its image path in `out_dir`.
+    let mut dirty_partitions: BTreeMap<String, PathBuf> = BTreeMap::new();
+
+    let mut vendor_spl_applied: Option<(String, String)> = None;
     if let Some(new_spl) = config.vendor_spl.as_deref() {
         require_images_exist("--vendor-spl", out_dir, &["vendor.img", "vbmeta.img"])?;
         ensure_images_local(
@@ -2018,32 +2041,15 @@ where
         )?;
         let vendor_path = out_dir.join("vendor.img");
         let vbmeta_path = out_dir.join("vbmeta.img");
-        let outcome = run_with_verity_progress(
-            events,
-            "vendor.img verity regen",
-            &vendor_path,
-            "vendor",
-            |progress| {
-                apply_vendor_spl_with_progress(&vendor_path, &vbmeta_path, new_spl, progress)
-            },
-        )?;
-        match outcome {
-            VendorSplOutcome::Patched {
-                old,
-                new,
-                old_root_digest,
-                new_root_digest,
-            } => {
+        // Data-only bump; dm-verity is regenerated later by the deferred pass.
+        match apply_vendor_spl_mutation(&vendor_path, &vbmeta_path, new_spl)? {
+            SplMutationOutcome::Patched { old, new } => {
                 message(
                     events,
                     MessageLevel::Info,
                     format!(
-                        "vendor.img {} bumped from {} to {} (build.prop + AVB property + dm-verity root digest {} -> {})",
-                        VENDOR_SPL_PROPERTY,
-                        old,
-                        new,
-                        &old_root_digest[..16.min(old_root_digest.len())],
-                        &new_root_digest[..16.min(new_root_digest.len())]
+                        "vendor.img {} bumped from {} to {} (build.prop + AVB property; verity deferred)",
+                        VENDOR_SPL_PROPERTY, old, new
                     ),
                 );
                 report.vendor_spl = Some(ReportSplRecord {
@@ -2053,9 +2059,10 @@ where
                     applied: true,
                     reason: String::new(),
                 });
-                vendor_spl_applied = Some((old, new, new_root_digest));
+                vendor_spl_applied = Some((old, new));
+                dirty_partitions.insert("vendor".to_string(), vendor_path);
             }
-            VendorSplOutcome::SkippedNotNewer { old, requested } => {
+            SplMutationOutcome::SkippedNotNewer { old, requested } => {
                 message(
                     events,
                     MessageLevel::Warning,
@@ -2072,14 +2079,14 @@ where
                     reason: format!("requested {requested} is not newer than current {old}"),
                 });
             }
-            VendorSplOutcome::NotFound => {
+            SplMutationOutcome::NotFound => {
                 return Err(anyhow::anyhow!(
                     "vendor.img has no {} property descriptor; cannot apply --vendor-spl",
                     VENDOR_SPL_PROPERTY
                 ));
             }
         }
-        // The vbmeta.img patch above leaves a stale signature behind; make
+        // The vbmeta.img property patch leaves a stale signature behind; make
         // sure the resign loop will pick it up below even if a future caller
         // tries to combine --vendor-spl with another filter.
         if vendor_spl_applied.is_some() {
@@ -2088,12 +2095,11 @@ where
     }
 
     // --system-spl mirrors --vendor-spl on system.img + vbmeta_system.img.
-    // It runs before the --fuck-lgsi block (which also mutates system.img):
-    // each feature re-walks the entire image to regenerate dm-verity, so
-    // when both flags are set fuck-lgsi's later verity pass folds in this
-    // build.prop edit and re-stamps the hashtree root digest, while the SPL
-    // property written here is left untouched and survives to the resign.
-    let mut system_spl_applied: Option<(String, String, String)> = None;
+    // It, --fuck-lgsi, and --debloat can all mutate system.img; each only
+    // patches data here and marks the partition dirty, so the deferred pass
+    // below regenerates system.img's dm-verity exactly once for the combined
+    // edits instead of re-walking the image per flag.
+    let mut system_spl_applied: Option<(String, String)> = None;
     if let Some(new_spl) = config.system_spl.as_deref() {
         require_images_exist(
             "--system-spl",
@@ -2107,32 +2113,14 @@ where
         )?;
         let system_path = out_dir.join("system.img");
         let vbmeta_system_path = out_dir.join("vbmeta_system.img");
-        let outcome = run_with_verity_progress(
-            events,
-            "system.img verity regen",
-            &system_path,
-            "system",
-            |progress| {
-                apply_system_spl_with_progress(&system_path, &vbmeta_system_path, new_spl, progress)
-            },
-        )?;
-        match outcome {
-            SystemSplOutcome::Patched {
-                old,
-                new,
-                old_root_digest,
-                new_root_digest,
-            } => {
+        match apply_system_spl_mutation(&system_path, &vbmeta_system_path, new_spl)? {
+            SplMutationOutcome::Patched { old, new } => {
                 message(
                     events,
                     MessageLevel::Info,
                     format!(
-                        "system.img {} bumped from {} to {} (build.prop + AVB property + dm-verity root digest {} -> {})",
-                        SYSTEM_SPL_PROPERTY,
-                        old,
-                        new,
-                        &old_root_digest[..16.min(old_root_digest.len())],
-                        &new_root_digest[..16.min(new_root_digest.len())]
+                        "system.img {} bumped from {} to {} (build.prop + AVB property; verity deferred)",
+                        SYSTEM_SPL_PROPERTY, old, new
                     ),
                 );
                 report.system_spl = Some(ReportSplRecord {
@@ -2142,9 +2130,10 @@ where
                     applied: true,
                     reason: String::new(),
                 });
-                system_spl_applied = Some((old, new, new_root_digest));
+                system_spl_applied = Some((old, new));
+                dirty_partitions.insert("system".to_string(), system_path);
             }
-            SystemSplOutcome::SkippedNotNewer { old, requested } => {
+            SplMutationOutcome::SkippedNotNewer { old, requested } => {
                 message(
                     events,
                     MessageLevel::Warning,
@@ -2161,14 +2150,14 @@ where
                     reason: format!("requested {requested} is not newer than current {old}"),
                 });
             }
-            SystemSplOutcome::NotFound => {
+            SplMutationOutcome::NotFound => {
                 return Err(anyhow::anyhow!(
                     "system.img has no {} property descriptor; cannot apply --system-spl",
                     SYSTEM_SPL_PROPERTY
                 ));
             }
         }
-        // The vbmeta_system.img patch above leaves a stale signature behind;
+        // The vbmeta_system.img property patch leaves a stale signature behind;
         // make sure the resign loop will pick it up below even if a future
         // caller tries to combine --system-spl with another filter.
         if system_spl_applied.is_some() {
@@ -2198,13 +2187,10 @@ where
             workspace_dir: out_dir,
             mode: lgsi_mode.clone(),
         };
-        let outcome = run_with_verity_progress(
-            events,
-            "system.img verity regen",
-            &system_path,
-            "system",
-            |progress| apply_fuck_lgsi_with_progress(&lgsi_input, progress),
-        )?;
+        // Defer dm-verity regen: the mutation (framework.jar / ZuiSettings
+        // patches) runs here, but system.img's hash tree is rebuilt once by
+        // the deferred pass so it folds in any --system-spl / --debloat edits.
+        let outcome = apply_fuck_lgsi_with_progress(&lgsi_input, true, None)?;
         match outcome {
             FuckLgsiOutcome::Patched {
                 applied,
@@ -2240,10 +2226,8 @@ where
                     events,
                     MessageLevel::Info,
                     format!(
-                        "system.img LGSI patch applied: {} feature(s) flipped; verity root {} -> {}",
+                        "system.img LGSI patch applied: {} feature(s) flipped (verity deferred)",
                         applied.len(),
-                        &old_root_digest[..16.min(old_root_digest.len())],
-                        &new_root_digest[..16.min(new_root_digest.len())]
                     ),
                 );
                 let report_applied: Vec<ReportLgsiChange> = applied
@@ -2288,11 +2272,14 @@ where
                 report.lgsi = Some(ReportLgsiRecord {
                     applied: report_applied,
                     skipped: report_skipped,
+                    // `new_root_digest` is empty here (verity deferred); the
+                    // deferred pass back-fills it after the single regen.
                     old_root_digest: old_root_digest.clone(),
                     new_root_digest: new_root_digest.clone(),
                     zui_settings_locale_patch: report_zui_locale,
                 });
                 fuck_lgsi_applied = Some((old_root_digest, new_root_digest));
+                dirty_partitions.insert("system".to_string(), system_path.clone());
             }
             FuckLgsiOutcome::NotApplicable { reason } => {
                 message(
@@ -2318,10 +2305,42 @@ where
             out_dir,
             debloat_mode,
             events,
-            &mut images,
             &mut local_inode_cache,
+            &mut dirty_partitions,
             &mut report,
         )?;
+    }
+
+    // Deferred dm-verity: regenerate each mutated partition's hash tree exactly
+    // once (coalescing --system-spl / --fuck-lgsi / --debloat that touched the
+    // same partition), propagate the new root digest to the footer + owning
+    // vbmeta, and back-fill the report entries that record a verity change.
+    for (partition, image_path) in &dirty_partitions {
+        let Some((old_hex, new_hex)) = finalize_partition_verity(
+            events,
+            out_dir,
+            partition,
+            image_path,
+            &mut local_inode_cache,
+            &mut images,
+        )?
+        else {
+            continue;
+        };
+        if partition == "system" {
+            if let Some(lgsi) = report.lgsi.as_mut() {
+                lgsi.old_root_digest = old_hex.clone();
+                lgsi.new_root_digest = new_hex.clone();
+            }
+        }
+        if let Some(debloat) = report.debloat.as_mut() {
+            for p in debloat.partitions.iter_mut() {
+                if p.partition == *partition {
+                    p.old_root_digest = old_hex.clone();
+                    p.new_root_digest = new_hex.clone();
+                }
+            }
+        }
     }
 
     let mut boot_spl_applied: Option<(String, String)> = None;
@@ -2485,7 +2504,7 @@ where
             }
         }
 
-        if let Some((_, ref expected_spl, _)) = vendor_spl_applied {
+        if let Some((_, ref expected_spl)) = vendor_spl_applied {
             if filename == "vbmeta.img" {
                 let actual = crate::vendor_spl::read_vendor_avb_property(&out_path)
                     .with_context(|| format!("Failed to re-read vendor SPL from {}", filename))?;
@@ -2504,7 +2523,7 @@ where
             }
         }
 
-        if let Some((_, ref expected_spl, _)) = system_spl_applied {
+        if let Some((_, ref expected_spl)) = system_spl_applied {
             if filename == "vbmeta_system.img" {
                 let actual = crate::system_spl::read_system_avb_property(&out_path)
                     .with_context(|| format!("Failed to re-read system SPL from {}", filename))?;

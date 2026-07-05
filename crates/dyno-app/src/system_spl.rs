@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use crate::avb_descriptor::VerityProgressCallback;
-use crate::spl_patch::{self, SplOutcome, SplPatchSpec};
+use crate::spl_patch::{self, SplMutationOutcome, SplOutcome, SplPatchSpec};
 use anyhow::Result;
 
 pub const SYSTEM_SPL_PROPERTY: &str = "com.android.build.system.security_patch";
@@ -60,6 +60,17 @@ pub fn apply_system_spl_with_progress(
         new_spl,
         verity_progress,
     )
+}
+
+/// Data-only `--system-spl` (build.prop + AVB property date), leaving the
+/// dm-verity regeneration to the caller's deferred single-pass. See
+/// [`spl_patch::apply_spl_mutation`].
+pub fn apply_system_spl_mutation(
+    system_image: &Path,
+    vbmeta_system_image: &Path,
+    new_spl: &str,
+) -> Result<SplMutationOutcome> {
+    spl_patch::apply_spl_mutation(&SYSTEM_SPEC, system_image, vbmeta_system_image, new_spl)
 }
 
 /// Read the current `com.android.build.system.security_patch` from

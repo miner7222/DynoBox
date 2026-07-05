@@ -344,7 +344,7 @@ pub struct FuckLgsiInput<'a> {
 /// Equivalent to [`apply_fuck_lgsi_with_progress`] called with
 /// `verity_progress = None`.
 pub fn apply_fuck_lgsi(input: &FuckLgsiInput<'_>) -> Result<FuckLgsiOutcome> {
-    apply_fuck_lgsi_with_progress(input, None)
+    apply_fuck_lgsi_with_progress(input, false, None)
 }
 
 /// Like [`apply_fuck_lgsi`] but invokes `verity_progress` with
@@ -354,6 +354,7 @@ pub fn apply_fuck_lgsi(input: &FuckLgsiInput<'_>) -> Result<FuckLgsiOutcome> {
 /// ~12 GiB system.img is long enough to need a progress bar.
 pub fn apply_fuck_lgsi_with_progress(
     input: &FuckLgsiInput<'_>,
+    defer_verity: bool,
     verity_progress: Option<VerityProgressCallback>,
 ) -> Result<FuckLgsiOutcome> {
     // 1. Read framework.jar (with extents) from system.img.
@@ -622,26 +623,32 @@ pub fn apply_fuck_lgsi_with_progress(
         None
     };
 
-    // 12. Regenerate dm-verity hash tree.
+    // 12. Regenerate dm-verity hash tree — unless the caller defers it. When
+    //     `defer_verity` is set the caller (the resign stage) coalesces the
+    //     verity regen for system.img into a single per-partition pass after
+    //     all system.img-mutating ops have run, avoiding a redundant multi-GiB
+    //     SHA-256 walk when e.g. `--system-spl` also touched the image. In that
+    //     case we still read the *current* (pre-regen) root digest so the
+    //     report can show the before value; the deferred pass fills the after.
     let hashtree = read_hashtree_params(input.system_image, SYSTEM_PARTITION)?
         .ok_or_else(|| anyhow!("system.img has no Hashtree descriptor for `system`"))?;
     let old_root_digest = hashtree.root_digest.clone();
-    let new_root_digest =
-        regenerate_hashtree_with_progress(input.system_image, &hashtree, verity_progress)?;
-    if new_root_digest.len() != SHA256_DIGEST_SIZE {
-        return Err(anyhow!(
-            "Regenerated hash tree returned unexpected root_digest length {}",
-            new_root_digest.len()
-        ));
-    }
-
-    // 13. Patch system.img + vbmeta_system.img Hashtree descriptors.
-    patch_hashtree_root_digest(input.system_image, SYSTEM_PARTITION, &new_root_digest)?;
-    patch_hashtree_root_digest(
-        input.vbmeta_system_image,
-        SYSTEM_PARTITION,
-        &new_root_digest,
-    )?;
+    let new_root_digest = if defer_verity {
+        Vec::new()
+    } else {
+        let digest =
+            regenerate_hashtree_with_progress(input.system_image, &hashtree, verity_progress)?;
+        if digest.len() != SHA256_DIGEST_SIZE {
+            return Err(anyhow!(
+                "Regenerated hash tree returned unexpected root_digest length {}",
+                digest.len()
+            ));
+        }
+        // 13. Patch system.img + vbmeta_system.img Hashtree descriptors.
+        patch_hashtree_root_digest(input.system_image, SYSTEM_PARTITION, &digest)?;
+        patch_hashtree_root_digest(input.vbmeta_system_image, SYSTEM_PARTITION, &digest)?;
+        digest
+    };
 
     // 14. Cleanup workspace files in interactive mode now that the
     //     patch is committed. report.html (written later by the resign

@@ -6,7 +6,7 @@
 use std::path::Path;
 
 use crate::avb_descriptor::VerityProgressCallback;
-use crate::spl_patch::{self, SplOutcome, SplPatchSpec};
+use crate::spl_patch::{self, SplMutationOutcome, SplOutcome, SplPatchSpec};
 use anyhow::Result;
 
 pub const VENDOR_SPL_PROPERTY: &str = "com.android.build.vendor.security_patch";
@@ -56,6 +56,17 @@ pub fn apply_vendor_spl_with_progress(
         new_spl,
         verity_progress,
     )
+}
+
+/// Data-only `--vendor-spl` (build.prop + AVB property date), leaving the
+/// dm-verity regeneration to the caller's deferred single-pass. See
+/// [`spl_patch::apply_spl_mutation`].
+pub fn apply_vendor_spl_mutation(
+    vendor_image: &Path,
+    vbmeta_image: &Path,
+    new_spl: &str,
+) -> Result<SplMutationOutcome> {
+    spl_patch::apply_spl_mutation(&VENDOR_SPEC, vendor_image, vbmeta_image, new_spl)
 }
 
 /// Read the current `com.android.build.vendor.security_patch` from
