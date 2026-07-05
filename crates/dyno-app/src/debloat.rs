@@ -270,7 +270,7 @@ mod tests {
         buf
     }
 
-    fn entry_at<'a>(buf: &'a [u8], off: usize) -> (u32, u16, &'a [u8]) {
+    fn entry_at(buf: &[u8], off: usize) -> (u32, u16, &[u8]) {
         let inode = u32::from_le_bytes([buf[off], buf[off + 1], buf[off + 2], buf[off + 3]]);
         let rec_len = u16::from_le_bytes([buf[off + 4], buf[off + 5]]);
         let name_len = buf[off + 6] as usize;
