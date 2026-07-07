@@ -1111,7 +1111,7 @@ const featureData = [
 // DEX walker
 // ---------------------------------------------------------------------------
 
-mod dex_walker {
+pub(crate) mod dex_walker {
     //! Walk a dex to find `LgsiFeatures.<clinit>`'s `invoke-direct
     //! LgsiFeatureInfo.<init>` sites and snapshot each registration's
     //! E and F nibble registers + their tracked bool values.
@@ -1572,7 +1572,7 @@ mod dex_walker {
         }
     }
 
-    pub(super) fn find_type_idx(
+    pub(crate) fn find_type_idx(
         dex: &[u8],
         string_ids_size: usize,
         string_ids_off: usize,
@@ -1600,7 +1600,7 @@ mod dex_walker {
         Ok(None)
     }
 
-    pub(super) fn find_method_idx(
+    pub(crate) fn find_method_idx(
         dex: &[u8],
         method_ids_size: usize,
         method_ids_off: usize,
@@ -1641,7 +1641,7 @@ mod dex_walker {
     /// no proto matches both the return type and the full params
     /// list. Returns the proto idx on first match.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn find_proto_idx(
+    pub(crate) fn find_proto_idx(
         dex: &[u8],
         string_ids_size: usize,
         string_ids_off: usize,
@@ -1729,7 +1729,7 @@ mod dex_walker {
         Ok(None)
     }
 
-    pub(super) fn find_class_data_off(
+    pub(crate) fn find_class_data_off(
         dex: &[u8],
         class_defs_size: usize,
         class_defs_off: usize,
@@ -1802,7 +1802,7 @@ mod dex_walker {
 
     /// Find the string idx of `needle` in `string_ids`. Strict variant
     /// requires an exact match including length and NUL terminator.
-    pub(super) fn find_string_idx_strict(
+    pub(crate) fn find_string_idx_strict(
         dex: &[u8],
         string_ids_size: usize,
         string_ids_off: usize,
@@ -1844,7 +1844,7 @@ mod dex_walker {
     }
 
     /// Decode the string at the given string idx.
-    pub(super) fn read_string_at_idx(
+    pub(crate) fn read_string_at_idx(
         dex: &[u8],
         string_ids_size: usize,
         string_ids_off: usize,
@@ -1887,7 +1887,7 @@ mod dex_walker {
         }
     }
 
-    pub(super) fn read_uleb128(dex: &[u8], p: &mut usize) -> Result<u64> {
+    pub(crate) fn read_uleb128(dex: &[u8], p: &mut usize) -> Result<u64> {
         let mut result: u64 = 0;
         let mut shift = 0u32;
         loop {
@@ -2694,23 +2694,23 @@ const ZIP_FLAG_DATA_DESCRIPTOR: u16 = 0x0008;
 const ZIP64_SENTINEL_U32: u32 = 0xFFFFFFFF;
 
 #[derive(Debug, Clone)]
-struct ZipEntry {
-    name: String,
-    data_start: usize,
-    compressed_size: usize,
-    local_header_crc_offset: usize,
-    cd_crc_offset: usize,
-    compression_method: u16,
-    uses_data_descriptor: bool,
-    is_zip64: bool,
+pub(crate) struct ZipEntry {
+    pub(crate) name: String,
+    pub(crate) data_start: usize,
+    pub(crate) compressed_size: usize,
+    pub(crate) local_header_crc_offset: usize,
+    pub(crate) cd_crc_offset: usize,
+    pub(crate) compression_method: u16,
+    pub(crate) uses_data_descriptor: bool,
+    pub(crate) is_zip64: bool,
 }
 
 #[derive(Debug, Clone)]
-struct ZipLayout {
-    entries: Vec<ZipEntry>,
+pub(crate) struct ZipLayout {
+    pub(crate) entries: Vec<ZipEntry>,
 }
 
-fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
+pub(crate) fn parse_zip_central_directory(bytes: &[u8]) -> Result<ZipLayout> {
     let eocd_off = find_eocd(bytes)?;
     if bytes.len() < eocd_off + 22 {
         return Err(anyhow!("framework.jar truncated at EOCD"));
@@ -2938,7 +2938,7 @@ fn build_dex_string_with_uleb_prefix(needle: &str) -> Vec<u8> {
 // Dex header recomputation (carryover)
 // ---------------------------------------------------------------------------
 
-fn recompute_dex_header_sums(dex: &mut [u8]) {
+pub(crate) fn recompute_dex_header_sums(dex: &mut [u8]) {
     let sig = sha1_digest(&dex[32..]);
     dex[12..32].copy_from_slice(&sig);
     let cksum = adler32(&dex[12..]);
@@ -3091,7 +3091,7 @@ static CRC32_TABLE: std::sync::LazyLock<[u32; 256]> = std::sync::LazyLock::new(|
     table
 });
 
-fn crc32_ieee(data: &[u8]) -> u32 {
+pub(crate) fn crc32_ieee(data: &[u8]) -> u32 {
     let table = &*CRC32_TABLE;
     let mut crc = 0xFFFFFFFFu32;
     for &b in data {
@@ -3104,11 +3104,11 @@ fn crc32_ieee(data: &[u8]) -> u32 {
 // Misc helpers (carryover)
 // ---------------------------------------------------------------------------
 
-fn read_u16_le(bytes: &[u8], off: usize) -> u16 {
+pub(crate) fn read_u16_le(bytes: &[u8], off: usize) -> u16 {
     u16::from_le_bytes(bytes[off..off + 2].try_into().unwrap())
 }
 
-fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
+pub(crate) fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
     u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap())
 }
 
@@ -3118,7 +3118,7 @@ fn checked_range_end(start: usize, len: usize, label: &str) -> Result<usize> {
         .ok_or_else(|| anyhow!("{label} offset overflow"))
 }
 
-fn write_u32_le(bytes: &mut [u8], off: usize, value: u32) {
+pub(crate) fn write_u32_le(bytes: &mut [u8], off: usize, value: u32) {
     bytes[off..off + 4].copy_from_slice(&value.to_le_bytes());
 }
 

@@ -81,6 +81,7 @@ struct DynoGui {
     fuck_lgsi_config: Option<PathBuf>,
     debloat: bool,
     debloat_list: Option<PathBuf>,
+    clean_launcher: bool,
 
     // Last spawn result, surfaced inline next to the Run button so
     // the user knows whether the terminal launched OK.
@@ -119,6 +120,7 @@ impl Default for DynoGui {
             fuck_lgsi_config: None,
             debloat: false,
             debloat_list: None,
+            clean_launcher: false,
             last_status: None,
         }
     }
@@ -251,6 +253,9 @@ impl DynoGui {
             } else {
                 a.push("--debloat=".into());
             }
+        }
+        if self.clean_launcher {
+            a.push("--clean-launcher".into());
         }
     }
 
@@ -547,6 +552,12 @@ impl DynoGui {
                     drag_scroll_path(ui, &text, "debloat-list");
                 });
             });
+
+            ui.checkbox(&mut self.clean_launcher, "--clean-launcher")
+                .on_hover_text(
+                    "Patch ZuiLauncher.apk: home slide-up global search → ROW branch; \
+                     no recommended widgets/apps added on first launch.",
+                );
         });
     }
 

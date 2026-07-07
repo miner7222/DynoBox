@@ -8,17 +8,19 @@ use crate::avb_descriptor::read_hashtree_params;
 use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
 };
+use crate::clean_launcher::{CleanLauncherOutcome, apply_clean_launcher};
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
 use crate::fuck_lgsi::{
     FuckLgsiInput, FuckLgsiMode, FuckLgsiOutcome, LgsiFeatureChange, LgsiFeatureSkip,
     apply_fuck_lgsi_with_progress,
 };
 use crate::report::{
-    DebloatPartition as ReportDebloatPartition, DebloatRecord as ReportDebloatRecord,
-    LgsiChange as ReportLgsiChange, LgsiRecord as ReportLgsiRecord, LgsiSkip as ReportLgsiSkip,
-    PipelineReport, RollbackRecord as ReportRollbackRecord,
-    SigningKeyChange as ReportSigningKeyChange, SplRecord as ReportSplRecord,
-    ZuiSettingsLocalePatch as ReportZuiSettingsLocalePatch, format_unix_to_iso8601_utc,
+    CleanLauncherRecord as ReportCleanLauncherRecord, DebloatPartition as ReportDebloatPartition,
+    DebloatRecord as ReportDebloatRecord, LgsiChange as ReportLgsiChange,
+    LgsiRecord as ReportLgsiRecord, LgsiSkip as ReportLgsiSkip, PipelineReport,
+    RollbackRecord as ReportRollbackRecord, SigningKeyChange as ReportSigningKeyChange,
+    SplRecord as ReportSplRecord, ZuiSettingsLocalePatch as ReportZuiSettingsLocalePatch,
+    format_unix_to_iso8601_utc,
 };
 use crate::spl_patch::SplMutationOutcome;
 use crate::system_spl::{
@@ -83,6 +85,15 @@ pub struct ResignConfig {
     /// selects interactive (edit `debloat.txt` + Enter) or list-file (read a
     /// caller-provided path list) removal input.
     pub debloat: Option<crate::debloat::DebloatMode>,
+    /// When set, run `--clean-launcher`: patch
+    /// `system.img/system/priv-app/ZuiLauncher/ZuiLauncher.apk` in place so
+    /// the home slide-up global search always takes the ROW branch, and the
+    /// first-run recommended widgets / recommended apps are not added.
+    /// Regenerates system.img dm-verity and propagates the new root digest
+    /// into vbmeta_system.img so the resign loop signs over the patched
+    /// bytes. No-ops (warn-only) when ZuiLauncher.apk or the target classes
+    /// aren't present.
+    pub clean_launcher: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2311,6 +2322,57 @@ where
         )?;
     }
 
+    // --clean-launcher: patch ZuiLauncher.apk inside system.img (home
+    // slide-up search → ROW; recommended widgets + apps off on first
+    // launch). Mutation-only here; system.img dm-verity is regenerated once
+    // by the deferred pass below (coalesced with any --system-spl /
+    // --fuck-lgsi / --debloat system.img edits).
+    if config.clean_launcher {
+        require_images_exist(
+            "--clean-launcher",
+            out_dir,
+            &["system.img", "vbmeta_system.img"],
+        )?;
+        ensure_images_local(
+            &mut local_inode_cache,
+            out_dir,
+            &["system.img", "vbmeta_system.img"],
+        )?;
+        let system_path = out_dir.join("system.img");
+        match apply_clean_launcher(&system_path)? {
+            CleanLauncherOutcome::Patched(patch) => {
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!(
+                        "[clean-launcher] ZuiLauncher.apk patched: isZuiRow() → true ({} method(s)), \
+                         isIsShowPrcGlobalSearch() → false ({} method(s)) \
+                         [slide-up search → ROW, recommended widgets/apps off] (verity deferred)",
+                        patch.row_methods_forced, patch.prc_methods_forced,
+                    ),
+                );
+                report.clean_launcher = Some(ReportCleanLauncherRecord {
+                    row_methods_forced: patch.row_methods_forced,
+                    prc_methods_forced: patch.prc_methods_forced,
+                    dex_entries: patch.patched_dex_entries,
+                    // Back-filled by the deferred verity pass below.
+                    old_root_digest: String::new(),
+                    new_root_digest: String::new(),
+                });
+                dirty_partitions.insert("system".to_string(), system_path);
+            }
+            CleanLauncherOutcome::NotApplicable { reason } => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    format!(
+                        "--clean-launcher skipped: {reason}; system.img and vbmeta_system.img left untouched"
+                    ),
+                );
+            }
+        }
+    }
+
     // Deferred dm-verity: regenerate each mutated partition's hash tree exactly
     // once (coalescing --system-spl / --fuck-lgsi / --debloat that touched the
     // same partition), propagate the new root digest to the footer + owning
@@ -2331,6 +2393,10 @@ where
             if let Some(lgsi) = report.lgsi.as_mut() {
                 lgsi.old_root_digest = old_hex.clone();
                 lgsi.new_root_digest = new_hex.clone();
+            }
+            if let Some(cl) = report.clean_launcher.as_mut() {
+                cl.old_root_digest = old_hex.clone();
+                cl.new_root_digest = new_hex.clone();
             }
         }
         if let Some(debloat) = report.debloat.as_mut() {
@@ -3960,6 +4026,7 @@ mod tests {
             system_spl: None,
             fuck_lgsi: None,
             debloat: None,
+            clean_launcher: false,
         }
     }
 

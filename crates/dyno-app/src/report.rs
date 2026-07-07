@@ -32,6 +32,21 @@ pub struct PipelineReport {
     pub lgsi: Option<LgsiRecord>,
     pub signing_key_change: Option<SigningKeyChange>,
     pub debloat: Option<DebloatRecord>,
+    pub clean_launcher: Option<CleanLauncherRecord>,
+}
+
+/// `--clean-launcher` summary: the ZuiLauncher.apk region-predicate patches
+/// plus the system.img verity root-digest change.
+#[derive(Debug, Clone)]
+pub struct CleanLauncherRecord {
+    /// `isZuiRow()` method bodies forced to `true`.
+    pub row_methods_forced: usize,
+    /// PRC predicate (`isIsShowPrcGlobalSearch`) bodies forced to `false`.
+    pub prc_methods_forced: usize,
+    /// `classes*.dex` entries inside ZuiLauncher.apk that were patched.
+    pub dex_entries: Vec<String>,
+    pub old_root_digest: String,
+    pub new_root_digest: String,
 }
 
 /// `--debloat` summary: one row per partition whose ext4 tree had entries
@@ -138,6 +153,7 @@ impl PipelineReport {
             || self.lgsi.is_some()
             || self.signing_key_change.is_some()
             || self.debloat.is_some()
+            || self.clean_launcher.is_some()
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -181,6 +197,9 @@ impl PipelineReport {
         }
         if let Some(db) = &self.debloat {
             push_debloat_section(&mut out, db);
+        }
+        if let Some(cl) = &self.clean_launcher {
+            push_clean_launcher_section(&mut out, cl);
         }
         push_resigned_section(&mut out, &self.resigned_images);
 
@@ -400,6 +419,53 @@ fn push_debloat_section(out: &mut String, db: &DebloatRecord) {
         out.push_str("</tr>\n");
     }
     out.push_str("</table>\n");
+}
+
+fn push_clean_launcher_section(out: &mut String, cl: &CleanLauncherRecord) {
+    out.push_str("<h2>Clean launcher (ZuiLauncher.apk)</h2>\n");
+    out.push_str("<p>ZuiLauncher's region predicates were forced to their ROW form via in-place dex patches, so the home slide-up global search takes the ROW branch and no recommended widgets/apps are surfaced on first launch. The dm-verity hash tree was regenerated and the AVB root digest updated.</p>\n");
+    out.push_str("<table>\n<tr><th>Predicate</th><th>Forced to</th><th>Result</th></tr>\n");
+    out.push_str(&format!(
+        "<tr><td><code>isZuiRow()</code></td><td class='to'>true</td><td class='{}'>{}</td></tr>\n",
+        if cl.row_methods_forced > 0 {
+            "applied"
+        } else {
+            "not-applied"
+        },
+        if cl.row_methods_forced > 0 {
+            format!("{} method(s)", cl.row_methods_forced)
+        } else {
+            "not found".to_string()
+        }
+    ));
+    out.push_str(&format!(
+        "<tr><td><code>isIsShowPrcGlobalSearch()</code></td><td class='from'>false</td><td class='{}'>{}</td></tr>\n",
+        if cl.prc_methods_forced > 0 {
+            "applied"
+        } else {
+            "not-applied"
+        },
+        if cl.prc_methods_forced > 0 {
+            format!("{} method(s)", cl.prc_methods_forced)
+        } else {
+            "not found".to_string()
+        }
+    ));
+    out.push_str("</table>\n");
+    let dex_list = if cl.dex_entries.is_empty() {
+        "(none)".to_string()
+    } else {
+        cl.dex_entries.join(", ")
+    };
+    out.push_str(&format!(
+        "<p class='mono'>patched dex: {}</p>\n",
+        esc(&dex_list)
+    ));
+    out.push_str(&format!(
+        "<p class='mono'>verity root_digest: <span class='from'>{}</span> &rarr; <span class='to'>{}</span></p>\n",
+        esc(&cl.old_root_digest[..16.min(cl.old_root_digest.len())]),
+        esc(&cl.new_root_digest[..16.min(cl.new_root_digest.len())])
+    ));
 }
 
 fn push_resigned_section(out: &mut String, images: &[String]) {
