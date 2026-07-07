@@ -353,9 +353,17 @@ fn setup_logging() {
     // `DYNOBOX_GUI=1` marker so plain text comes through whenever a
     // non-tty front-end is consuming the stream.
     let plain = std::env::var_os("NO_COLOR").is_some() || std::env::var_os("DYNOBOX_GUI").is_some();
+    // Concise, uniform line style for every log line: `<LEVEL> <message>`.
+    // The module target (`dynobox_cli:`) and per-line timestamp are dropped —
+    // they add width without value for an interactive one-shot CLI, and
+    // long-running work already surfaces elapsed time via the indicatif
+    // progress spinner.
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::INFO)
         .with_ansi(!plain)
+        .with_target(false)
+        .without_time()
+        .compact()
         .finish();
     // `set_global_default` returns `SetGlobalDefaultError` when the
     // subscriber is already installed. The CLI binary calls
@@ -560,15 +568,18 @@ fn log_event(event: ProgressEvent) {
             input,
             output,
         } => {
-            info!("{} command initiated.", command_name(command));
-            info!("Input directory: {}", input.display());
-            info!("Output directory: {}", output.display());
+            info!(
+                "{}: {} -> {}",
+                command_name(command),
+                input.display(),
+                output.display()
+            );
         }
         ProgressEvent::StageStarted { stage } => {
-            info!("Starting {} stage...", stage_name(stage));
+            info!("{}: start", stage_name(stage));
         }
         ProgressEvent::StageCompleted { stage } => {
-            info!("Completed {} stage.", stage_name(stage));
+            info!("{}: done", stage_name(stage));
         }
         ProgressEvent::ItemStarted {
             stage,
@@ -576,7 +587,7 @@ fn log_event(event: ProgressEvent) {
             total,
             item,
         } => {
-            info!("{} {}/{}: {}", stage_name(stage), current, total, item);
+            info!("{} [{}/{}] {}", stage_name(stage), current, total, item);
         }
         // ItemProgress is consumed by the indicatif renderer in
         // `build_text_sink`; in the bare `log_event` path used by tests and
@@ -932,8 +943,7 @@ where
             output,
         } => {
             if cli.progress_format == ProgressFormat::Text {
-                info!("Info command initiated.");
-                info!("Input path: {}", input.display());
+                info!("info: {}", input.display());
             }
 
             let report = match format {
@@ -952,7 +962,7 @@ where
                 let mut file = std::fs::File::create(&output_path)?;
                 file.write_all(report.as_bytes())?;
                 if cli.progress_format == ProgressFormat::Text {
-                    info!("AVB info report saved to {}", output_path.display());
+                    info!("saved: {}", output_path.display());
                 }
             } else {
                 print!("{report}");
@@ -965,8 +975,7 @@ where
             output,
         } => {
             if cli.progress_format == ProgressFormat::Text {
-                info!("Verify command initiated.");
-                info!("Input path: {}", input.display());
+                info!("verify: {}", input.display());
             }
 
             let report = verify_input(&input)?;
@@ -983,7 +992,7 @@ where
                 let mut file = std::fs::File::create(&output_path)?;
                 file.write_all(rendered.as_bytes())?;
                 if cli.progress_format == ProgressFormat::Text {
-                    info!("Verification report saved to {}", output_path.display());
+                    info!("saved: {}", output_path.display());
                 }
             } else {
                 print!("{rendered}");
