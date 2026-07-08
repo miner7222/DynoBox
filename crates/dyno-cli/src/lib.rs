@@ -111,11 +111,11 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "", requires = "resign")]
         debloat: Option<String>,
 
-        /// Patch ZuiLauncher.apk so the home slide-up global search always
-        /// takes the ROW branch and no recommended widgets/apps are added on
-        /// first launch. Requires --resign.
-        #[arg(long, requires = "resign")]
-        clean_launcher: bool,
+        /// Apply an external `.dbp` patch to APKs inside the partition images
+        /// during resign. Repeat the flag to apply several patches
+        /// (`--plus a.dbp --plus b.dbp`). Requires --resign.
+        #[arg(long, value_name = "DBP", requires = "resign")]
+        plus: Vec<PathBuf>,
 
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
@@ -204,11 +204,11 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
-        /// Patch ZuiLauncher.apk so the home slide-up global search always
-        /// takes the ROW branch and no recommended widgets/apps are added on
-        /// first launch. Requires `resign` or `--resign`.
-        #[arg(long)]
-        clean_launcher: bool,
+        /// Apply an external `.dbp` patch to APKs inside the partition images
+        /// during resign. Repeat the flag to apply several patches
+        /// (`--plus a.dbp --plus b.dbp`). Requires `resign` or `--resign`.
+        #[arg(long, value_name = "DBP")]
+        plus: Vec<PathBuf>,
 
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
@@ -294,11 +294,11 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
-        /// Patch ZuiLauncher.apk so the home slide-up global search always
-        /// takes the ROW branch and no recommended widgets/apps are added on
-        /// first launch.
-        #[arg(long)]
-        clean_launcher: bool,
+        /// Apply an external `.dbp` patch to APKs inside the partition images.
+        /// Repeat the flag to apply several patches
+        /// (`--plus a.dbp --plus b.dbp`).
+        #[arg(long, value_name = "DBP")]
+        plus: Vec<PathBuf>,
 
         /// Repack dynamic partitions back into super after resign
         #[arg(long)]
@@ -411,7 +411,7 @@ struct ApplyResignOptions<'a> {
     system_spl: &'a Option<String>,
     fuck_lgsi: &'a Option<String>,
     debloat: bool,
-    clean_launcher: bool,
+    plus: &'a [PathBuf],
 }
 
 impl ApplyResignOptions<'_> {
@@ -425,7 +425,7 @@ impl ApplyResignOptions<'_> {
             || self.system_spl.is_some()
             || self.fuck_lgsi.is_some()
             || self.debloat
-            || self.clean_launcher
+            || !self.plus.is_empty()
     }
 }
 
@@ -505,7 +505,7 @@ fn make_resign_config(
     system_spl: Option<String>,
     fuck_lgsi: Option<FuckLgsiMode>,
     debloat: Option<DebloatMode>,
-    clean_launcher: bool,
+    plus: Vec<PathBuf>,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
         key,
@@ -517,7 +517,7 @@ fn make_resign_config(
         system_spl,
         fuck_lgsi,
         debloat,
-        clean_launcher,
+        plus,
     })
 }
 
@@ -783,7 +783,7 @@ where
             vendor_spl,
             system_spl,
             debloat,
-            clean_launcher,
+            plus,
             complete,
         } => {
             if resign && key.is_none() {
@@ -805,7 +805,7 @@ where
                     system_spl,
                     None::<FuckLgsiMode>,
                     resolve_debloat_mode(debloat),
-                    clean_launcher,
+                    plus,
                 ),
                 repack,
                 complete,
@@ -830,7 +830,7 @@ where
             system_spl,
             fuck_lgsi,
             debloat,
-            clean_launcher,
+            plus,
             complete,
             ota_zips,
         } => {
@@ -854,7 +854,7 @@ where
                 system_spl: &system_spl,
                 fuck_lgsi: &fuck_lgsi,
                 debloat: debloat.is_some(),
-                clean_launcher,
+                plus: &plus,
             };
             validate_apply_resign_options(resign, &resign_options)?;
 
@@ -877,7 +877,7 @@ where
                     system_spl,
                     lgsi_mode,
                     debloat_mode,
-                    clean_launcher,
+                    plus,
                 ),
                 repack,
                 complete,
@@ -899,7 +899,7 @@ where
             system_spl,
             fuck_lgsi,
             debloat,
-            clean_launcher,
+            plus,
             repack,
         } => {
             let out_dir = resolve_output_dir(output, default_output_name_for_resign(repack));
@@ -917,7 +917,7 @@ where
                     system_spl,
                     fuck_lgsi: lgsi_mode,
                     debloat: resolve_debloat_mode(debloat),
-                    clean_launcher,
+                    plus,
                 },
                 repack,
             };
@@ -1058,7 +1058,7 @@ mod tests {
             system_spl: &None,
             fuck_lgsi: &None,
             debloat: false,
-            clean_launcher: false,
+            plus: &[],
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("key without resign should be rejected");
@@ -1079,7 +1079,7 @@ mod tests {
             system_spl: &None,
             fuck_lgsi: &None,
             debloat: false,
-            clean_launcher: false,
+            plus: &[],
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("boot SPL without resign should be rejected");
@@ -1099,7 +1099,7 @@ mod tests {
             system_spl: &None,
             fuck_lgsi: &None,
             debloat: false,
-            clean_launcher: false,
+            plus: &[],
         };
         let err = validate_apply_resign_options(true, &options)
             .expect_err("resign without key should be rejected");
@@ -1125,7 +1125,7 @@ mod tests {
             system_spl: &system_spl,
             fuck_lgsi: &Some(String::new()),
             debloat: false,
-            clean_launcher: false,
+            plus: &[],
         };
         validate_apply_resign_options(true, &options).expect("resign with key should be accepted");
     }

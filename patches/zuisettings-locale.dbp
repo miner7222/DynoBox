@@ -1,0 +1,215 @@
+# zuisettings-locale.dbp - make ZuiSettings behave like a ROW build.
+#
+# The PRC build gates the language picker and the "Regional preferences"
+# category on LenovoUtils.isPrcVersion()/isRowVersion(). This rewrites those
+# invoke-static results inside the affected classes so the ROW UI path is
+# taken: full language picker (Add language, Edit menu, drag-reorder, Terms of
+# Address) plus the previously-hidden Regional preferences category (Region
+# picker, Temperature unit, Measurement system, First day of week).
+#
+# Formerly fired automatically when --fuck-lgsi flipped ZuiAntiCrossSell
+# true->false; now an independent patch. Apply with:
+#   dynobox resign ... --plus patches/zuisettings-locale.dbp
+
+name = "zuisettings-locale"
+description = "PRC ZuiSettings language picker + Regional preferences -> ROW."
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleListEditor;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleListEditor;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleListEditor$7;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleListEditor$7;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleDragAndDropAdapter;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleDragAndDropAdapter;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleDragCell;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleDragCell;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+scan_method = "getChangedName"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+scan_method = "getChangedName"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionalPreferencesCategoryController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionalPreferencesCategoryController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionalPreferencesController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionalPreferencesController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionPickerFragment$1;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionPickerFragment$1;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/TemperatureUnitFragment$2;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/TemperatureUnitFragment$2;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/MeasurementSystemItemFragment$2;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/MeasurementSystemItemFragment$2;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/FirstDayOfWeekItemFragment$2;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/FirstDayOfWeekItemFragment$2;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true

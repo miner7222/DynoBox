@@ -81,7 +81,7 @@ struct DynoGui {
     fuck_lgsi_config: Option<PathBuf>,
     debloat: bool,
     debloat_list: Option<PathBuf>,
-    clean_launcher: bool,
+    plus_patches: Vec<PathBuf>,
 
     // Last spawn result, surfaced inline next to the Run button so
     // the user knows whether the terminal launched OK.
@@ -120,7 +120,7 @@ impl Default for DynoGui {
             fuck_lgsi_config: None,
             debloat: false,
             debloat_list: None,
-            clean_launcher: false,
+            plus_patches: Vec::new(),
             last_status: None,
         }
     }
@@ -254,8 +254,8 @@ impl DynoGui {
                 a.push("--debloat=".into());
             }
         }
-        if self.clean_launcher {
-            a.push("--clean-launcher".into());
+        for patch in &self.plus_patches {
+            a.push(format!("--plus={}", patch.display()));
         }
     }
 
@@ -553,11 +553,32 @@ impl DynoGui {
                 });
             });
 
-            ui.checkbox(&mut self.clean_launcher, "--clean-launcher")
-                .on_hover_text(
-                    "Patch ZuiLauncher.apk: home slide-up global search → ROW branch; \
-                     no recommended widgets/apps added on first launch.",
-                );
+            ui.horizontal(|ui| {
+                if ui.button("➕ Add .dbp").clicked() {
+                    if let Some(paths) = rfd::FileDialog::new()
+                        .add_filter("DynoBox patch", &["dbp"])
+                        .pick_files()
+                    {
+                        for p in paths {
+                            if !self.plus_patches.contains(&p) {
+                                self.plus_patches.push(p);
+                            }
+                        }
+                    }
+                }
+                if !self.plus_patches.is_empty() && ui.button("Clear").clicked() {
+                    self.plus_patches.clear();
+                }
+                ui.label(format!("--plus ({} patch(es))", self.plus_patches.len()))
+                    .on_hover_text(
+                        "External .dbp patches applied to APKs inside the partition \
+                         images during resign.",
+                    );
+            });
+            for (i, p) in self.plus_patches.iter().enumerate() {
+                let text = p.display().to_string();
+                drag_scroll_path(ui, &text, &format!("plus-dbp-{i}"));
+            }
         });
     }
 

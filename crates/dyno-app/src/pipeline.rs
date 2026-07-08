@@ -8,19 +8,18 @@ use crate::avb_descriptor::read_hashtree_params;
 use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, patch_security_patch, validate_spl_format,
 };
-use crate::clean_launcher::{CleanLauncherOutcome, apply_clean_launcher};
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
 use crate::fuck_lgsi::{
     FuckLgsiInput, FuckLgsiMode, FuckLgsiOutcome, LgsiFeatureChange, LgsiFeatureSkip,
     apply_fuck_lgsi_with_progress,
 };
 use crate::report::{
-    CleanLauncherRecord as ReportCleanLauncherRecord, DebloatPartition as ReportDebloatPartition,
-    DebloatRecord as ReportDebloatRecord, LgsiChange as ReportLgsiChange,
-    LgsiRecord as ReportLgsiRecord, LgsiSkip as ReportLgsiSkip, PipelineReport,
+    DebloatPartition as ReportDebloatPartition, DebloatRecord as ReportDebloatRecord,
+    LgsiChange as ReportLgsiChange, LgsiRecord as ReportLgsiRecord, LgsiSkip as ReportLgsiSkip,
+    PipelineReport, PlusFileRecord as ReportPlusFileRecord,
+    PlusPatchRecord as ReportPlusPatchRecord, PlusRecord as ReportPlusRecord,
     RollbackRecord as ReportRollbackRecord, SigningKeyChange as ReportSigningKeyChange,
-    SplRecord as ReportSplRecord, ZuiSettingsLocalePatch as ReportZuiSettingsLocalePatch,
-    format_unix_to_iso8601_utc,
+    SplRecord as ReportSplRecord, format_unix_to_iso8601_utc,
 };
 use crate::spl_patch::SplMutationOutcome;
 use crate::system_spl::{
@@ -85,15 +84,13 @@ pub struct ResignConfig {
     /// selects interactive (edit `debloat.txt` + Enter) or list-file (read a
     /// caller-provided path list) removal input.
     pub debloat: Option<crate::debloat::DebloatMode>,
-    /// When set, run `--clean-launcher`: patch
-    /// `system.img/system/priv-app/ZuiLauncher/ZuiLauncher.apk` in place so
-    /// the home slide-up global search always takes the ROW branch, and the
-    /// first-run recommended widgets / recommended apps are not added.
-    /// Regenerates system.img dm-verity and propagates the new root digest
-    /// into vbmeta_system.img so the resign loop signs over the patched
-    /// bytes. No-ops (warn-only) when ZuiLauncher.apk or the target classes
-    /// aren't present.
-    pub clean_launcher: bool,
+    /// Paths to external `.dbp` (DynoBox Patch) files applied via `--plus`.
+    /// Each is a TOML document of size-preserving dex ops targeting APKs
+    /// inside the partition images (see [`crate::dbp`]). Every partition an
+    /// op touches has its dm-verity regenerated once by the deferred pass and
+    /// the new root digest propagated into the owning vbmeta so the resign
+    /// loop signs over the patched bytes.
+    pub plus: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2208,7 +2205,6 @@ where
                 skipped,
                 old_root_digest,
                 new_root_digest,
-                zui_settings_locale_patch,
             } => {
                 for change in &applied {
                     let LgsiFeatureChange {
@@ -2256,30 +2252,6 @@ where
                         reason: s.reason.to_string(),
                     })
                     .collect();
-                let report_zui_locale =
-                    zui_settings_locale_patch
-                        .as_ref()
-                        .map(|p| ReportZuiSettingsLocalePatch {
-                            dex_entries: p.dex_entries.clone(),
-                            is_prc_sites_patched: p.is_prc_sites_patched,
-                            is_row_sites_patched: p.is_row_sites_patched,
-                            invoke_offsets_in_apk: p.invoke_offsets_in_apk.clone(),
-                        });
-                if let Some(p) = &zui_settings_locale_patch {
-                    let dex_list = if p.dex_entries.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        p.dex_entries.join(", ")
-                    };
-                    message(
-                        events,
-                        MessageLevel::Info,
-                        format!(
-                            "[lgsi] ZuiAntiCrossSell flip → ZuiSettings.apk PRC→ROW patch: {} isPrcVersion site(s) → false, {} isRowVersion site(s) → true; dex(es): {dex_list}",
-                            p.is_prc_sites_patched, p.is_row_sites_patched,
-                        ),
-                    );
-                }
                 report.lgsi = Some(ReportLgsiRecord {
                     applied: report_applied,
                     skipped: report_skipped,
@@ -2287,7 +2259,6 @@ where
                     // deferred pass back-fills it after the single regen.
                     old_root_digest: old_root_digest.clone(),
                     new_root_digest: new_root_digest.clone(),
-                    zui_settings_locale_patch: report_zui_locale,
                 });
                 fuck_lgsi_applied = Some((old_root_digest, new_root_digest));
                 dirty_partitions.insert("system".to_string(), system_path.clone());
@@ -2322,54 +2293,93 @@ where
         )?;
     }
 
-    // --clean-launcher: patch ZuiLauncher.apk inside system.img (home
-    // slide-up search → ROW; recommended widgets + apps off on first
-    // launch). Mutation-only here; system.img dm-verity is regenerated once
-    // by the deferred pass below (coalesced with any --system-spl /
-    // --fuck-lgsi / --debloat system.img edits).
-    if config.clean_launcher {
-        require_images_exist(
-            "--clean-launcher",
-            out_dir,
-            &["system.img", "vbmeta_system.img"],
-        )?;
-        ensure_images_local(
-            &mut local_inode_cache,
-            out_dir,
-            &["system.img", "vbmeta_system.img"],
-        )?;
-        let system_path = out_dir.join("system.img");
-        match apply_clean_launcher(&system_path)? {
-            CleanLauncherOutcome::Patched(patch) => {
-                message(
-                    events,
-                    MessageLevel::Info,
-                    format!(
-                        "[clean-launcher] ZuiLauncher.apk patched: isZuiRow() → true ({} method(s)), \
-                         isIsShowPrcGlobalSearch() → false ({} method(s)) \
-                         [slide-up search → ROW, recommended widgets/apps off] (verity deferred)",
-                        patch.row_methods_forced, patch.prc_methods_forced,
-                    ),
-                );
-                report.clean_launcher = Some(ReportCleanLauncherRecord {
-                    row_methods_forced: patch.row_methods_forced,
-                    prc_methods_forced: patch.prc_methods_forced,
-                    dex_entries: patch.patched_dex_entries,
-                    // Back-filled by the deferred verity pass below.
-                    old_root_digest: String::new(),
-                    new_root_digest: String::new(),
-                });
-                dirty_partitions.insert("system".to_string(), system_path);
+    // --plus: apply external `.dbp` patches to APKs inside the partition
+    // images. Mutation-only here; each touched partition's dm-verity is
+    // regenerated once by the deferred pass below (coalesced with any
+    // --system-spl / --fuck-lgsi / --debloat edits) and its owning vbmeta
+    // re-signed by the resign loop.
+    if !config.plus.is_empty() {
+        // Parse every .dbp up front so a malformed patch fails fast before
+        // any image is touched.
+        let mut docs: Vec<(String, crate::dbp::DbpDocument)> =
+            Vec::with_capacity(config.plus.len());
+        for path in &config.plus {
+            let doc = crate::dbp::load_dbp(path)?;
+            let source = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("(unnamed)")
+                .to_string();
+            docs.push((source, doc));
+        }
+
+        let mut plus_patches: Vec<ReportPlusPatchRecord> = Vec::new();
+        for (source, doc) in &docs {
+            let mut file_records: Vec<ReportPlusFileRecord> = Vec::new();
+            for partition in crate::dbp::referenced_partitions([doc]) {
+                let img_name = format!("{partition}.img");
+                if !out_dir.join(&img_name).exists() {
+                    message(
+                        events,
+                        MessageLevel::Warning,
+                        format!(
+                            "--plus {source}: partition image {img_name} not found under {}; skipping its ops",
+                            out_dir.display()
+                        ),
+                    );
+                    continue;
+                }
+                ensure_images_local(&mut local_inode_cache, out_dir, &[&img_name])?;
+                let img_path = out_dir.join(&img_name);
+                let results = crate::dbp::apply_partition_ops(
+                    &img_path,
+                    &partition,
+                    std::slice::from_ref(doc),
+                )?;
+                if results.is_empty() {
+                    continue;
+                }
+                for r in results {
+                    message(
+                        events,
+                        MessageLevel::Info,
+                        format!(
+                            "[plus] {source} → {partition}:{}: {} op(s) applied, {} skipped (verity deferred)",
+                            r.file, r.ops_applied, r.ops_skipped
+                        ),
+                    );
+                    file_records.push(ReportPlusFileRecord {
+                        partition: partition.clone(),
+                        file: r.file,
+                        ops_applied: r.ops_applied,
+                        ops_skipped: r.ops_skipped,
+                        dex_entries: r.dex_entries,
+                    });
+                }
+                dirty_partitions.insert(partition.clone(), img_path);
             }
-            CleanLauncherOutcome::NotApplicable { reason } => {
+            if file_records.is_empty() {
                 message(
                     events,
                     MessageLevel::Warning,
                     format!(
-                        "--clean-launcher skipped: {reason}; system.img and vbmeta_system.img left untouched"
+                        "--plus {source}: patch `{}` matched no target files; images left untouched",
+                        doc.name
                     ),
                 );
             }
+            plus_patches.push(ReportPlusPatchRecord {
+                name: doc.name.clone(),
+                source: source.clone(),
+                files: file_records,
+            });
+        }
+        if !plus_patches.is_empty() {
+            report.plus = Some(ReportPlusRecord {
+                patches: plus_patches,
+                // Back-filled by the deferred verity pass below.
+                verity: Vec::new(),
+            });
         }
     }
 
@@ -2394,9 +2404,15 @@ where
                 lgsi.old_root_digest = old_hex.clone();
                 lgsi.new_root_digest = new_hex.clone();
             }
-            if let Some(cl) = report.clean_launcher.as_mut() {
-                cl.old_root_digest = old_hex.clone();
-                cl.new_root_digest = new_hex.clone();
+        }
+        if let Some(plus) = report.plus.as_mut() {
+            let touched = plus
+                .patches
+                .iter()
+                .any(|p| p.files.iter().any(|f| f.partition == *partition));
+            if touched {
+                plus.verity
+                    .push((partition.clone(), old_hex.clone(), new_hex.clone()));
             }
         }
         if let Some(debloat) = report.debloat.as_mut() {
@@ -4026,7 +4042,7 @@ mod tests {
             system_spl: None,
             fuck_lgsi: None,
             debloat: None,
-            clean_launcher: false,
+            plus: Vec::new(),
         }
     }
 

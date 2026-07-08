@@ -32,21 +32,36 @@ pub struct PipelineReport {
     pub lgsi: Option<LgsiRecord>,
     pub signing_key_change: Option<SigningKeyChange>,
     pub debloat: Option<DebloatRecord>,
-    pub clean_launcher: Option<CleanLauncherRecord>,
+    pub plus: Option<PlusRecord>,
 }
 
-/// `--clean-launcher` summary: the ZuiLauncher.apk region-predicate patches
-/// plus the system.img verity root-digest change.
+/// `--plus` summary: one entry per applied `.dbp` patch, plus the verity
+/// root-digest change of each partition its ops touched.
 #[derive(Debug, Clone)]
-pub struct CleanLauncherRecord {
-    /// `isZuiRow()` method bodies forced to `true`.
-    pub row_methods_forced: usize,
-    /// PRC predicate (`isIsShowPrcGlobalSearch`) bodies forced to `false`.
-    pub prc_methods_forced: usize,
-    /// `classes*.dex` entries inside ZuiLauncher.apk that were patched.
+pub struct PlusRecord {
+    pub patches: Vec<PlusPatchRecord>,
+    /// `(partition, old_root_digest, new_root_digest)` for each partition
+    /// whose dm-verity was regenerated. Back-filled by the deferred pass.
+    pub verity: Vec<(String, String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlusPatchRecord {
+    /// `name` field from the `.dbp` document.
+    pub name: String,
+    /// Source `.dbp` file (basename).
+    pub source: String,
+    pub files: Vec<PlusFileRecord>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlusFileRecord {
+    pub partition: String,
+    /// Path of the patched APK inside the partition image.
+    pub file: String,
+    pub ops_applied: usize,
+    pub ops_skipped: usize,
     pub dex_entries: Vec<String>,
-    pub old_root_digest: String,
-    pub new_root_digest: String,
 }
 
 /// `--debloat` summary: one row per partition whose ext4 tree had entries
@@ -92,17 +107,6 @@ pub struct LgsiRecord {
     pub skipped: Vec<LgsiSkip>,
     pub old_root_digest: String,
     pub new_root_digest: String,
-    /// Populated when `ZuiAntiCrossSell` flipped `true → false` and the
-    /// `ZuiSettings.apk LocaleListEditor` follow-up dex patch ran.
-    pub zui_settings_locale_patch: Option<ZuiSettingsLocalePatch>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ZuiSettingsLocalePatch {
-    pub dex_entries: Vec<String>,
-    pub is_prc_sites_patched: usize,
-    pub is_row_sites_patched: usize,
-    pub invoke_offsets_in_apk: Vec<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,7 +157,7 @@ impl PipelineReport {
             || self.lgsi.is_some()
             || self.signing_key_change.is_some()
             || self.debloat.is_some()
-            || self.clean_launcher.is_some()
+            || self.plus.is_some()
     }
 
     pub fn write(&self, path: &Path) -> Result<()> {
@@ -198,8 +202,8 @@ impl PipelineReport {
         if let Some(db) = &self.debloat {
             push_debloat_section(&mut out, db);
         }
-        if let Some(cl) = &self.clean_launcher {
-            push_clean_launcher_section(&mut out, cl);
+        if let Some(pl) = &self.plus {
+            push_plus_section(&mut out, pl);
         }
         push_resigned_section(&mut out, &self.resigned_images);
 
@@ -345,45 +349,6 @@ fn push_lgsi_section(out: &mut String, l: &LgsiRecord) {
         }
         out.push_str("</table>\n");
     }
-
-    if let Some(p) = &l.zui_settings_locale_patch {
-        out.push_str(
-            "<h3 style='margin-bottom:4px'>ZuiSettings.apk PRC&rarr;ROW follow-up patch</h3>\n",
-        );
-        out.push_str("<p>Triggered by the <code>ZuiAntiCrossSell</code> true&rarr;false flip. The patch rewrites every <code>LenovoUtils.isPrcVersion()Z</code> / <code>isRowVersion()Z</code> invoke-static site inside the methods of every targeted ZuiSettings class so the PRC build picks the ROW UI path: full language picker (Add language, Edit menu, drag-reorder, Terms of Address) plus the previously-hidden Regional Preferences category (Region picker, Temperature unit, Measurement system, First day of week).</p>\n");
-        let dex_list = if p.dex_entries.is_empty() {
-            "(none)".to_string()
-        } else {
-            p.dex_entries
-                .iter()
-                .map(|d| format!("<code>{}</code>", esc(d)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-        out.push_str(&format!("<p>Patched dex entries: {dex_list}</p>\n"));
-        out.push_str(
-            "<table>\n<tr><th>Method ref</th><th>Sites rewritten</th><th>Forced result</th></tr>\n",
-        );
-        out.push_str(&format!(
-            "<tr><td><code>LenovoUtils.isPrcVersion()Z</code></td><td>{}</td><td class='to'>false</td></tr>\n",
-            p.is_prc_sites_patched
-        ));
-        out.push_str(&format!(
-            "<tr><td><code>LenovoUtils.isRowVersion()Z</code></td><td>{}</td><td class='to'>true</td></tr>\n",
-            p.is_row_sites_patched
-        ));
-        out.push_str("</table>\n");
-        if !p.invoke_offsets_in_apk.is_empty() {
-            out.push_str(
-                "<details><summary>APK byte offsets of patched invoke-static opcodes</summary>\n",
-            );
-            out.push_str("<ul class='entries'>\n");
-            for off in &p.invoke_offsets_in_apk {
-                out.push_str(&format!("<li><code>{off:#010x}</code></li>\n"));
-            }
-            out.push_str("</ul>\n</details>\n");
-        }
-    }
 }
 
 fn push_signing_key_section(out: &mut String, sk: &SigningKeyChange) {
@@ -421,51 +386,54 @@ fn push_debloat_section(out: &mut String, db: &DebloatRecord) {
     out.push_str("</table>\n");
 }
 
-fn push_clean_launcher_section(out: &mut String, cl: &CleanLauncherRecord) {
-    out.push_str("<h2>Clean launcher (ZuiLauncher.apk)</h2>\n");
-    out.push_str("<p>ZuiLauncher's region predicates were forced to their ROW form via in-place dex patches, so the home slide-up global search takes the ROW branch and no recommended widgets/apps are surfaced on first launch. The dm-verity hash tree was regenerated and the AVB root digest updated.</p>\n");
-    out.push_str("<table>\n<tr><th>Predicate</th><th>Forced to</th><th>Result</th></tr>\n");
-    out.push_str(&format!(
-        "<tr><td><code>isZuiRow()</code></td><td class='to'>true</td><td class='{}'>{}</td></tr>\n",
-        if cl.row_methods_forced > 0 {
-            "applied"
-        } else {
-            "not-applied"
-        },
-        if cl.row_methods_forced > 0 {
-            format!("{} method(s)", cl.row_methods_forced)
-        } else {
-            "not found".to_string()
+fn push_plus_section(out: &mut String, pl: &PlusRecord) {
+    out.push_str("<h2>Plus patches (.dbp)</h2>\n");
+    out.push_str("<p>External <code>.dbp</code> patches were applied to APKs inside the partition images via size-preserving dex rewrites. Each touched partition's dm-verity hash tree was regenerated and the AVB root digest updated.</p>\n");
+    for patch in &pl.patches {
+        out.push_str(&format!(
+            "<h3 style='margin-bottom:4px'>{} <span class='mono'>({})</span></h3>\n",
+            esc(&patch.name),
+            esc(&patch.source)
+        ));
+        if patch.files.is_empty() {
+            out.push_str("<p class='empty'>No target files matched.</p>\n");
+            continue;
         }
-    ));
-    out.push_str(&format!(
-        "<tr><td><code>isIsShowPrcGlobalSearch()</code></td><td class='from'>false</td><td class='{}'>{}</td></tr>\n",
-        if cl.prc_methods_forced > 0 {
-            "applied"
-        } else {
-            "not-applied"
-        },
-        if cl.prc_methods_forced > 0 {
-            format!("{} method(s)", cl.prc_methods_forced)
-        } else {
-            "not found".to_string()
+        out.push_str("<table>\n<tr><th>Partition</th><th>File</th><th>Ops applied</th><th>Ops skipped</th><th>Patched dex</th></tr>\n");
+        for f in &patch.files {
+            let dex_list = if f.dex_entries.is_empty() {
+                "(none)".to_string()
+            } else {
+                f.dex_entries.join(", ")
+            };
+            out.push_str("<tr>");
+            out.push_str(&format!("<td><code>{}</code></td>", esc(&f.partition)));
+            out.push_str(&format!("<td><code>{}</code></td>", esc(&f.file)));
+            out.push_str(&format!("<td class='to'>{}</td>", f.ops_applied));
+            out.push_str(&format!(
+                "<td class='{}'>{}</td>",
+                if f.ops_skipped > 0 { "skipped" } else { "" },
+                f.ops_skipped
+            ));
+            out.push_str(&format!("<td class='mono'>{}</td>", esc(&dex_list)));
+            out.push_str("</tr>\n");
         }
-    ));
-    out.push_str("</table>\n");
-    let dex_list = if cl.dex_entries.is_empty() {
-        "(none)".to_string()
-    } else {
-        cl.dex_entries.join(", ")
-    };
-    out.push_str(&format!(
-        "<p class='mono'>patched dex: {}</p>\n",
-        esc(&dex_list)
-    ));
-    out.push_str(&format!(
-        "<p class='mono'>verity root_digest: <span class='from'>{}</span> &rarr; <span class='to'>{}</span></p>\n",
-        esc(&cl.old_root_digest[..16.min(cl.old_root_digest.len())]),
-        esc(&cl.new_root_digest[..16.min(cl.new_root_digest.len())])
-    ));
+        out.push_str("</table>\n");
+    }
+    if !pl.verity.is_empty() {
+        out.push_str("<table>\n<tr><th>Partition</th><th>verity root (old &rarr; new)</th></tr>\n");
+        for (partition, old, new) in &pl.verity {
+            out.push_str("<tr>");
+            out.push_str(&format!("<td><code>{}</code></td>", esc(partition)));
+            out.push_str(&format!(
+                "<td><span class='from'>{}</span> &rarr; <span class='to'>{}</span></td>",
+                esc(&old[..16.min(old.len())]),
+                esc(&new[..16.min(new.len())])
+            ));
+            out.push_str("</tr>\n");
+        }
+        out.push_str("</table>\n");
+    }
 }
 
 fn push_resigned_section(out: &mut String, images: &[String]) {
@@ -577,7 +545,6 @@ mod tests {
             }],
             old_root_digest: "deadbeef".to_string(),
             new_root_digest: "cafebabe".to_string(),
-            zui_settings_locale_patch: None,
         });
         let html = r.render_html();
         assert!(html.contains("DynoBox pipeline report"));
