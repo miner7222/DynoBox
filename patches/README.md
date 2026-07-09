@@ -10,13 +10,14 @@ dynobox unpack  -i <in> --resign -k <key> --plus a.dbp --plus b.dbp
 dynobox apply   -i <in> resign  -k <key> --plus patches/zuisettings-locale.dbp  ota.zip
 ```
 
-Each op forces a boolean predicate to a constant. Because the edits keep every
-`classes*.dex` byte length identical, DynoBox recomputes the dex header sums +
-the STORED zip entry CRC and writes the APK back over its ext4 extents. Every
-partition an op touches has its dm-verity hash tree regenerated once and the new
-root digest propagated into the owning vbmeta, so the resign loop signs over the
-patched bytes. Patches that match nothing (different ROM build, refactored
-classes) are warned about and skipped — they never abort the resign.
+Each op forces a method or invocation result to a constant. Because the edits
+keep every `classes*.dex` byte length identical, DynoBox recomputes the dex
+header sums + the STORED zip entry CRC and writes the APK back over its ext4
+extents. Every partition an op touches has its dm-verity hash tree regenerated
+once and the new root digest propagated into the owning vbmeta, so the resign
+loop signs over the patched bytes. Patches that match nothing (different ROM
+build, refactored classes) are warned about and skipped — they never abort the
+resign.
 
 > APKs are patched in place; their v1/v2/v3 signatures are **not** rebuilt.
 > Integrity comes from the dm-verity'd, re-signed partition, not per-APK
@@ -56,6 +57,19 @@ Rewrites the body to `const/4 v0, #lit; return v0` (nop-padded).
 The method is resolved by full method id (class + name + prototype), so
 obfuscated / overloaded methods are matched precisely.
 
+### `method_const_int`
+
+Force an integer-returning method body to always return a constant. DynoBox
+uses the smallest suitable Dalvik `const` encoding and pads the replaced
+instructions with `nop`.
+
+| field    | required | meaning                                        |
+|----------|----------|------------------------------------------------|
+| `class`  | yes      | JVM class descriptor                           |
+| `method` | yes      | method name                                    |
+| `proto`  | no       | JVM method descriptor; defaults to `()I`       |
+| `value`  | yes      | signed 32-bit integer                          |
+
 ### `invoke_const_bool`
 
 Force `invoke-static target_class.target_method()Z` results to a constant, but
@@ -83,3 +97,8 @@ only at the call sites inside one class (optionally one method). Rewrites each
   `isRowVersion()` → `true` at the call sites inside the affected classes.
   Formerly fired automatically when `--fuck-lgsi` flipped `ZuiAntiCrossSell`
   `true→false`; now applied on demand.
+* **`power-menu.dbp`** — show Global Actions instead of Lenovo LeVoice when
+  the power key is held. Forces
+  `PhoneWindowManager.getResolvedLongPressOnPowerBehavior()` → `1`
+  (`LONG_PRESS_POWER_GLOBAL_ACTIONS`), including when `--fuck-lgsi` disables
+  the LeVoice feature and its helper is never created.

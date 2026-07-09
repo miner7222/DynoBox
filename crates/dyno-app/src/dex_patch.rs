@@ -9,6 +9,8 @@
 //!   `const/4 v0, #lit` + `return v0` (the rest of the overwritten
 //!   instructions padded with `nop`). Forces a predicate method to a
 //!   constant for every caller.
+//! * [`force_method_return_int`] — replace an integer-returning method body
+//!   with the smallest suitable Dalvik `const` encoding + `return v0`.
 //! * [`force_invoke_const_bool`] — rewrite every
 //!   `invoke-static {}, target()Z` + `move-result vAA` site inside the
 //!   methods of a scan class into `const/16 vAA, #lit` + 2×`nop`. Forces a
@@ -292,6 +294,44 @@ pub fn force_method_return_bool(
 /// `nop`. Returns `false` (dex untouched) when the method has no registers
 /// or is too short.
 fn rewrite_method_body_const_bool(dex: &mut [u8], code_off: usize, value: bool) -> Result<bool> {
+    rewrite_method_body_const_int(dex, code_off, i32::from(value))
+}
+
+/// Force the integer-returning method `class.method(params...)ret` to always
+/// return `value`. `ret_descriptor` must be `"I"`.
+/// Returns `true` when the rewrite landed, `false` when the class/method
+/// isn't in this dex, or its code item cannot hold the replacement.
+pub fn force_method_return_int(
+    dex: &mut [u8],
+    class_descriptor: &str,
+    method_name: &str,
+    ret_descriptor: &str,
+    params: &[&str],
+    value: i32,
+) -> Result<bool> {
+    if ret_descriptor != "I" {
+        return Err(anyhow!(
+            "force_method_return_int requires an integer (I) return, got `{ret_descriptor}`"
+        ));
+    }
+    let h = read_dex_header(dex);
+    let Some(code_off) = find_method_code_off(
+        dex,
+        &h,
+        class_descriptor,
+        method_name,
+        ret_descriptor,
+        params,
+    )?
+    else {
+        return Ok(false);
+    };
+    rewrite_method_body_const_int(dex, code_off, value)
+}
+
+/// Rewrite the body at `code_off` to the smallest constant-load instruction
+/// that can represent `value`, followed by `return v0`.
+fn rewrite_method_body_const_int(dex: &mut [u8], code_off: usize, value: i32) -> Result<bool> {
     if code_off + 16 > dex.len() {
         return Ok(false);
     }
@@ -306,21 +346,31 @@ fn rewrite_method_body_const_bool(dex: &mut [u8], code_off: usize, value: bool) 
         _ => return Ok(false),
     };
 
-    // Replacement is 4 bytes (2 code units):
-    //   12 0L    const/4 v0, #+L   (L = 1 for true, 0 for false)
-    //   0F 00    return v0
-    const SEQ_LEN: usize = 4;
-    let Some(cover_end) = cover_whole_instructions(dex, insns_off, insns_end, SEQ_LEN) else {
+    let mut replacement = [0u8; 8];
+    let replacement_len = if (-8..=7).contains(&value) {
+        replacement[0] = 0x12; // const/4 vA, #+B
+        replacement[1] = ((value as u8) & 0x0f) << 4; // B, v0
+        replacement[2] = 0x0f; // return vAA
+        4
+    } else if i16::try_from(value).is_ok() {
+        replacement[0] = 0x13; // const/16 vAA, #+BBBB
+        replacement[2..4].copy_from_slice(&(value as i16).to_le_bytes());
+        replacement[4] = 0x0f;
+        6
+    } else {
+        replacement[0] = 0x14; // const vAA, #+BBBBBBBB
+        replacement[2..6].copy_from_slice(&value.to_le_bytes());
+        replacement[6] = 0x0f;
+        8
+    };
+    let Some(cover_end) = cover_whole_instructions(dex, insns_off, insns_end, replacement_len)
+    else {
         return Ok(false);
     };
 
-    let lit: u8 = if value { 1 } else { 0 };
     let b = &mut dex[insns_off..cover_end];
-    b[0] = 0x12; // const/4 vA, #+B
-    b[1] = lit << 4; // B = lit (high nibble), A = v0 (low nibble = 0)
-    b[2] = 0x0F; // return vAA
-    b[3] = 0x00; // v0
-    for pad in b.iter_mut().skip(SEQ_LEN) {
+    b[..replacement_len].copy_from_slice(&replacement[..replacement_len]);
+    for pad in b.iter_mut().skip(replacement_len) {
         *pad = 0x00; // nop
     }
     Ok(true)
@@ -512,6 +562,31 @@ mod tests {
         assert_eq!(parse_method_descriptor("(L)Z"), None);
     }
 
+    fn code_item_with_nops(insns_size: u32) -> Vec<u8> {
+        let mut code = vec![0u8; 16 + insns_size as usize * 2];
+        code[0..2].copy_from_slice(&1u16.to_le_bytes());
+        code[12..16].copy_from_slice(&insns_size.to_le_bytes());
+        code
+    }
+
+    #[test]
+    fn method_const_int_uses_smallest_dalvik_const_encoding() {
+        let mut small = code_item_with_nops(4);
+        assert!(rewrite_method_body_const_int(&mut small, 0, 1).unwrap());
+        assert_eq!(&small[16..20], &[0x12, 0x10, 0x0f, 0x00]);
+
+        let mut medium = code_item_with_nops(4);
+        assert!(rewrite_method_body_const_int(&mut medium, 0, 0x1234).unwrap());
+        assert_eq!(&medium[16..22], &[0x13, 0x00, 0x34, 0x12, 0x0f, 0x00]);
+
+        let mut full = code_item_with_nops(4);
+        assert!(rewrite_method_body_const_int(&mut full, 0, 0x1234_5678).unwrap());
+        assert_eq!(
+            &full[16..24],
+            &[0x14, 0x00, 0x78, 0x56, 0x34, 0x12, 0x0f, 0x00]
+        );
+    }
+
     /// `force_method_return_bool` lands on the real ZuiLauncher
     /// `Utilities.isZuiRow()`. Set `DYNOBOX_ZUILAUNCHER_DEX_DIR`.
     #[test]
@@ -542,6 +617,43 @@ mod tests {
             hits, 1,
             "Utilities.isZuiRow should be forced in exactly one dex"
         );
+    }
+
+    /// `force_method_return_int` lands on the real services.jar
+    /// `PhoneWindowManager.getResolvedLongPressOnPowerBehavior()`.
+    /// Set `DYNOBOX_SERVICES_ARCHIVE`.
+    #[test]
+    fn method_const_int_lands_on_real_services() {
+        let Ok(path) = std::env::var("DYNOBOX_SERVICES_ARCHIVE") else {
+            return;
+        };
+        let archive = std::fs::read(path).expect("read services archive");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&archive)
+            .expect("parse services archive");
+        let mut hits = 0;
+        for entry in zip.entries.iter().filter(|entry| {
+            entry.name.ends_with(".dex")
+                && entry.compression_method == 0
+                && !entry.uses_data_descriptor
+                && !entry.is_zip64
+                && entry.data_start + entry.compressed_size <= archive.len()
+        }) {
+            let mut dex =
+                archive[entry.data_start..entry.data_start + entry.compressed_size].to_vec();
+            if force_method_return_int(
+                &mut dex,
+                "Lcom/android/server/policy/PhoneWindowManager;",
+                "getResolvedLongPressOnPowerBehavior",
+                "I",
+                &[],
+                1,
+            )
+            .expect("patch")
+            {
+                hits += 1;
+            }
+        }
+        assert_eq!(hits, 1, "power behavior resolver should be forced once");
     }
 
     /// `force_invoke_const_bool` rewrites the real ZuiSettings

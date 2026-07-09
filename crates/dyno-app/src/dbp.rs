@@ -2,8 +2,8 @@
 //! applied to APKs inside partition images during resign (`--plus`).
 //!
 //! A `.dbp` document names a set of size-preserving Dalvik bytecode ops.
-//! Each op targets one file (an APK) inside one partition image and forces a
-//! boolean predicate to a constant, using the [`crate::dex_patch`]
+//! Each op targets one archive inside one partition image and forces a method
+//! or invocation result to a constant, using the [`crate::dex_patch`]
 //! primitives. This is how DynoBox ships the former built-in "clean-launcher"
 //! and ZuiSettings locale patches as data instead of code.
 //!
@@ -39,7 +39,8 @@ use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use crate::dex_patch::{
-    force_invoke_const_bool, force_method_return_bool, parse_method_descriptor,
+    force_invoke_const_bool, force_method_return_bool, force_method_return_int,
+    parse_method_descriptor,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
 use crate::fuck_lgsi::{
@@ -49,6 +50,10 @@ use crate::fuck_lgsi::{
 /// Default JVM descriptor for the boolean predicates these ops target.
 fn default_bool_proto() -> String {
     "()Z".to_string()
+}
+
+fn default_int_proto() -> String {
+    "()I".to_string()
 }
 
 /// A parsed `.dbp` document.
@@ -75,6 +80,16 @@ pub enum DbpOp {
         proto: String,
         value: bool,
     },
+    /// Force an integer-returning method body to `value` for every caller.
+    MethodConstInt {
+        partition: String,
+        file: String,
+        class: String,
+        method: String,
+        #[serde(default = "default_int_proto")]
+        proto: String,
+        value: i32,
+    },
     /// Force `invoke-static target_class.target_method()Z` results to `value`
     /// at every call site inside `scan_class` (optionally one `scan_method`).
     InvokeConstBool {
@@ -94,15 +109,17 @@ pub enum DbpOp {
 impl DbpOp {
     pub fn partition(&self) -> &str {
         match self {
-            DbpOp::MethodConstBool { partition, .. } | DbpOp::InvokeConstBool { partition, .. } => {
-                partition
-            }
+            DbpOp::MethodConstBool { partition, .. }
+            | DbpOp::MethodConstInt { partition, .. }
+            | DbpOp::InvokeConstBool { partition, .. } => partition,
         }
     }
 
     pub fn file(&self) -> &str {
         match self {
-            DbpOp::MethodConstBool { file, .. } | DbpOp::InvokeConstBool { file, .. } => file,
+            DbpOp::MethodConstBool { file, .. }
+            | DbpOp::MethodConstInt { file, .. }
+            | DbpOp::InvokeConstBool { file, .. } => file,
         }
     }
 }
@@ -154,17 +171,19 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
                 op.file()
             )));
         }
-        let proto = match op {
-            DbpOp::MethodConstBool { proto, .. } | DbpOp::InvokeConstBool { proto, .. } => proto,
+        let (proto, expected_ret, expected_name) = match op {
+            DbpOp::MethodConstBool { proto, .. } | DbpOp::InvokeConstBool { proto, .. } => {
+                (proto, "Z", "boolean (`Z`)")
+            }
+            DbpOp::MethodConstInt { proto, .. } => (proto, "I", "integer (`I`)"),
         };
-        // Both op kinds are boolean rewrites; a non-`Z` return would parse here
-        // but fail inside `force_*` mid-run, leaving images partially patched.
-        // Reject it up front so a whole `.dbp` is all-or-nothing.
+        // Reject a mismatched return type up front so a whole `.dbp` is
+        // all-or-nothing instead of failing after earlier ops modified images.
         match parse_method_descriptor(proto) {
-            Some((ret, _)) if ret == "Z" => {}
+            Some((ret, _)) if ret == expected_ret => {}
             Some(_) => {
                 return Err(bail(format!(
-                    "op descriptor `{proto}` must return boolean (`Z`)"
+                    "op descriptor `{proto}` must return {expected_name}"
                 )));
             }
             None => {
@@ -333,6 +352,18 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
             let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
             force_method_return_bool(dex, class, method, &ret, &param_refs, *value)
         }
+        DbpOp::MethodConstInt {
+            class,
+            method,
+            proto,
+            value,
+            ..
+        } => {
+            let (ret, params) = parse_method_descriptor(proto)
+                .ok_or_else(|| anyhow!("invalid descriptor `{proto}`"))?;
+            let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+            force_method_return_int(dex, class, method, &ret, &param_refs, *value)
+        }
         DbpOp::InvokeConstBool {
             scan_class,
             scan_method,
@@ -463,6 +494,27 @@ value = false
             .expect("zuisettings-locale.dbp");
         assert_eq!(zs.name, "zuisettings-locale");
         assert_eq!(zs.ops.len(), 22);
+        let pm = load_dbp(&patches_dir().join("power-menu.dbp")).expect("power-menu.dbp");
+        assert_eq!(pm.name, "power-menu");
+        assert_eq!(pm.ops.len(), 1);
+        match &pm.ops[0] {
+            DbpOp::MethodConstInt {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                value,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(class, "Lcom/android/server/policy/PhoneWindowManager;");
+                assert_eq!(method, "getResolvedLongPressOnPowerBehavior");
+                assert_eq!(proto, "()I");
+                assert_eq!(*value, 1);
+            }
+            _ => panic!("power-menu must use method_const_int"),
+        }
     }
 
     /// Apply the bundled clean-launcher ops to the real ZuiLauncher dexes.
@@ -521,6 +573,38 @@ value = false
         );
     }
 
+    /// Apply the bundled power-menu op to a real services.jar/APK dump.
+    /// Set `DYNOBOX_SERVICES_ARCHIVE`.
+    #[test]
+    fn bundled_power_menu_lands_on_real_services() {
+        let Ok(path) = std::env::var("DYNOBOX_SERVICES_ARCHIVE") else {
+            return;
+        };
+        let archive = std::fs::read(path).expect("read services archive");
+        let zip = parse_zip_central_directory(&archive).expect("parse services archive");
+        let doc = load_dbp(&patches_dir().join("power-menu.dbp")).unwrap();
+        let mut landed = 0usize;
+        for entry in zip.entries.iter().filter(|entry| {
+            entry.name.ends_with(".dex")
+                && entry.compression_method == 0
+                && !entry.uses_data_descriptor
+                && !entry.is_zip64
+                && entry.data_start + entry.compressed_size <= archive.len()
+        }) {
+            let mut dex =
+                archive[entry.data_start..entry.data_start + entry.compressed_size].to_vec();
+            for op in &doc.ops {
+                if apply_one_op(&mut dex, op).unwrap() {
+                    landed += 1;
+                }
+            }
+        }
+        assert_eq!(
+            landed, 1,
+            "the power-menu method rewrite should land exactly once"
+        );
+    }
+
     #[test]
     fn partition_name_safety() {
         assert!(partition_name_is_safe("system"));
@@ -567,6 +651,25 @@ value = true
         );
         let err = load_dbp(f.path()).unwrap_err().to_string();
         assert!(err.contains("boolean"), "got: {err}");
+    }
+
+    #[test]
+    fn load_rejects_non_integer_proto_for_method_const_int() {
+        let f = write_temp_dbp(
+            r#"
+name = "t"
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/policy/PhoneWindowManager;"
+method = "getResolvedLongPressOnPowerBehavior"
+proto = "()Z"
+value = 1
+"#,
+        );
+        let err = load_dbp(f.path()).unwrap_err().to_string();
+        assert!(err.contains("integer"), "got: {err}");
     }
 
     #[test]
