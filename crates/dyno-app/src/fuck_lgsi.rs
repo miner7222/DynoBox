@@ -32,7 +32,8 @@
 //!      `const/4` / `const/16` / `const` writes producing 0 or 1, and
 //!      invalidates entries on any other write to a tracked register.
 //!      For every invoke-direct site, snapshot the E and F nibble
-//!      registers and the bool currently held in each.
+//!      registers, the bool currently held in each, and one live
+//!      nibble-encodable register for each known boolean value.
 //!   6. Cross-reference the dex E-bool / F-bool against the HTML
 //!      `enabled` column for the same feature. The position where the
 //!      bool consistently matches the HTML state is the "Enabled" nibble.
@@ -50,8 +51,9 @@
 //!  10. Diff against the original HTML state. 0 changes -> return
 //!      `NotApplicable` (skip dex patch + verity regen).
 //!  11. For each changed feature, patch the F|E byte's "Enabled" nibble
-//!      from the current bool register's number to the opposite bool
-//!      register's number, in the in-memory `jar_bytes` buffer.
+//!      from the current bool register's number to a register holding
+//!      the requested value, even when that register is outside the
+//!      feature's original E/F pair.
 //!  12. Recompute the dex header SHA-1 (covers bytes 32..) and Adler-32
 //!      (covers bytes 12..); recompute jar CRC32 (LFH + CD).
 //!  13. write_via_extents the patched jar back to system.img.
@@ -411,9 +413,8 @@ pub fn apply_fuck_lgsi_with_progress(
     // 9. Apply per-feature byte patches inside the jar buffer.
     //
     //    A feature that cleared phase-1 selection can still fail the
-    //    byte-level nibble computation here — e.g. both tracked registers
-    //    hold the same bool, so neither holds the requested value and
-    //    there is no register number to swap in. When that happens the
+    //    byte-level nibble computation here if no nibble-encodable register
+    //    is known to hold the requested value. When that happens the
     //    feature is demoted to `skipped` (surfaced as a `Warning`) and the
     //    loop moves on to the next one, instead of aborting the whole
     //    resign stage. `patch::apply_change` runs all of its bounds and
@@ -859,6 +860,12 @@ pub(crate) mod dex_walker {
         /// Bool currently held in `f_reg` per the const-tracker, if
         /// known.
         pub f_bool: Option<bool>,
+        /// Any nibble-encodable register known to hold `false` at this
+        /// registration site. This may be outside the E/F argument pair.
+        pub known_false_reg: Option<u16>,
+        /// Any nibble-encodable register known to hold `true` at this
+        /// registration site. This may be outside the E/F argument pair.
+        pub known_true_reg: Option<u16>,
     }
 
     /// Result of an extract pass over a single dex. `Found` carries the
@@ -1008,6 +1015,8 @@ pub(crate) mod dex_walker {
                 f_reg: reg.f_reg,
                 e_bool: reg.e_bool,
                 f_bool: reg.f_bool,
+                known_false_reg: reg.known_false_reg,
+                known_true_reg: reg.known_true_reg,
             });
         }
         if out.is_empty() {
@@ -1028,6 +1037,8 @@ pub(crate) mod dex_walker {
         f_reg: u16,
         e_bool: Option<bool>,
         f_bool: Option<bool>,
+        known_false_reg: Option<u16>,
+        known_true_reg: Option<u16>,
     }
 
     fn walk_clinit_for_features(
@@ -1138,6 +1149,8 @@ pub(crate) mod dex_walker {
                                     f_reg,
                                     e_bool,
                                     f_bool,
+                                    known_false_reg: known_bool_register(&tracker, false),
+                                    known_true_reg: known_bool_register(&tracker, true),
                                 });
                             }
                             // If no string_idx is in flight, this isn't a
@@ -1152,6 +1165,14 @@ pub(crate) mod dex_walker {
         }
 
         Ok(out)
+    }
+
+    fn known_bool_register(tracker: &[Option<bool>], value: bool) -> Option<u16> {
+        tracker
+            .iter()
+            .take(16)
+            .position(|tracked| *tracked == Some(value))
+            .map(|reg| reg as u16)
     }
 
     /// Decode a known-bool const into (dest_reg, bool). Returns None for
@@ -1684,6 +1705,26 @@ pub(crate) mod dex_walker {
         }
 
         #[test]
+        fn walk_clinit_snapshots_nibble_bool_registers() {
+            let mut dex = vec![0u8; 30];
+            dex[0..2].copy_from_slice(&5u16.to_le_bytes());
+            dex[12..16].copy_from_slice(&7u32.to_le_bytes());
+            dex[16..].copy_from_slice(&[
+                0x12, 0x03, // const/4 v3, false
+                0x12, 0x14, // const/4 v4, true
+                0x1A, 0x02, 0x07, 0x00, // const-string v2, string@7
+                0x70, 0x40, 0x34, 0x12, 0x21, 0x33, // invoke-direct {v1,v2,v3,v3}
+            ]);
+
+            let registrations =
+                walk_clinit_for_features(&dex, 0, 0x1234).expect("synthetic clinit should parse");
+
+            assert_eq!(registrations.len(), 1);
+            assert_eq!(registrations[0].known_false_reg, Some(3));
+            assert_eq!(registrations[0].known_true_reg, Some(4));
+        }
+
+        #[test]
         fn dex_insn_width_units_known_opcodes() {
             assert_eq!(DEX_INSN_WIDTH_UNITS[0x00], 1); // nop
             assert_eq!(DEX_INSN_WIDTH_UNITS[0x12], 1); // const/4
@@ -1798,6 +1839,8 @@ mod cross_ref {
                 f_reg: 0,
                 e_bool: e,
                 f_bool: f,
+                known_false_reg: None,
+                known_true_reg: None,
             }
         }
 
@@ -2013,22 +2056,30 @@ mod patch {
             .f_bool
             .ok_or_else(|| anyhow!("feature {} has unknown F-bool at patch time", feat.name))?;
 
-        // Identify the register that currently holds `target_bool`.
-        let new_reg_for_enabled = if e_bool == target_bool {
-            e_reg
+        // The requested value may live outside the E/F argument pair.
+        // Lenovo commonly emits both arguments as v3=false for disabled
+        // features while keeping v4=true live for other registrations.
+        // Repoint only the Enabled nibble to that known register; changing
+        // the shared const/4 would alter every later feature.
+        let argument_reg = if e_bool == target_bool {
+            Some(e_reg)
         } else if f_bool == target_bool {
-            f_reg
+            Some(f_reg)
         } else {
-            // Neither tracked register holds the requested bool. Without
-            // a register holding `target_bool` we can't patch by reg
-            // swap. Bail loudly so the caller can decide.
-            bail!(
+            None
+        };
+        let tracked_reg = match target_bool {
+            false => feat.known_false_reg,
+            true => feat.known_true_reg,
+        };
+        let new_reg_for_enabled = argument_reg.or(tracked_reg).ok_or_else(|| {
+            anyhow!(
                 "feature {}: no tracked register currently holds {target_bool} \
                  (e_reg=v{e_reg}={e_bool}, f_reg=v{f_reg}={f_bool}); \
                  unable to compute target nibble value",
                 feat.name
-            );
-        };
+            )
+        })?;
         if new_reg_for_enabled > 0xF {
             bail!(
                 "feature {}: target register v{new_reg_for_enabled} exceeds 4-bit nibble \
@@ -2055,6 +2106,51 @@ mod patch {
         };
         dex_slice[patch_off] = new_byte;
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn apply_change_uses_known_bool_register_outside_argument_pair() {
+            let feature = dex_walker::DexFeature {
+                name: "ZuiOV4Split".to_string(),
+                invoke_direct_off_in_dex: 0,
+                e_reg: 3,
+                f_reg: 3,
+                e_bool: Some(false),
+                f_bool: Some(false),
+                known_false_reg: Some(3),
+                known_true_reg: Some(4),
+            };
+            let mut dex = [0x70, 0x40, 0x00, 0x00, 0x21, 0x33];
+
+            apply_change(&mut dex, &feature, cross_ref::EnabledNibble::F, true)
+                .expect("the tracked v4=true register should make this feature patchable");
+
+            assert_eq!(dex[5], 0x43);
+        }
+
+        #[test]
+        fn apply_change_prefers_existing_argument_register() {
+            let feature = dex_walker::DexFeature {
+                name: "ExistingPattern".to_string(),
+                invoke_direct_off_in_dex: 0,
+                e_reg: 3,
+                f_reg: 4,
+                e_bool: Some(false),
+                f_bool: Some(true),
+                known_false_reg: Some(3),
+                known_true_reg: Some(5),
+            };
+            let mut dex = [0x70, 0x40, 0x00, 0x00, 0x21, 0x43];
+
+            apply_change(&mut dex, &feature, cross_ref::EnabledNibble::E, true)
+                .expect("the existing v4=true argument should remain preferred");
+
+            assert_eq!(dex[5], 0x44);
+        }
     }
 }
 
