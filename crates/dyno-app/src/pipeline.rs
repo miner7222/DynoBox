@@ -11,7 +11,7 @@ use crate::boot_spl::{
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
 use crate::fuck_lgsi::{
     FuckLgsiInput, FuckLgsiMode, FuckLgsiOutcome, LgsiFeatureChange, LgsiFeatureSkip,
-    apply_fuck_lgsi_with_progress,
+    WORKSPACE_JSON_NAME, apply_fuck_lgsi_with_progress,
 };
 use crate::report::{
     DebloatPartition as ReportDebloatPartition, DebloatRecord as ReportDebloatRecord,
@@ -33,6 +33,8 @@ use crate::vendor_spl::{
 use crate::verify::run_verify_stage;
 
 const PARTITION_IMAGE_EXTENSION_FALLBACK: [&str; 5] = ["img", "bin", "elf", "melf", "mbn"];
+const DEBLOAT_LIST_NAME: &str = "debloat.txt";
+const DEBLOAT_BLOBS_NAME: &str = "blobs.txt";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResignConfig {
@@ -72,17 +74,18 @@ pub struct ResignConfig {
     /// [`FuckLgsiMode`] picks between the default interactive
     /// pause-on-Enter flow ([`FuckLgsiMode::Interactive`]) and the
     /// non-interactive scripted mode reading a pre-edited JSON
-    /// ([`FuckLgsiMode::Config`]). No-ops when no edits are made.
+    /// ([`FuckLgsiMode::Config`]), retained as `<out>/lgsi_features.json`.
+    /// No-ops when no edits are made.
     pub fuck_lgsi: Option<FuckLgsiMode>,
     /// When set, run `--debloat`: scan the unpacked super partitions
-    /// (`system.img`/`product.img`/`vendor.img` …) in the working dir, write
-    /// every path to `<out>/blobs.txt`, create an empty `<out>/debloat.txt`,
-    /// pause for the user to list files/folders to remove, then hide those
+    /// (`system.img`/`product.img`/`vendor.img` …) in the working dir, create
+    /// `<out>/debloat.txt`, pause for the user to list files/folders to remove, then hide those
     /// dirents from the ext4 images (no mount), regenerate dm-verity, and
     /// propagate the new root digests into the owning vbmeta images so the
     /// resign loop signs over them. Invalid paths are ignored. The mode
-    /// selects interactive (edit `debloat.txt` + Enter) or list-file (read a
-    /// caller-provided path list) removal input.
+    /// selects interactive (edit `debloat.txt` + Enter) or list-file (copy a
+    /// caller-provided path list to `debloat.txt`) removal input. The generated
+    /// `blobs.txt` catalog is removed once input is collected.
     pub debloat: Option<crate::debloat::DebloatMode>,
     /// Paths to external `.dbp` (DynoBox Patch) files applied via `--plus`.
     /// Each is a TOML document of size-preserving dex ops targeting APKs
@@ -426,7 +429,7 @@ where
     }
 
     if let Some(dir) = &staged_resign_dir {
-        propagate_pipeline_report(dir, &request.output, events);
+        propagate_resign_artifacts(dir, &request.output, events);
     }
 
     ops.verify_stage(&request.output, events)?;
@@ -497,7 +500,7 @@ where
     }
 
     if let Some(dir) = &staged_resign_dir {
-        propagate_pipeline_report(dir, &request.output, events);
+        propagate_resign_artifacts(dir, &request.output, events);
     }
 
     ops.verify_stage(&request.output, events)?;
@@ -537,57 +540,80 @@ where
         temp_root.path(),
         events,
     )?;
-    propagate_pipeline_report(&resign_stage_dir, &request.output, events);
+    propagate_resign_artifacts(&resign_stage_dir, &request.output, events);
     ops.verify_stage(&request.output, events)?;
     Ok(())
 }
 
-/// Copy `report.html` from a resign staging directory to the final
-/// pipeline output. `run_resign_stage` writes the report into its own
-/// `out_dir`, but in apply / resign / unpack pipelines that run a
-/// repack stage, that `out_dir` is a temp directory which gets dropped
-/// after repack finishes. Without this propagation the user-visible
-/// final output would never see the file.
-fn propagate_pipeline_report<S>(staged_resign_dir: &Path, final_output_dir: &Path, events: &mut S)
+/// Copy retained resign artifacts from a temporary resign stage to the final
+/// pipeline output. The report and configured feature inputs are written into
+/// the stage before repack, which is later discarded.
+fn propagate_resign_artifacts<S>(staged_resign_dir: &Path, final_output_dir: &Path, events: &mut S)
 where
     S: EventSink + ?Sized,
 {
     let src = staged_resign_dir.join("report.html");
-    if !src.exists() {
-        return;
-    }
-    let dst = final_output_dir.join("report.html");
-    // `std::fs::copy` on Windows uses CopyFileExW, which fails with
-    // ERROR_SHARING_VIOLATION (os error 32) when the destination is
-    // already open in another process — common when the user is
-    // re-running the pipeline with `report.html` from a prior run open
-    // in a browser tab. Read source bytes once and write through
-    // `std::fs::write`, which opens the destination with explicit
-    // truncate semantics and recovers in this case.
-    let bytes = match std::fs::read(&src) {
-        Ok(b) => b,
-        Err(e) => {
-            message(
+    if src.exists() {
+        let dst = final_output_dir.join("report.html");
+        // `std::fs::copy` on Windows uses CopyFileExW, which fails with
+        // ERROR_SHARING_VIOLATION (os error 32) when the destination is
+        // already open in another process — common when the user is
+        // re-running the pipeline with `report.html` from a prior run open
+        // in a browser tab. Read source bytes once and write through
+        // `std::fs::write`, which opens the destination with explicit
+        // truncate semantics and recovers in this case.
+        match std::fs::read(&src) {
+            Ok(bytes) => {
+                let html = crate::report::rewrite_report_output_dir(
+                    &String::from_utf8_lossy(&bytes),
+                    final_output_dir,
+                );
+                if let Err(e) = std::fs::write(&dst, html) {
+                    message(
+                        events,
+                        MessageLevel::Warning,
+                        format!(
+                            "Failed to write pipeline report to {}: {e} (close any open viewer of report.html and re-run if you need it in the final output)",
+                            dst.display()
+                        ),
+                    );
+                }
+            }
+            Err(e) => message(
                 events,
                 MessageLevel::Warning,
                 format!("Failed to read pipeline report at {}: {e}", src.display()),
-            );
-            return;
-        }
-    };
-    let html = crate::report::rewrite_report_output_dir(
-        &String::from_utf8_lossy(&bytes),
-        final_output_dir,
-    );
-    if let Err(e) = std::fs::write(&dst, html) {
-        message(
-            events,
-            MessageLevel::Warning,
-            format!(
-                "Failed to write pipeline report to {}: {e} (close any open viewer of report.html and re-run if you need it in the final output)",
-                dst.display()
             ),
-        );
+        }
+    }
+
+    for name in [WORKSPACE_JSON_NAME, DEBLOAT_LIST_NAME] {
+        let src = staged_resign_dir.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = final_output_dir.join(name);
+        let bytes = match std::fs::read(&src) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                message(
+                    events,
+                    MessageLevel::Warning,
+                    format!(
+                        "Failed to read retained pipeline input at {}: {e}",
+                        src.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        if let Err(e) = std::fs::write(&dst, bytes) {
+            message(
+                events,
+                MessageLevel::Warning,
+                format!("Failed to retain pipeline input at {}: {e}", dst.display()),
+            );
+        }
     }
 }
 
@@ -1686,11 +1712,30 @@ where
     Ok(Some((old_hex, new_hex)))
 }
 
-/// `--debloat`: scan the unpacked super partitions in `out_dir`, write
-/// `blobs.txt` (every path) and an empty `debloat.txt`, pause for the user to
-/// list files/folders to remove, then hide those dirents from the ext4
-/// images, regenerate dm-verity, and propagate the new root digests into the
-/// owning vbmeta images (added to the resign list). Invalid paths are ignored.
+/// Copy a non-interactive feature input into its stable output artifact path.
+fn retain_configured_input(
+    source: &Path,
+    output_dir: &Path,
+    output_name: &str,
+) -> anyhow::Result<PathBuf> {
+    let destination = output_dir.join(output_name);
+    if source == destination {
+        return Ok(destination);
+    }
+    std::fs::copy(source, &destination).with_context(|| {
+        format!(
+            "copying configured input {} to {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    Ok(destination)
+}
+
+/// `--debloat`: scan the unpacked super partitions in `out_dir`, write a
+/// temporary `blobs.txt` catalog and `debloat.txt`, then hide the requested
+/// dirents. Configured input is retained as `debloat.txt`; the generated
+/// catalog is removed once the removal list has been read.
 fn run_debloat<S>(
     out_dir: &Path,
     mode: &crate::debloat::DebloatMode,
@@ -1703,6 +1748,13 @@ where
     S: EventSink + ?Sized,
 {
     use std::io::{IsTerminal, Write};
+
+    let configured_list = match mode {
+        crate::debloat::DebloatMode::ListFile(path) => {
+            Some(retain_configured_input(path, out_dir, DEBLOAT_LIST_NAME)?)
+        }
+        crate::debloat::DebloatMode::Interactive => None,
+    };
 
     // 1. Scan every ext4 partition image in the output dir.
     let mut blob_lines: Vec<String> = Vec::new();
@@ -1746,7 +1798,7 @@ where
     }
 
     // Always write blobs.txt so the user can see what is removable.
-    let blobs_path = out_dir.join("blobs.txt");
+    let blobs_path = out_dir.join(DEBLOAT_BLOBS_NAME);
     std::fs::write(&blobs_path, format!("{}\n", blob_lines.join("\n")))
         .with_context(|| format!("writing {}", blobs_path.display()))?;
     message(
@@ -1763,10 +1815,15 @@ where
     // 2. Resolve the removal list, either from a caller-provided file
     //    (non-interactive) or by prompting the user to edit debloat.txt.
     let content = match mode {
-        crate::debloat::DebloatMode::ListFile(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("reading debloat list file {}", path.display()))?,
+        crate::debloat::DebloatMode::ListFile(_) => {
+            let path = configured_list.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("configured debloat list was not retained in the output")
+            })?;
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading debloat list file {}", path.display()))?
+        }
         crate::debloat::DebloatMode::Interactive => {
-            let debloat_path = out_dir.join("debloat.txt");
+            let debloat_path = out_dir.join(DEBLOAT_LIST_NAME);
             if !debloat_path.exists() {
                 std::fs::write(
                     &debloat_path,
@@ -1796,6 +1853,8 @@ where
             std::fs::read_to_string(&debloat_path).unwrap_or_default()
         }
     };
+    std::fs::remove_file(&blobs_path)
+        .with_context(|| format!("removing temporary {}", blobs_path.display()))?;
 
     // 3. Parse the removal list into partition -> paths.
     let mut targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -2184,6 +2243,12 @@ where
             out_dir,
             &["system.img", "vbmeta_system.img", "product.img"],
         )?;
+        let lgsi_mode = match lgsi_mode {
+            FuckLgsiMode::Config(path) => {
+                FuckLgsiMode::Config(retain_configured_input(path, out_dir, WORKSPACE_JSON_NAME)?)
+            }
+            FuckLgsiMode::Interactive => FuckLgsiMode::Interactive,
+        };
         ensure_images_local(
             &mut local_inode_cache,
             out_dir,
@@ -2197,7 +2262,7 @@ where
             vbmeta_system_image: &vbmeta_system_path,
             product_image: &product_path,
             workspace_dir: out_dir,
-            mode: lgsi_mode.clone(),
+            mode: lgsi_mode,
         };
         // Defer dm-verity regen: the mutation (framework.jar / ZuiSettings
         // patches) runs here, but system.img's hash tree is rebuilt once by
@@ -3723,12 +3788,19 @@ mod tests {
     }
 
     #[test]
-    fn propagated_report_displays_final_output_directory() {
+    fn propagated_artifacts_display_final_output_and_keep_user_inputs() {
         let temp = tempdir().unwrap();
         let staged = temp.path().join("dynobox-stage-abc").join("resign_stage");
         let final_output = temp.path().join("final-output");
         fs::create_dir_all(&staged).unwrap();
         fs::create_dir_all(&final_output).unwrap();
+        fs::write(
+            staged.join("lgsi_features.json"),
+            b"{\"ZuiFeature\": false}\n",
+        )
+        .unwrap();
+        fs::write(staged.join("debloat.txt"), b"system:/system/app/Bloat\n").unwrap();
+        fs::write(staged.join("blobs.txt"), b"system:/system/app/Bloat\n").unwrap();
 
         PipelineReport {
             command_line: "dynobox resign".to_string(),
@@ -3743,12 +3815,73 @@ mod tests {
         .unwrap();
 
         let mut sink = NoopEventSink;
-        propagate_pipeline_report(&staged, &final_output, &mut sink);
+        propagate_resign_artifacts(&staged, &final_output, &mut sink);
 
         let html = fs::read_to_string(final_output.join("report.html")).unwrap();
         assert!(html.contains("final-output"));
         assert!(!html.contains("resign_stage"));
         assert!(!html.contains("dynobox-stage-abc"));
+        assert_eq!(
+            fs::read_to_string(final_output.join("lgsi_features.json")).unwrap(),
+            "{\"ZuiFeature\": false}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(final_output.join("debloat.txt")).unwrap(),
+            "system:/system/app/Bloat\n"
+        );
+        assert!(!final_output.join("blobs.txt").exists());
+    }
+
+    #[test]
+    fn propagated_user_inputs_do_not_require_a_report() {
+        let temp = tempdir().unwrap();
+        let staged = temp.path().join("resign_stage");
+        let final_output = temp.path().join("final-output");
+        fs::create_dir_all(&staged).unwrap();
+        fs::create_dir_all(&final_output).unwrap();
+        fs::write(staged.join("lgsi_features.json"), b"{}\n").unwrap();
+        fs::write(staged.join("debloat.txt"), b"product:/app/Foo\n").unwrap();
+
+        let mut sink = NoopEventSink;
+        propagate_resign_artifacts(&staged, &final_output, &mut sink);
+
+        assert_eq!(
+            fs::read_to_string(final_output.join("lgsi_features.json")).unwrap(),
+            "{}\n"
+        );
+        assert_eq!(
+            fs::read_to_string(final_output.join("debloat.txt")).unwrap(),
+            "product:/app/Foo\n"
+        );
+    }
+
+    #[test]
+    fn debloat_list_input_is_retained_without_a_partition_scan() {
+        let temp = tempdir().unwrap();
+        let list = temp.path().join("custom-removals.txt");
+        let output = temp.path().join("output");
+        fs::write(&list, "system:/system/app/Bloat\n").unwrap();
+        fs::create_dir_all(&output).unwrap();
+
+        let mut sink = NoopEventSink;
+        let mut inode_cache = LocalInodeCache::default();
+        let mut dirty_partitions = BTreeMap::new();
+        let mut report = PipelineReport::default();
+        run_debloat(
+            &output,
+            &crate::debloat::DebloatMode::ListFile(list),
+            &mut sink,
+            &mut inode_cache,
+            &mut dirty_partitions,
+            &mut report,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(output.join("debloat.txt")).unwrap(),
+            "system:/system/app/Bloat\n"
+        );
+        assert!(!output.join("blobs.txt").exists());
     }
 
     #[test]

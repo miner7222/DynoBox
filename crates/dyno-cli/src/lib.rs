@@ -190,9 +190,10 @@ enum Commands {
         /// you to edit the JSON before patching the matching
         /// `LgsiFeatureInfo.<init>` registration sites. Pass a path
         /// (`--fuck-lgsi <JSON_PATH>`) to run non-interactively against
-        /// a pre-edited JSON instead. The workspace files are removed
-        /// after a successful patch — `report.html` carries the audit
-        /// trail.
+        /// a pre-edited JSON instead; it is retained as
+        /// `<out>/lgsi_features.json`. Interactive workspace files are
+        /// removed after a successful patch — `report.html` carries the
+        /// audit trail.
         #[arg(long, value_name = "JSON_PATH", num_args = 0..=1, default_missing_value = "")]
         fuck_lgsi: Option<String>,
 
@@ -200,7 +201,9 @@ enum Commands {
         /// listed files/folders from the ext4 images (no mount) and re-sign.
         /// Bare `--debloat` pauses for you to edit `<out>/debloat.txt`; pass a
         /// path (`--debloat list.txt`) to run non-interactively from that file
-        /// (format: partition:/path). Requires --resign. Invalid paths ignored.
+        /// (format: partition:/path). The input is retained as
+        /// `<out>/debloat.txt`; the generated blobs.txt is removed when done.
+        /// Requires --resign. Invalid paths ignored.
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
@@ -278,11 +281,12 @@ enum Commands {
         /// `LgsiFeatureInfo.<init>` registration sites inside
         /// `system.img/system/framework/framework.jar`. Pass a path
         /// (`--fuck-lgsi <JSON_PATH>`) to run non-interactively against
-        /// a pre-edited JSON instead. Regenerates system.img dm-verity
+        /// a pre-edited JSON instead; it is retained as
+        /// `<out>/lgsi_features.json`. Regenerates system.img dm-verity
         /// and propagates the new root digest into vbmeta_system.img.
-        /// The workspace files are removed after a successful patch —
-        /// `report.html` carries the audit trail. No-op when no edits
-        /// are made.
+        /// Interactive workspace files are removed after a successful
+        /// patch — `report.html` carries the audit trail. No-op when no
+        /// edits are made.
         #[arg(long, value_name = "JSON_PATH", num_args = 0..=1, default_missing_value = "")]
         fuck_lgsi: Option<String>,
 
@@ -290,7 +294,9 @@ enum Commands {
         /// listed files/folders from the ext4 images (no mount) and re-sign.
         /// Bare `--debloat` pauses for you to edit `<out>/debloat.txt`; pass a
         /// path (`--debloat list.txt`) to run non-interactively from that file
-        /// (format: partition:/path). Invalid paths are ignored.
+        /// (format: partition:/path). The input is retained as
+        /// `<out>/debloat.txt`; the generated blobs.txt is removed when done.
+        /// Invalid paths are ignored.
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
