@@ -2293,7 +2293,7 @@ where
         )?;
     }
 
-    // --plus: apply external `.dbp` patches to APKs inside the partition
+    // --plus: apply external `.dbp` patches to files inside the partition
     // images. Mutation-only here; each touched partition's dm-verity is
     // regenerated once by the deferred pass below (coalesced with any
     // --system-spl / --fuck-lgsi / --debloat edits) and its owning vbmeta
@@ -2353,7 +2353,7 @@ where
                         file: r.file,
                         ops_applied: r.ops_applied,
                         ops_skipped: r.ops_skipped,
-                        dex_entries: r.dex_entries,
+                        patched_entries: r.patched_entries,
                     });
                 }
                 dirty_partitions.insert(partition.clone(), img_path);

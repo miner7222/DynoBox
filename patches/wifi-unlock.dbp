@@ -1,0 +1,22 @@
+name = "wifi-unlock"
+description = "Keep PRC Wi-Fi on a US regulatory domain by pinning the Wi-Fi country input."
+
+# PRC service-wifi reads ro.product.countrycode as the OEM default country.
+# Replace one duplicate education flag with a same-length property line so the
+# ext4 file size does not change.
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/build.prop"
+from = "ro.config.zui.education=true\n"
+to = "ro.product.countrycode=US\n##\n"
+
+# Lenovo's custom init seeds ro.product.countrycode from the factory country
+# before system property files are loaded. Keep its assignment on an inert,
+# same-length key so the property above becomes authoritative.
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/bin/init"
+from = "ro.product.countrycode"
+to = "ro.product.countrycodE"

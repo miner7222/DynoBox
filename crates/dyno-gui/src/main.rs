@@ -571,7 +571,7 @@ impl DynoGui {
                 }
                 ui.label(format!("--plus ({} patch(es))", self.plus_patches.len()))
                     .on_hover_text(
-                        "External .dbp patches applied to APKs inside the partition \
+                        "External .dbp patches applied to files inside the partition \
                          images during resign.",
                     );
             });

@@ -111,7 +111,7 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "", requires = "resign")]
         debloat: Option<String>,
 
-        /// Apply an external `.dbp` patch to APKs inside the partition images
+        /// Apply an external `.dbp` patch to files inside the partition images
         /// during resign. Repeat the flag to apply several patches
         /// (`--plus a.dbp --plus b.dbp`). Requires --resign.
         #[arg(long, value_name = "DBP", requires = "resign")]
@@ -204,7 +204,7 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
-        /// Apply an external `.dbp` patch to APKs inside the partition images
+        /// Apply an external `.dbp` patch to files inside the partition images
         /// during resign. Repeat the flag to apply several patches
         /// (`--plus a.dbp --plus b.dbp`). Requires `resign` or `--resign`.
         #[arg(long, value_name = "DBP")]
@@ -294,7 +294,7 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
-        /// Apply an external `.dbp` patch to APKs inside the partition images.
+        /// Apply an external `.dbp` patch to files inside the partition images.
         /// Repeat the flag to apply several patches
         /// (`--plus a.dbp --plus b.dbp`).
         #[arg(long, value_name = "DBP")]

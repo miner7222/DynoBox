@@ -61,7 +61,7 @@ pub struct PlusFileRecord {
     pub file: String,
     pub ops_applied: usize,
     pub ops_skipped: usize,
-    pub dex_entries: Vec<String>,
+    pub patched_entries: Vec<String>,
 }
 
 /// `--debloat` summary: one row per partition whose ext4 tree had entries
@@ -388,7 +388,7 @@ fn push_debloat_section(out: &mut String, db: &DebloatRecord) {
 
 fn push_plus_section(out: &mut String, pl: &PlusRecord) {
     out.push_str("<h2>Plus patches (.dbp)</h2>\n");
-    out.push_str("<p>External <code>.dbp</code> patches were applied to APKs inside the partition images via size-preserving dex rewrites. Each touched partition's dm-verity hash tree was regenerated and the AVB root digest updated.</p>\n");
+    out.push_str("<p>External <code>.dbp</code> patches were applied to files inside the partition images via size-preserving archive/text edits. Each touched partition's dm-verity hash tree was regenerated and the AVB root digest updated.</p>\n");
     for patch in &pl.patches {
         out.push_str(&format!(
             "<h3 style='margin-bottom:4px'>{} <span class='mono'>({})</span></h3>\n",
@@ -399,12 +399,12 @@ fn push_plus_section(out: &mut String, pl: &PlusRecord) {
             out.push_str("<p class='empty'>No target files matched.</p>\n");
             continue;
         }
-        out.push_str("<table>\n<tr><th>Partition</th><th>File</th><th>Ops applied</th><th>Ops skipped</th><th>Patched dex</th></tr>\n");
+        out.push_str("<table>\n<tr><th>Partition</th><th>File</th><th>Ops applied</th><th>Ops skipped</th><th>Patched entries</th></tr>\n");
         for f in &patch.files {
-            let dex_list = if f.dex_entries.is_empty() {
+            let patched_list = if f.patched_entries.is_empty() {
                 "(none)".to_string()
             } else {
-                f.dex_entries.join(", ")
+                f.patched_entries.join(", ")
             };
             out.push_str("<tr>");
             out.push_str(&format!("<td><code>{}</code></td>", esc(&f.partition)));
@@ -415,7 +415,7 @@ fn push_plus_section(out: &mut String, pl: &PlusRecord) {
                 if f.ops_skipped > 0 { "skipped" } else { "" },
                 f.ops_skipped
             ));
-            out.push_str(&format!("<td class='mono'>{}</td>", esc(&dex_list)));
+            out.push_str(&format!("<td class='mono'>{}</td>", esc(&patched_list)));
             out.push_str("</tr>\n");
         }
         out.push_str("</table>\n");

@@ -1,7 +1,7 @@
 # DynoBox patches (`.dbp`)
 
 A `.dbp` (DynoBox Patch) file is a **TOML** document describing size-preserving
-Dalvik bytecode edits applied to APKs *inside partition images* during resign.
+edits applied to files *inside partition images* during resign.
 Pass one or more with the `--plus` resign option:
 
 ```sh
@@ -10,14 +10,16 @@ dynobox unpack  -i <in> --resign -k <key> --plus a.dbp --plus b.dbp
 dynobox apply   -i <in> resign  -k <key> --plus patches/zuisettings-locale.dbp  ota.zip
 ```
 
-Each op forces a method or invocation result to a constant. Because the edits
-keep every `classes*.dex` byte length identical, DynoBox recomputes the dex
-header sums + the STORED zip entry CRC and writes the APK back over its ext4
-extents. Every partition an op touches has its dm-verity hash tree regenerated
-once and the new root digest propagated into the owning vbmeta, so the resign
-loop signs over the patched bytes. Patches that match nothing (different ROM
-build, refactored classes) are warned about and skipped — they never abort the
-resign.
+Archive ops force a method, invocation result, or compiled resource value to a
+constant. Text ops replace one exact byte string in a regular file with another
+same-length string. Because the edits keep every target file byte length
+identical, DynoBox recomputes dex header sums and/or STORED zip-entry CRCs when
+needed, then writes the file back over its ext4 extents. Every partition an op
+touches has its dm-verity hash tree regenerated once and the new root digest
+propagated into the owning vbmeta, so the resign loop signs over the patched
+bytes. Patches that match nothing (different ROM build, refactored
+classes/resources/properties) are warned about and skipped — they never abort
+the resign.
 
 > APKs are patched in place; their v1/v2/v3 signatures are **not** rebuilt.
 > Integrity comes from the dm-verity'd, re-signed partition, not per-APK
@@ -32,7 +34,7 @@ description = "…"                       # optional
 [[op]]
 kind = "method_const_bool"              # op kind (see below)
 partition = "system"                    # image: <partition>.img
-file = "system/priv-app/…/App.apk"      # path of the APK from the image root
+file = "system/priv-app/…/App.apk"      # path from the image root
 # … kind-specific fields …
 ```
 
@@ -70,6 +72,28 @@ instructions with `nop`.
 | `proto`  | no       | JVM method descriptor; defaults to `()I`       |
 | `value`  | yes      | signed 32-bit integer                          |
 
+### `resource_bool`
+
+Force a compiled boolean resource inside a STORED `resources.arsc` APK entry to
+`true` or `false`. This is intended for small runtime resource overlays where
+rebuilding the APK would be excessive.
+
+| field      | required | meaning                                             |
+|------------|----------|-----------------------------------------------------|
+| `resource` | yes      | resource entry name, e.g. `config_wifi6ghzSupport` |
+| `value`    | yes      | `true` / `false`                                   |
+
+### `text_replace`
+
+Replace the first exact byte-string match inside a regular file with another
+byte string of identical length. This is intended for tiny property-file edits
+where growing the ext4 file would be unnecessary risk.
+
+| field  | required | meaning                                  |
+|--------|----------|------------------------------------------|
+| `from` | yes      | source text/bytes to find; must be non-empty |
+| `to`   | yes      | replacement text/bytes; same byte length as `from` |
+
 ### `invoke_const_bool`
 
 Force `invoke-static target_class.target_method()Z` results to a constant, but
@@ -102,3 +126,9 @@ only at the call sites inside one class (optionally one method). Rewrites each
   `PhoneWindowManager.getResolvedLongPressOnPowerBehavior()` → `1`
   (`LONG_PRESS_POWER_GLOBAL_ACTIONS`), including when `--fuck-lgsi` disables
   the LeVoice feature and its helper is never created.
+* **`wifi-unlock.dbp`** — keep TB322 PRC Wi-Fi on a US regulatory domain by
+  neutralizing Lenovo's pre-property-load assignment in
+  `system.img:/system/bin/init`, replacing one duplicate
+  `system.img:/system/build.prop` property with
+  `ro.product.countrycode=US`. This avoids patching the compressed Mainline
+  Wi-Fi APEX.
