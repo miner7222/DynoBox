@@ -575,7 +575,11 @@ where
             return;
         }
     };
-    if let Err(e) = std::fs::write(&dst, &bytes) {
+    let html = crate::report::rewrite_report_output_dir(
+        &String::from_utf8_lossy(&bytes),
+        final_output_dir,
+    );
+    if let Err(e) = std::fs::write(&dst, html) {
         message(
             events,
             MessageLevel::Warning,
@@ -3716,6 +3720,35 @@ mod tests {
             assert!(output_dir.exists());
             Ok(())
         }
+    }
+
+    #[test]
+    fn propagated_report_displays_final_output_directory() {
+        let temp = tempdir().unwrap();
+        let staged = temp.path().join("dynobox-stage-abc").join("resign_stage");
+        let final_output = temp.path().join("final-output");
+        fs::create_dir_all(&staged).unwrap();
+        fs::create_dir_all(&final_output).unwrap();
+
+        PipelineReport {
+            command_line: "dynobox resign".to_string(),
+            command_kind: "resign".to_string(),
+            started_at: "2026-05-02T10:00:00Z".to_string(),
+            finished_at: "2026-05-02T10:01:00Z".to_string(),
+            output_dir: staged.display().to_string(),
+            resigned_images: vec!["boot.img".to_string()],
+            ..Default::default()
+        }
+        .write(&staged.join("report.html"))
+        .unwrap();
+
+        let mut sink = NoopEventSink;
+        propagate_pipeline_report(&staged, &final_output, &mut sink);
+
+        let html = fs::read_to_string(final_output.join("report.html")).unwrap();
+        assert!(html.contains("final-output"));
+        assert!(!html.contains("resign_stage"));
+        assert!(!html.contains("dynobox-stage-abc"));
     }
 
     #[test]

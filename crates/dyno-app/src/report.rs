@@ -130,8 +130,10 @@ pub struct SigningKeyChange {
 
 impl PipelineReport {
     pub fn new(command_kind: impl Into<String>, output_dir: &Path) -> Self {
-        let argv: Vec<String> = std::env::args().collect();
-        let command_line = argv.join(" ");
+        let command_line = std::env::args()
+            .map(|argument| redact_command_argument(&argument))
+            .collect::<Vec<_>>()
+            .join(" ");
         Self {
             command_line,
             command_kind: command_kind.into(),
@@ -171,24 +173,27 @@ impl PipelineReport {
         let mut out = String::with_capacity(8 * 1024);
         out.push_str(HTML_HEADER);
 
-        // Header section: command, kind, timestamps, output dir.
-        out.push_str("<h1>DynoBox pipeline report</h1>\n");
-        out.push_str("<table class='meta'>\n");
-        push_meta_row(&mut out, "Command", &esc(&self.command_line));
-        push_meta_row(&mut out, "Stage", &esc(&self.command_kind));
-        push_meta_row(&mut out, "Started", &esc(&self.started_at));
-        push_meta_row(&mut out, "Finished", &esc(&self.finished_at));
-        push_meta_row(&mut out, "Output dir", &esc(&self.output_dir));
-        out.push_str("</table>\n");
+        out.push_str("<main>\n<header class='report-header'>\n");
+        out.push_str("<div><p class='product'>DynoBox</p><h1>Pipeline report</h1></div>\n");
+        out.push_str("<p class='status'>Completed</p>\n</header>\n");
+        out.push_str("<section class='run-summary' aria-label='Run summary'>\n");
+        push_summary_item(
+            &mut out,
+            "Command",
+            &redact_command_line(&self.command_line),
+            true,
+        );
+        push_summary_item(&mut out, "Output", display_name(&self.output_dir), false);
+        push_summary_item(&mut out, "Finished", &self.finished_at, false);
+        out.push_str("</section>\n");
 
-        if let Some(spl) = &self.boot_spl {
-            push_spl_section(&mut out, "boot.img security_patch", spl);
-        }
-        if let Some(spl) = &self.vendor_spl {
-            push_spl_section(&mut out, "vendor.img security_patch", spl);
-        }
-        if let Some(spl) = &self.system_spl {
-            push_spl_section(&mut out, "system.img security_patch", spl);
+        let spl_records = [
+            ("boot.img", self.boot_spl.as_ref()),
+            ("vendor.img", self.vendor_spl.as_ref()),
+            ("system.img", self.system_spl.as_ref()),
+        ];
+        if spl_records.iter().any(|(_, record)| record.is_some()) {
+            push_spl_section(&mut out, &spl_records);
         }
         if let Some(rb) = &self.rollback {
             push_rollback_section(&mut out, rb);
@@ -207,6 +212,7 @@ impl PipelineReport {
         }
         push_resigned_section(&mut out, &self.resigned_images);
 
+        out.push_str("</main>\n");
         out.push_str(HTML_FOOTER);
         out
     }
@@ -216,23 +222,43 @@ const HTML_HEADER: &str = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DynoBox pipeline report</title>
   <style>
-    body { font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; padding: 24px; color: #1f2328; max-width: 1100px; margin: 0 auto; }
-    h1 { border-bottom: 1px solid #d0d7de; padding-bottom: 12px; }
-    h2 { margin-top: 36px; border-bottom: 1px solid #d0d7de; padding-bottom: 6px; font-size: 1.15em; }
-    table { border-collapse: collapse; margin: 8px 0 16px 0; }
-    th, td { border: 1px solid #d0d7de; padding: 6px 12px; text-align: left; vertical-align: top; }
-    th { background: #f6f8fa; }
-    table.meta th { width: 140px; }
-    code, .mono { font-family: SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95em; }
-    .from { color: #cf222e; }
-    .to { color: #1a7f37; }
-    .skipped { color: #9a6700; }
-    .applied { color: #1a7f37; font-weight: 600; }
-    .not-applied { color: #57606a; }
-    ul.entries { margin: 6px 0 12px 0; padding-left: 24px; }
-    .empty { color: #57606a; font-style: italic; }
+    :root { color-scheme: light; --ink: #172033; --muted: #5d6878; --line: #d8dee8; --surface: #ffffff; --canvas: #edf1f6; --accent: #165dcc; --success: #167447; --warning: #995d00; --danger: #b42318; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px 20px; background: var(--canvas); color: var(--ink); font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 960px; margin: 0 auto; padding: 40px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+    .report-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 28px; }
+    .product { margin: 0 0 4px; color: var(--accent); font-size: 0.84rem; font-weight: 700; letter-spacing: 0.04em; }
+    h1, h2 { margin: 0; color: var(--ink); text-wrap: balance; }
+    h1 { font-size: clamp(1.8rem, 4vw, 2.4rem); line-height: 1.15; letter-spacing: -0.025em; }
+    h2 { font-size: 1.05rem; line-height: 1.3; }
+    h3 { margin: 20px 0 8px; font-size: 0.9rem; color: var(--muted); }
+    .status { margin: 2px 0 0; padding: 4px 10px; color: var(--success); background: #e9f7ef; border-radius: 999px; font-size: 0.84rem; font-weight: 700; white-space: nowrap; }
+    .run-summary { display: grid; grid-template-columns: minmax(0, 1fr) 180px 190px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+    .summary-item { min-width: 0; padding: 14px 16px; border-left: 1px solid var(--line); }
+    .summary-item:first-child { padding-left: 0; border-left: 0; }
+    .summary-label { display: block; margin-bottom: 3px; color: var(--muted); font-size: 0.78rem; font-weight: 700; }
+    .summary-value { overflow-wrap: anywhere; color: var(--ink); }
+    section:not(.run-summary) { padding-top: 28px; }
+    .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+    .section-note { margin: 0; color: var(--muted); font-size: 0.88rem; }
+    .warning { padding: 18px; background: #fff8e8; border: 1px solid #e8ca85; border-radius: 8px; }
+    .warning p { margin: 8px 0 0; color: #654600; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); background: #f7f9fc; font-size: 0.76rem; font-weight: 700; }
+    td:last-child, th:last-child { padding-right: 0; }
+    th:first-child, td:first-child { padding-left: 0; }
+    code, .mono { font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; font-size: 0.9em; overflow-wrap: anywhere; }
+    .from { color: var(--danger); }
+    .to, .applied { color: var(--success); font-weight: 700; }
+    .skipped { color: var(--warning); font-weight: 700; }
+    .not-applied, .empty { color: var(--muted); }
+    .signed-images { margin: 8px 0 0; color: var(--muted); }
+    .signed-images code { color: var(--ink); }
+    @media (max-width: 680px) { body { padding: 0; } main { border: 0; border-radius: 0; padding: 28px 20px; } .report-header { gap: 12px; } .run-summary { grid-template-columns: 1fr; } .summary-item, .summary-item:first-child { padding: 12px 0; border: 0; border-top: 1px solid var(--line); } .summary-item:first-child { border-top: 0; } .section-heading { display: block; } .section-note { margin-top: 4px; } table { display: block; overflow-x: auto; white-space: nowrap; } }
   </style>
 </head>
 <body>
@@ -242,211 +268,231 @@ const HTML_FOOTER: &str = r#"</body>
 </html>
 "#;
 
-fn push_meta_row(out: &mut String, key: &str, val: &str) {
-    out.push_str("<tr><th>");
-    out.push_str(key);
-    out.push_str("</th><td><code>");
-    out.push_str(val);
-    out.push_str("</code></td></tr>\n");
+const OUTPUT_DIR_MARKER_START: &str = "<span data-report-output>";
+const OUTPUT_DIR_MARKER_END: &str = "</span>";
+
+/// Replace the staging output shown in a rendered report with the final
+/// pipeline output after repack has completed.
+pub(crate) fn rewrite_report_output_dir(html: &str, output_dir: &Path) -> String {
+    let Some(marker_start) = html.find(OUTPUT_DIR_MARKER_START) else {
+        return html.to_string();
+    };
+    let value_start = marker_start + OUTPUT_DIR_MARKER_START.len();
+    let Some(marker_end) = html[value_start..].find(OUTPUT_DIR_MARKER_END) else {
+        return html.to_string();
+    };
+    let value_end = value_start + marker_end;
+    let output_dir = output_dir.to_string_lossy();
+    let output_name = esc(display_name(&output_dir));
+
+    let mut rewritten =
+        String::with_capacity(html.len() - (value_end - value_start) + output_name.len());
+    rewritten.push_str(&html[..value_start]);
+    rewritten.push_str(&output_name);
+    rewritten.push_str(&html[value_end..]);
+    rewritten
 }
 
-fn push_spl_section(out: &mut String, title: &str, spl: &SplRecord) {
-    out.push_str("<h2>");
-    out.push_str(&esc(title));
-    out.push_str("</h2>\n");
-    out.push_str(
-        "<table>\n<tr><th>Property</th><th>From</th><th>To</th><th>Status</th><th>Note</th></tr>\n",
-    );
-    out.push_str("<tr>");
-    out.push_str(&format!("<td><code>{}</code></td>", esc(&spl.property)));
-    out.push_str(&format!(
-        "<td class='from'>{}</td>",
-        esc(spl.from.as_deref().unwrap_or("(unknown)"))
-    ));
-    out.push_str(&format!("<td class='to'>{}</td>", esc(&spl.to)));
-    out.push_str(&format!(
-        "<td class='{}'>{}</td>",
-        if spl.applied {
-            "applied"
+fn push_summary_item(out: &mut String, label: &str, value: &str, is_command: bool) {
+    out.push_str("<div class='summary-item'><span class='summary-label'>");
+    out.push_str(label);
+    out.push_str("</span><span class='summary-value");
+    if is_command {
+        out.push_str(" mono");
+    }
+    out.push_str("'>");
+    if label == "Output" {
+        out.push_str(OUTPUT_DIR_MARKER_START);
+    }
+    out.push_str(&esc(value));
+    if label == "Output" {
+        out.push_str(OUTPUT_DIR_MARKER_END);
+    }
+    out.push_str("</span></div>\n");
+}
+
+fn push_spl_section(out: &mut String, records: &[(&str, Option<&SplRecord>)]) {
+    out.push_str("<section><div class='section-heading'><h2>Security patch</h2></div>\n");
+    out.push_str("<table><tr><th>Image</th><th>From</th><th>To</th><th>Result</th></tr>\n");
+    for (image, record) in records {
+        let Some(spl) = record else {
+            continue;
+        };
+        out.push_str("<tr><td><code>");
+        out.push_str(image);
+        out.push_str("</code></td><td class='from'>");
+        out.push_str(&esc(spl.from.as_deref().unwrap_or("(unknown)")));
+        out.push_str("</td><td class='to'>");
+        out.push_str(&esc(&spl.to));
+        out.push_str("</td><td class='");
+        out.push_str(if spl.applied {
+            "applied'>Applied"
         } else {
-            "not-applied"
-        },
-        if spl.applied { "applied" } else { "skipped" }
-    ));
-    out.push_str(&format!("<td>{}</td>", esc(&spl.reason)));
-    out.push_str("</tr>\n</table>\n");
+            "not-applied'>Skipped"
+        });
+        out.push_str("</td></tr>\n");
+    }
+    out.push_str("</table></section>\n");
 }
 
 fn push_rollback_section(out: &mut String, rb: &RollbackRecord) {
-    out.push_str("<h2>AVB rollback_index</h2>\n");
-    out.push_str(
-        "<table>\n<tr><th>From (UTC)</th><th>To (UTC)</th><th>Status</th><th>Note</th></tr>\n",
-    );
-    out.push_str("<tr>");
-    out.push_str(&format!(
-        "<td class='from'>{} <span class='mono'>({})</span></td>",
-        esc(&rb.from_iso),
-        rb.from_unix
-    ));
-    out.push_str(&format!(
-        "<td class='to'>{} <span class='mono'>({})</span></td>",
-        esc(&rb.to_iso),
-        rb.to_unix
-    ));
-    out.push_str(&format!(
-        "<td class='{}'>{}</td>",
-        if rb.applied { "applied" } else { "not-applied" },
-        if rb.applied { "applied" } else { "skipped" }
-    ));
-    out.push_str(&format!("<td>{}</td>", esc(&rb.reason)));
-    out.push_str("</tr>\n</table>\n");
+    out.push_str("<section><div class='section-heading'><h2>Rollback index</h2></div>\n");
+    out.push_str("<table><tr><th>From</th><th>To</th><th>Result</th></tr><tr>");
+    out.push_str("<td class='from'>");
+    out.push_str(&esc(&rb.from_iso));
+    out.push_str(" <span class='mono'>");
+    out.push_str(&rb.from_unix.to_string());
+    out.push_str("</span></td><td class='to'>");
+    out.push_str(&esc(&rb.to_iso));
+    out.push_str(" <span class='mono'>");
+    out.push_str(&rb.to_unix.to_string());
+    out.push_str("</span></td><td class='");
+    out.push_str(if rb.applied {
+        "applied'>Applied"
+    } else {
+        "not-applied'>Skipped"
+    });
+    out.push_str("</td></tr></table></section>\n");
 }
 
 fn push_lgsi_section(out: &mut String, l: &LgsiRecord) {
-    out.push_str("<h2>LGSI feature toggles</h2>\n");
-    let trim = |s: &str| s.chars().take(16).collect::<String>();
-    out.push_str(&format!(
-        "<p class='mono'>verity root_digest: <span class='from'>{}</span> &rarr; <span class='to'>{}</span></p>\n",
-        esc(&trim(&l.old_root_digest)),
-        esc(&trim(&l.new_root_digest))
-    ));
-
-    out.push_str("<h3 style='margin-bottom:4px'>Applied (");
-    out.push_str(&l.applied.len().to_string());
-    out.push_str(")</h3>\n");
-    if l.applied.is_empty() {
-        out.push_str("<p class='empty'>No features flipped.</p>\n");
-    } else {
-        out.push_str("<table>\n<tr><th>Feature</th><th>From</th><th>To</th></tr>\n");
-        for c in &l.applied {
-            out.push_str("<tr>");
-            out.push_str(&format!("<td><code>{}</code></td>", esc(&c.name)));
-            out.push_str(&format!(
-                "<td class='from'>{}</td>",
-                if c.from { "true" } else { "false" }
-            ));
-            out.push_str(&format!(
-                "<td class='to'>{}</td>",
-                if c.to { "true" } else { "false" }
-            ));
-            out.push_str("</tr>\n");
-        }
-        out.push_str("</table>\n");
+    if l.applied.is_empty() && l.skipped.is_empty() {
+        return;
     }
-
-    out.push_str("<h3 style='margin-bottom:4px'>Skipped (");
-    out.push_str(&l.skipped.len().to_string());
-    out.push_str(")</h3>\n");
-    if l.skipped.is_empty() {
-        out.push_str("<p class='empty'>None.</p>\n");
-    } else {
-        out.push_str("<table>\n<tr><th>Feature</th><th>Reason</th></tr>\n");
-        for s in &l.skipped {
-            out.push_str("<tr>");
-            out.push_str(&format!("<td><code>{}</code></td>", esc(&s.name)));
-            out.push_str(&format!("<td class='skipped'>{}</td>", esc(&s.reason)));
-            out.push_str("</tr>\n");
-        }
-        out.push_str("</table>\n");
+    out.push_str("<section><div class='section-heading'><h2>LGSI features</h2></div>\n");
+    out.push_str("<table><tr><th>Feature</th><th>Change</th><th>Result</th><th>Note</th></tr>\n");
+    for change in &l.applied {
+        out.push_str("<tr><td><code>");
+        out.push_str(&esc(&change.name));
+        out.push_str("</code></td><td><span class='from'>");
+        out.push_str(if change.from { "true" } else { "false" });
+        out.push_str("</span> &rarr; <span class='to'>");
+        out.push_str(if change.to { "true" } else { "false" });
+        out.push_str("</span></td><td class='applied'>Applied</td><td></td></tr>\n");
     }
+    for skipped in &l.skipped {
+        out.push_str("<tr><td><code>");
+        out.push_str(&esc(&skipped.name));
+        out.push_str("</code></td><td>&mdash;</td><td class='skipped'>Skipped</td><td>");
+        out.push_str(&esc(&skipped.reason));
+        out.push_str("</td></tr>\n");
+    }
+    out.push_str("</table></section>\n");
 }
 
 fn push_signing_key_section(out: &mut String, sk: &SigningKeyChange) {
-    out.push_str("<h2>Signing key change</h2>\n");
-    out.push_str("<p>The resigned key's public-key SHA-1 differs from the OEM signing key already on the partitions. The bootloader's <code>abl.elf</code> may need to be replaced with one that trusts the new key, otherwise the device will fail AVB verification at boot.</p>\n");
-    out.push_str("<table>\n<tr><th>From (OEM)</th><th>To (resigned)</th></tr>\n");
-    out.push_str("<tr>");
-    out.push_str(&format!(
-        "<td class='from'><code>{}</code></td>",
-        esc(&sk.old_pubkey_sha1)
-    ));
-    out.push_str(&format!(
-        "<td class='to'><code>{}</code></td>",
-        esc(&sk.new_pubkey_sha1)
-    ));
-    out.push_str("</tr>\n</table>\n");
+    out.push_str("<section class='warning'><h2>Signing key changed</h2>");
+    out.push_str("<p>Use an <code>abl.elf</code> that trusts the new key.</p>");
+    out.push_str("<table><tr><th>OEM key</th><th>New key</th></tr><tr><td class='from'><code>");
+    out.push_str(&esc(&sk.old_pubkey_sha1));
+    out.push_str("</code></td><td class='to'><code>");
+    out.push_str(&esc(&sk.new_pubkey_sha1));
+    out.push_str("</code></td></tr></table></section>\n");
 }
 
 fn push_debloat_section(out: &mut String, db: &DebloatRecord) {
-    out.push_str("<h2>Debloat (hidden paths)</h2>\n");
-    out.push_str("<p>Selected files/folders were hidden from the partition's ext4 directory tree (dirent removal; blocks are not reclaimed). The dm-verity hash tree was regenerated and the AVB root digest updated.</p>\n");
-    out.push_str("<table>\n<tr><th>Partition</th><th>Hidden</th><th>Ignored (not found)</th><th>verity root (old → new)</th></tr>\n");
+    out.push_str("<section><div class='section-heading'><h2>Debloat</h2></div>\n");
+    out.push_str("<table><tr><th>Partition</th><th>Hidden</th><th>Not found</th></tr>\n");
     for p in &db.partitions {
-        out.push_str("<tr>");
-        out.push_str(&format!("<td><code>{}</code></td>", esc(&p.partition)));
-        out.push_str(&format!("<td class='to'>{}</td>", p.removed));
-        out.push_str(&format!("<td class='skipped'>{}</td>", p.not_found));
-        out.push_str(&format!(
-            "<td><span class='from'>{}</span> → <span class='to'>{}</span></td>",
-            esc(&p.old_root_digest[..16.min(p.old_root_digest.len())]),
-            esc(&p.new_root_digest[..16.min(p.new_root_digest.len())])
-        ));
-        out.push_str("</tr>\n");
+        out.push_str("<tr><td><code>");
+        out.push_str(&esc(&p.partition));
+        out.push_str("</code></td><td class='to'>");
+        out.push_str(&p.removed.to_string());
+        out.push_str("</td><td class='skipped'>");
+        out.push_str(&p.not_found.to_string());
+        out.push_str("</td></tr>\n");
     }
-    out.push_str("</table>\n");
+    out.push_str("</table></section>\n");
 }
 
 fn push_plus_section(out: &mut String, pl: &PlusRecord) {
-    out.push_str("<h2>Plus patches (.dbp)</h2>\n");
-    out.push_str("<p>External <code>.dbp</code> patches were applied to files inside the partition images via size-preserving archive/text edits. Each touched partition's dm-verity hash tree was regenerated and the AVB root digest updated.</p>\n");
+    if pl.patches.is_empty() {
+        return;
+    }
+    out.push_str("<section><div class='section-heading'><h2>Plus patches</h2></div>\n");
+    out.push_str("<table><tr><th>Patch</th><th>Target</th><th>Applied</th><th>Skipped</th></tr>\n");
     for patch in &pl.patches {
-        out.push_str(&format!(
-            "<h3 style='margin-bottom:4px'>{} <span class='mono'>({})</span></h3>\n",
-            esc(&patch.name),
-            esc(&patch.source)
-        ));
         if patch.files.is_empty() {
-            out.push_str("<p class='empty'>No target files matched.</p>\n");
+            out.push_str("<tr><td><code>");
+            out.push_str(&esc(&patch.name));
+            out.push_str("</code> <span class='mono'>");
+            out.push_str(&esc(display_name(&patch.source)));
+            out.push_str(
+                "</span></td><td class='empty'>No matching files</td><td>0</td><td>0</td></tr>\n",
+            );
             continue;
         }
-        out.push_str("<table>\n<tr><th>Partition</th><th>File</th><th>Ops applied</th><th>Ops skipped</th><th>Patched entries</th></tr>\n");
         for f in &patch.files {
-            let patched_list = if f.patched_entries.is_empty() {
-                "(none)".to_string()
-            } else {
-                f.patched_entries.join(", ")
-            };
-            out.push_str("<tr>");
-            out.push_str(&format!("<td><code>{}</code></td>", esc(&f.partition)));
-            out.push_str(&format!("<td><code>{}</code></td>", esc(&f.file)));
-            out.push_str(&format!("<td class='to'>{}</td>", f.ops_applied));
-            out.push_str(&format!(
-                "<td class='{}'>{}</td>",
-                if f.ops_skipped > 0 { "skipped" } else { "" },
-                f.ops_skipped
-            ));
-            out.push_str(&format!("<td class='mono'>{}</td>", esc(&patched_list)));
-            out.push_str("</tr>\n");
+            out.push_str("<tr><td><code>");
+            out.push_str(&esc(&patch.name));
+            out.push_str("</code> <span class='mono'>");
+            out.push_str(&esc(display_name(&patch.source)));
+            out.push_str("</span></td><td><code>");
+            out.push_str(&esc(&f.partition));
+            out.push_str(" / ");
+            out.push_str(&esc(display_name(&f.file)));
+            out.push_str("</code></td><td class='to'>");
+            out.push_str(&f.ops_applied.to_string());
+            out.push_str("</td><td class='");
+            out.push_str(if f.ops_skipped > 0 { "skipped'>" } else { "'>" });
+            out.push_str(&f.ops_skipped.to_string());
+            out.push_str("</td></tr>\n");
         }
-        out.push_str("</table>\n");
     }
-    if !pl.verity.is_empty() {
-        out.push_str("<table>\n<tr><th>Partition</th><th>verity root (old &rarr; new)</th></tr>\n");
-        for (partition, old, new) in &pl.verity {
-            out.push_str("<tr>");
-            out.push_str(&format!("<td><code>{}</code></td>", esc(partition)));
-            out.push_str(&format!(
-                "<td><span class='from'>{}</span> &rarr; <span class='to'>{}</span></td>",
-                esc(&old[..16.min(old.len())]),
-                esc(&new[..16.min(new.len())])
-            ));
-            out.push_str("</tr>\n");
-        }
-        out.push_str("</table>\n");
-    }
+    out.push_str("</table></section>\n");
 }
 
 fn push_resigned_section(out: &mut String, images: &[String]) {
-    out.push_str("<h2>Resigned images</h2>\n");
     if images.is_empty() {
-        out.push_str("<p class='empty'>No images were resigned.</p>\n");
-    } else {
-        out.push_str("<ul class='entries'>\n");
-        for img in images {
-            out.push_str(&format!("<li><code>{}</code></li>\n", esc(img)));
-        }
-        out.push_str("</ul>\n");
+        return;
     }
+    out.push_str(
+        "<section><div class='section-heading'><h2>Signed images</h2><p class='section-note'>",
+    );
+    out.push_str(&images.len().to_string());
+    out.push_str(" images</p></div><p class='signed-images'>");
+    for (index, image) in images.iter().enumerate() {
+        if index > 0 {
+            out.push_str(" &middot; ");
+        }
+        out.push_str("<code>");
+        out.push_str(&esc(display_name(image)));
+        out.push_str("</code>");
+    }
+    out.push_str("</p></section>\n");
+}
+
+fn display_name(value: &str) -> &str {
+    let trimmed = value.trim_end_matches(['/', '\\']);
+    trimmed
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(value)
+}
+
+fn redact_command_line(command_line: &str) -> String {
+    command_line
+        .split_whitespace()
+        .map(redact_command_argument)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_command_argument(argument: &str) -> String {
+    if let Some((option, value)) = argument.split_once('=') {
+        if contains_path_separator(value) {
+            return format!("{option}={}", display_name(value));
+        }
+    }
+    if contains_path_separator(argument) {
+        return display_name(argument).to_string();
+    }
+    argument.to_string()
+}
+
+fn contains_path_separator(value: &str) -> bool {
+    value.contains('/') || value.contains('\\')
 }
 
 fn esc(input: &str) -> String {
@@ -517,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn render_html_includes_command_and_stages() {
+    fn render_html_includes_command_and_changes() {
         let mut r = PipelineReport {
             command_line: "dynobox resign --input X --key testkey_rsa4096".to_string(),
             command_kind: "resign".to_string(),
@@ -553,6 +599,44 @@ mod tests {
         assert!(html.contains("MissingFeature"));
         assert!(html.contains("2026-04-05"));
         assert!(html.contains("2026-05-01"));
+    }
+
+    #[test]
+    fn render_html_redacts_absolute_paths() {
+        let r = PipelineReport {
+            command_line: r"dynobox apply --input D:\Downloads\Tool\image --output=D:\Downloads\Tool\final --plus=C:\Git\DynoBox\patches\wifi-unlock.dbp".to_string(),
+            command_kind: "apply".to_string(),
+            started_at: "2026-05-02T10:00:00Z".to_string(),
+            finished_at: "2026-05-02T10:01:00Z".to_string(),
+            output_dir: r"D:\Downloads\Tool\dynobox-stage-abc\resign_stage".to_string(),
+            resigned_images: vec!["boot.img".to_string()],
+            plus: Some(PlusRecord {
+                patches: vec![PlusPatchRecord {
+                    name: "wifi-unlock".to_string(),
+                    source: r"C:\Git\DynoBox\patches\wifi-unlock.dbp".to_string(),
+                    files: vec![PlusFileRecord {
+                        partition: "product".to_string(),
+                        file: r"D:\staging\product\overlay\WifiOverlay.apk".to_string(),
+                        ops_applied: 1,
+                        ops_skipped: 0,
+                        patched_entries: Vec::new(),
+                    }],
+                }],
+                verity: Vec::new(),
+            }),
+            ..Default::default()
+        };
+
+        let html = r.render_html();
+
+        assert!(html.contains("--input image"));
+        assert!(html.contains("--output=final"));
+        assert!(html.contains("--plus=wifi-unlock.dbp"));
+        assert!(html.contains("WifiOverlay.apk"));
+        assert!(html.contains("resign_stage"));
+        assert!(!html.contains(r"D:\Downloads"));
+        assert!(!html.contains(r"C:\Git"));
+        assert!(!html.contains(r"D:\staging"));
     }
 
     #[test]
