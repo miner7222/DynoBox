@@ -1053,6 +1053,60 @@ value = false
             }
             _ => panic!("wifi-unlock second op must neutralize Lenovo init country mapping"),
         }
+        let gs = load_dbp(&patches_dir().join("google-services.dbp")).expect("google-services.dbp");
+        assert_eq!(gs.name, "google-services");
+        assert_eq!(gs.ops.len(), 1);
+        match &gs.ops[0] {
+            DbpOp::MethodConstInt {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                value,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                assert_eq!(
+                    class,
+                    "Lcom/lenovo/settings/applications/GoogleServicesPreferenceController;"
+                );
+                assert_eq!(method, "getAvailabilityStatus");
+                assert_eq!(proto, "()I");
+                assert_eq!(*value, 0);
+            }
+            _ => panic!("google-services must use method_const_int"),
+        }
+    }
+
+    /// Apply the bundled google-services op to the real ZuiSettings dexes.
+    /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
+    #[test]
+    fn bundled_google_services_lands_on_real_dex() {
+        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("google-services.dbp")).unwrap();
+        let dir = std::path::Path::new(&dir);
+        let mut landed = 0usize;
+        for name in [
+            "classes.dex",
+            "classes2.dex",
+            "classes3.dex",
+            "classes4.dex",
+            "classes5.dex",
+            "classes6.dex",
+        ] {
+            let Ok(mut dex) = std::fs::read(dir.join(name)) else {
+                continue;
+            };
+            for op in &doc.ops {
+                if apply_one_op(&mut dex, op).unwrap() {
+                    landed += 1;
+                }
+            }
+        }
+        assert_eq!(landed, 1, "google-services op should land exactly once");
     }
 
     /// Apply the bundled clean-launcher ops to the real ZuiLauncher dexes.

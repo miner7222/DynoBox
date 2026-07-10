@@ -132,3 +132,8 @@ only at the call sites inside one class (optionally one method). Rewrites each
   `system.img:/system/build.prop` property with
   `ro.product.countrycode=US`. This avoids patching the compressed Mainline
   Wi-Fi APEX.
+* **`google-services.dbp`** — always show the ZuiSettings "Google services"
+  menu. Forces
+  `GoogleServicesPreferenceController.getAvailabilityStatus()` → `0`
+  (`AVAILABLE`) so the entry appears regardless of the `cn.google.services`
+  system feature.
