@@ -123,9 +123,11 @@ property-file edits where growing the ext4 file would be unnecessary risk.
 
 ### `invoke_const_bool`
 
-Force `invoke-static target_class.target_method()Z` results to a constant, but
-only at the call sites inside one class (optionally one method). Rewrites each
-`invoke-static` + `move-result vAA` pair to `const/16 vAA, #lit` + 2×`nop`.
+Force `target_class.target_method()Z` results to a constant, but only at the
+call sites inside one class (optionally one method). Rewrites each format-35c
+invoke (`invoke-static/virtual/super/direct/interface`) + `move-result vAA` pair
+to `const/16 vAA, #lit` + 2×`nop`, so both static (`isRowVersion`) and instance
+(`AppHelper.isSupportCCS`) getters can be scoped.
 
 | field           | required | meaning                                                  |
 |-----------------|----------|----------------------------------------------------------|
@@ -139,8 +141,8 @@ only at the call sites inside one class (optionally one method). Rewrites each
 ### `invoke_const_int`
 
 Like `invoke_const_bool`, but for an int-returning (`I`) method: forces each
-`invoke-static target_class.target_method(...)I` result to `value` at its call
-sites inside `scan_class` (optionally `scan_method`). Handy to pin a
+format-35c invoke of `target_class.target_method(...)I` result to `value` at its
+call sites inside `scan_class` (optionally `scan_method`). Handy to pin a
 `Settings.*.getInt(...)` feature gate to a constant. Same-size, in place
 (`const/16` for i16-range values, else `const`), nop-padded.
 
@@ -245,6 +247,66 @@ Requires `RemoteViews.setViewVisibility(I,I)V` already referenced in the dex, an
 the exact `[const id][2-unit load][3-unit invoke]` shape at the site. The id's
 register and `rv_reg`/`scratch_reg` must all be < 16. Size-preserving.
 
+### `field_const_bool`
+
+Force scoped reads of one exact boolean instance field to a constant. Each
+matching two-unit `iget-boolean vA, vB, field@CCCC` inside `scan_class`
+(optionally only `scan_method`) becomes `const/4 vA, #value` + `nop`. The field
+itself is not rewritten, so other classes keep their original reads.
+
+| field          | required | meaning                                                      |
+|----------------|----------|--------------------------------------------------------------|
+| `scan_class`   | yes      | class whose methods are scanned                              |
+| `scan_method`  | no       | limit to one method name when set                           |
+| `target_class` | yes      | JVM class that owns the field                                |
+| `target_field` | yes      | field name, e.g. `isNetworkAvail`                            |
+| `value`        | yes      | `true` / `false`                                             |
+
+Size-preserving. A missing class, field, or method is a clean no-op.
+
+### `intent_action_broadcast`
+
+Retarget an existing Intent action string reference and replace the matching
+`Context.startActivity(Intent, Bundle)` with `Context.sendBroadcast(Intent)`.
+Both action strings must already exist in the dex string table — the sorted
+string-data section is never edited. The scan is conservative: a source action
+must feed one `Intent.setAction`, followed by exactly one three-arg
+`startActivity` on that same Intent register. Ambiguous or incomplete sequences
+are left byte-for-byte unchanged.
+
+| field         | required | meaning                                                     |
+|---------------|----------|-------------------------------------------------------------|
+| `from_action` | yes      | existing Intent action string to retarget                   |
+| `to_action`   | yes      | existing Intent action string to use instead                |
+
+Only the three-unit `invoke-virtual` form used by LenovoID is accepted. The
+rewrite keeps instruction width identical (`startActivity` and `sendBroadcast`
+are both three code units here).
+
+### `method_broadcast_finish`
+
+Rewrite one Activity method body (currently only `(Landroid/os/Bundle;)V`, i.e.
+`onCreate`) to:
+
+1. `invoke-super` the named `super_class` method with the original arguments
+2. `Activity.finish()` before the next setup Activity can be launched
+3. build an `Intent` directly from an **already-present** action string
+4. `Context.sendBroadcast(Intent)`
+5. `return-void`
+
+The entire remainder of the original body is `nop`-padded. Size-preserving;
+refuses shared code items, methods with try/catch tables, and incompatible
+register/argument layouts. Used to skip an OOBE entry Activity before it draws
+while still advancing the setup wizard.
+
+| field         | required | meaning                                                     |
+|---------------|----------|-------------------------------------------------------------|
+| `class`       | yes      | JVM class owning the method                                 |
+| `method`      | yes      | method name, typically `onCreate`                           |
+| `proto`       | no       | defaults to `(Landroid/os/Bundle;)V`                        |
+| `super_class` | yes      | JVM class of the `invoke-super` target                      |
+| `action`      | yes      | existing Intent action string already in the dex            |
+
 ## Bundled patches
 
 * **`clean-launcher.dbp`** — force ZuiLauncher to ROW behaviour (home slide-up
@@ -268,6 +330,44 @@ register and `rv_reg`/`scratch_reg` must all be < 16. Size-preserving.
   `GoogleServicesPreferenceController.getAvailabilityStatus()` → `0`
   (`AVAILABLE`) so the entry appears regardless of the `cn.google.services`
   system feature.
+* **`debloat-setupwizard.dbp`** — make the first-boot flow independent of the
+  removed `XuiEasySync.apk`, skip the Lenovo ID entry screen, and keep the final
+  home button usable without the Vantage widget (7 ops across the
+  setup wizard, ZuiSettings, and LenovoID):
+  * **Fix Wi-Fi Next / Set up later** — in
+    `DeviceActivationForWifiActivity.startPrivacySettingsActivity`, force its
+    `isNetworkAvail` field read → `true` (`field_const_bool`) and its scoped
+    `isPrcCommercial()` result → `false`. Both connected and offline paths leave
+    the Wi-Fi page by launching Lenovo ID (which the next op then skips).
+  * **Skip Lenovo ID before it draws** — `method_broadcast_finish` rewrites
+    `PsLoginWizardActivity.onCreate` to run its required direct-super lifecycle,
+    then `finish` + broadcast existing
+    `com.zui.setupwizard.action.CLOUD_SKIP` + `return-void`. Finishing before
+    signaling the next page prevents LenovoID's translucent window from
+    remaining visible under SetupWizard.
+  * **Skip EasySync after Lenovo ID** — `intent_action_broadcast` retargets all
+    nine LenovoID source-action loads (covering ten branch-local launch
+    continuations) from the existing
+    `GUIDE_DATA_RESTORE_FROM_PRIVACY` string index to the existing
+    `com.zui.setupwizard.action.CLOUD_SKIP` index, then replaces the associated
+    `startActivity(Intent, Bundle)` with `sendBroadcast(Intent)`. Belt-and-braces
+    if any completion path still runs; the sorted dex string-data table is not
+    edited.
+  * **Protect alternate setup pages** — force
+    `ZuiUtils.getCloudActivityAction(ctx, page)` onto its offline+completed
+    `null` result (`ConnectivityUtil.isOnline()` → `false` and
+    `SharedPreHelper.isCloudRestoreCompleted()` → `true`) so Ai/Legion/Tianjiao
+    callers do not launch LeCloud either.
+  * **Keep the final home button enabled** — force the scoped
+    `AppHelper.isSupportCCS()` result in `CompleteLandActivity.onCreate` →
+    `true`. Without a Vantage widget rectangle, the stock false branch hides
+    `btn_next`, shows the loading view, and waits for a launcher transition.
+
+  > Keep `LenovoID.apk` installed; the patch rewrites its entry `onCreate` and
+  > EasySync continuations in place rather than removing the package. Do not
+  > restore the old global `AppHelper.isRow()` force: `CompleteLandActivity.onCreate`
+  > gates `setContentView` on `!isRow()`, so the global patch leaves `btn_next`
+  > null and crashes.
 * **`google-lens-button.dbp`** — show the Google Lens camera button instead
   of ZUI AI Lens on a PRC ZuiCamera. `CaptureModule`/`WideCaptureModule`
   `getUISpec()` pick the lens button by `ApiHelper.isRow()`; forcing it →

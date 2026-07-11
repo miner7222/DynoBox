@@ -1,0 +1,110 @@
+# debloat-setupwizard.dbp - bypass the PRC EasySync/LeCloud restore activity
+# when XuiEasySync.apk is absent, skip the Lenovo ID entry screen itself, and
+# let the final CompleteLand screen finish without the Lenovo Vantage widget.
+#
+# The Wi-Fi activation page normally launches Lenovo ID only while online; its
+# offline / "Set up later" path launches EasySync directly. Force that decision
+# onto the Lenovo ID activity so both paths leave Wi-Fi, then rewrite Lenovo ID's
+# onCreate to finish immediately and broadcast the setup wizard's existing
+# CLOUD_SKIP action (same signal used after a normal skip/login). EasySync
+# continuations inside LenovoID are also retargeted to CLOUD_SKIP as a belt-and-
+# braces fallback if any completion path still runs.
+#
+# Do not force AppHelper.isRow() globally or in PrivacyAndSettingActivity. The
+# global form crashes CompleteLandActivity, and the Privacy activity occurs
+# after the DeviceActivationForWifiActivity launch that must be fixed here.
+#
+# Apply with:  dynobox resign ... --plus patches/debloat-setupwizard.dbp
+
+name = "debloat-setupwizard"
+description = "Skip the Lenovo ID entry screen and the removed XuiEasySync restore activity; keep the final home button visible without the Vantage widget."
+
+# Alternate PRC setup pages (Ai/Legion/Tianjiao) consult this helper before
+# launching LeCloud. Force its offline+completed null result so they skip it.
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+scan_class = "Lcom/zui/setupwizard/ZuiUtils;"
+scan_method = "getCloudActivityAction"
+target_class = "Lcom/zui/setupwizard/utils/ConnectivityUtil;"
+target_method = "isOnline"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+scan_class = "Lcom/zui/setupwizard/ZuiUtils;"
+scan_method = "getCloudActivityAction"
+target_class = "Lcom/tblenovo/setup/utils/SharedPreHelper;"
+target_method = "isCloudRestoreCompleted"
+proto = "(Landroid/content/Context;)Z"
+value = true
+
+# DeviceActivationForWifiActivity sends offline / "Set up later" to EasySync.
+# Treat the network gate as available and the commercial subvariant as false so
+# both offline and online paths launch the existing Lenovo ID wizard instead.
+[[op]]
+kind = "field_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+scan_method = "startPrivacySettingsActivity"
+target_class = "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+target_field = "isNetworkAvail"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+scan_method = "startPrivacySettingsActivity"
+target_class = "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+target_method = "isPrcCommercial"
+value = false
+
+# Lenovo ID uses this action at every login/registration/skip continuation.
+# Retarget its nine existing const-string loads to the already-present
+# CLOUD_SKIP action and convert all ten associated launches (one action load is
+# shared across two branches) to broadcasts for SetupWizardApp$MyReceiver. No
+# dex string_data item is changed.
+[[op]]
+kind = "intent_action_broadcast"
+partition = "system"
+file = "system/priv-app/LenovoID/LenovoID.apk"
+from_action = "com.zui.cloudservice.intent.action.GUIDE_DATA_RESTORE_FROM_PRIVACY"
+to_action = "com.zui.setupwizard.action.CLOUD_SKIP"
+
+# Skip Lenovo ID itself: rewrite PsLoginWizardActivity.onCreate to run its
+# required direct-super lifecycle, finish before broadcasting the existing
+# CLOUD_SKIP action (SetupWizardApp$MyReceiver advances), and return. Finishing
+# before signaling the next page prevents the translucent LenovoID window from
+# remaining under SetupWizard. The action string and every method id already
+# exist in LenovoID's classes.dex (STORED).
+[[op]]
+kind = "method_broadcast_finish"
+partition = "system"
+file = "system/priv-app/LenovoID/LenovoID.apk"
+class = "Lcom/lenovo/lsf/lenovoid/ui/PsLoginWizardActivity;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+super_class = "Lcom/lenovo/lsf/lenovoid/ui/BaseWizardActivity;"
+action = "com.zui.setupwizard.action.CLOUD_SKIP"
+
+# Let the final CompleteLandActivity screen finish without the Lenovo Vantage
+# home widget (e.g. after debloating com.tblenovo.center): with no widget rect
+# it hides the home button and waits forever on a launcher zoom-transition.
+# Force AppHelper.isSupportCCS() -> true only in onCreate (the real home-button
+# gate on current firmware) so the commercial path keeps btn_next visible.
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+scan_class = "Lcom/zui/setupwizard/CompleteLandActivity;"
+scan_method = "onCreate"
+target_class = "Lcom/zui/setupwizard/common/AppHelper;"
+target_method = "isSupportCCS"
+value = true

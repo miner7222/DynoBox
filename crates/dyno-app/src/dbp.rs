@@ -2,10 +2,10 @@
 //! applied to APKs inside partition images during resign (`--plus`).
 //!
 //! A `.dbp` document names a set of size-preserving patch ops. Archive ops
-//! target one APK/JAR inside one partition image and force a method, invocation
-//! result, or compiled resource value to a constant. Text ops replace one exact
-//! byte string inside a regular file with another same-length string. Dex
-//! rewrites use the [`crate::dex_patch`] primitives. This is how DynoBox ships
+//! target one APK/JAR inside one partition image and rewrite a method, invocation
+//! result, field read, Intent launch, or compiled resource in place. Text ops
+//! replace one exact byte string inside a regular file with another same-length
+//! string. Dex rewrites use the [`crate::dex_patch`] primitives. This is how DynoBox ships
 //! the former built-in "clean-launcher" and ZuiSettings locale patches as data
 //! instead of code.
 //!
@@ -42,9 +42,11 @@ use memchr::memmem;
 use serde::Deserialize;
 
 use crate::dex_patch::{
-    NopAnchor, force_fragment_render_gone, force_invoke_const_bool, force_invoke_const_int,
-    force_method_return_bool, force_method_return_int, force_method_return_void,
-    force_nop_anchored_invoke, force_remoteviews_gone, force_view_gone, parse_method_descriptor,
+    NopAnchor, force_field_const_bool, force_fragment_render_gone, force_invoke_const_bool,
+    force_invoke_const_int, force_method_broadcast_finish, force_method_return_bool,
+    force_method_return_int, force_method_return_void, force_nop_anchored_invoke,
+    force_remoteviews_gone, force_view_gone, parse_method_descriptor,
+    redirect_intent_action_to_broadcast,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
 use crate::fuck_lgsi::{
@@ -62,6 +64,10 @@ fn default_int_proto() -> String {
 
 fn default_void_proto() -> String {
     "()V".to_string()
+}
+
+fn default_on_create_bundle_proto() -> String {
+    "(Landroid/os/Bundle;)V".to_string()
 }
 
 fn default_on_create_view() -> String {
@@ -170,6 +176,40 @@ pub enum DbpOp {
         proto: String,
         value: i32,
     },
+    /// Force scoped reads of one exact boolean instance field to `value` by
+    /// replacing `iget-boolean` with a size-preserving constant load.
+    FieldConstBool {
+        partition: String,
+        file: String,
+        scan_class: String,
+        #[serde(default)]
+        scan_method: Option<String>,
+        target_class: String,
+        target_field: String,
+        value: bool,
+    },
+    /// Retarget an existing Intent action string reference and replace the
+    /// associated `startActivity(Intent, Bundle)` with `sendBroadcast(Intent)`.
+    /// Both strings must already exist in the dex string table.
+    IntentActionBroadcast {
+        partition: String,
+        file: String,
+        from_action: String,
+        to_action: String,
+    },
+    /// Rewrite one Activity method body to `super` + `finish()` +
+    /// broadcast(`action`) + `return-void`. Skips an OOBE entry screen (e.g. Lenovo ID)
+    /// while advancing the setup wizard through an already-registered action.
+    MethodBroadcastFinish {
+        partition: String,
+        file: String,
+        class: String,
+        method: String,
+        #[serde(default = "default_on_create_bundle_proto")]
+        proto: String,
+        super_class: String,
+        action: String,
+    },
     /// Collapse a statically-embedded `<fragment>` tile by rewriting its
     /// `onCreateView` to inflate `layout` and return it with visibility `GONE`.
     /// Removes a homepage/entry tile without editing the compiled binary layout.
@@ -235,6 +275,9 @@ impl DbpOp {
             | DbpOp::TextReplace { partition, .. }
             | DbpOp::InvokeConstBool { partition, .. }
             | DbpOp::InvokeConstInt { partition, .. }
+            | DbpOp::FieldConstBool { partition, .. }
+            | DbpOp::IntentActionBroadcast { partition, .. }
+            | DbpOp::MethodBroadcastFinish { partition, .. }
             | DbpOp::FragmentHide { partition, .. }
             | DbpOp::NopInvoke { partition, .. }
             | DbpOp::ForceViewGone { partition, .. }
@@ -252,6 +295,9 @@ impl DbpOp {
             | DbpOp::TextReplace { file, .. }
             | DbpOp::InvokeConstBool { file, .. }
             | DbpOp::InvokeConstInt { file, .. }
+            | DbpOp::FieldConstBool { file, .. }
+            | DbpOp::IntentActionBroadcast { file, .. }
+            | DbpOp::MethodBroadcastFinish { file, .. }
             | DbpOp::FragmentHide { file, .. }
             | DbpOp::NopInvoke { file, .. }
             | DbpOp::ForceViewGone { file, .. }
@@ -356,6 +402,88 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
                         "text_replace `from` and `to` must have identical byte length ({} != {})",
                         from.len(),
                         to.len()
+                    )));
+                }
+            }
+            DbpOp::FieldConstBool {
+                scan_class,
+                scan_method,
+                target_class,
+                target_field,
+                ..
+            } => {
+                for (label, class) in [
+                    ("scan_class", scan_class.as_str()),
+                    ("target_class", target_class.as_str()),
+                ] {
+                    if !(class.starts_with('L') && class.ends_with(';') && class.len() > 2) {
+                        return Err(bail(format!(
+                            "field_const_bool `{label}` must be a JVM descriptor like `Lcom/x/Y;`, got `{class}`"
+                        )));
+                    }
+                }
+                if scan_method.as_ref().is_some_and(String::is_empty) {
+                    return Err(bail(
+                        "field_const_bool `scan_method` must not be empty when set".to_string(),
+                    ));
+                }
+                if target_field.is_empty() {
+                    return Err(bail(
+                        "field_const_bool `target_field` must not be empty".to_string(),
+                    ));
+                }
+            }
+            DbpOp::IntentActionBroadcast {
+                from_action,
+                to_action,
+                ..
+            } => {
+                if from_action.is_empty() || to_action.is_empty() {
+                    return Err(bail(
+                        "intent_action_broadcast actions must not be empty".to_string(),
+                    ));
+                }
+                if from_action == to_action {
+                    return Err(bail(
+                        "intent_action_broadcast `from_action` and `to_action` must differ"
+                            .to_string(),
+                    ));
+                }
+            }
+            DbpOp::MethodBroadcastFinish {
+                class,
+                method,
+                proto,
+                super_class,
+                action,
+                ..
+            } => {
+                for (label, class_name) in [
+                    ("class", class.as_str()),
+                    ("super_class", super_class.as_str()),
+                ] {
+                    if !(class_name.starts_with('L')
+                        && class_name.ends_with(';')
+                        && class_name.len() > 2)
+                    {
+                        return Err(bail(format!(
+                            "method_broadcast_finish `{label}` must be a JVM descriptor like `Lcom/x/Y;`, got `{class_name}`"
+                        )));
+                    }
+                }
+                if method.is_empty() {
+                    return Err(bail(
+                        "method_broadcast_finish `method` must not be empty".to_string(),
+                    ));
+                }
+                if action.is_empty() {
+                    return Err(bail(
+                        "method_broadcast_finish `action` must not be empty".to_string(),
+                    ));
+                }
+                if parse_method_descriptor(proto).is_none() {
+                    return Err(bail(format!(
+                        "method_broadcast_finish `proto` is not a valid JVM descriptor: `{proto}`"
                     )));
                 }
             }
@@ -856,6 +984,50 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
                 *value,
             )?;
             Ok(sites > 0)
+        }
+        DbpOp::FieldConstBool {
+            scan_class,
+            scan_method,
+            target_class,
+            target_field,
+            value,
+            ..
+        } => {
+            let sites = force_field_const_bool(
+                dex,
+                scan_class,
+                scan_method.as_deref(),
+                target_class,
+                target_field,
+                *value,
+            )?;
+            Ok(sites > 0)
+        }
+        DbpOp::IntentActionBroadcast {
+            from_action,
+            to_action,
+            ..
+        } => Ok(redirect_intent_action_to_broadcast(dex, from_action, to_action)? > 0),
+        DbpOp::MethodBroadcastFinish {
+            class,
+            method,
+            proto,
+            super_class,
+            action,
+            ..
+        } => {
+            let (ret, params) = parse_method_descriptor(proto)
+                .ok_or_else(|| anyhow!("invalid descriptor `{proto}`"))?;
+            let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+            force_method_broadcast_finish(
+                dex,
+                class,
+                method,
+                &ret,
+                &param_refs,
+                super_class,
+                action,
+            )
         }
         DbpOp::FragmentHide {
             class,
@@ -1730,6 +1902,159 @@ value = false
             }
             _ => panic!("google-services must use method_const_int"),
         }
+        let sw = load_dbp(&patches_dir().join("debloat-setupwizard.dbp"))
+            .expect("debloat-setupwizard.dbp");
+        assert_eq!(sw.name, "debloat-setupwizard");
+        assert_eq!(sw.ops.len(), 7);
+        let mut cloud_offline = false;
+        let mut cloud_completed = false;
+        let mut fixed_complete = false;
+        let mut forced_network_avail = false;
+        let mut forced_non_commercial = false;
+        let mut redirected_easysync = false;
+        let mut skipped_lenovoid_entry = false;
+        for op in &sw.ops {
+            match op {
+                // The cloud/Lenovo-ID gate: both forced so
+                // ZuiUtils.getCloudActivityAction returns null (step skipped).
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    scan_method,
+                    target_method,
+                    value,
+                    ..
+                } if scan_class.contains("ZuiUtils") => {
+                    assert_eq!(
+                        op.file(),
+                        "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+                    );
+                    assert_eq!(scan_method.as_deref(), Some("getCloudActivityAction"));
+                    match target_method.as_str() {
+                        "isOnline" => {
+                            assert!(!*value, "must force isOnline -> false");
+                            cloud_offline = true;
+                        }
+                        "isCloudRestoreCompleted" => {
+                            assert!(*value, "must force isCloudRestoreCompleted -> true");
+                            cloud_completed = true;
+                        }
+                        other => panic!("unexpected ZuiUtils target {other}"),
+                    }
+                }
+                // Complete screen: keep btn_next visible when the debloated
+                // Vantage widget has no rectangle to animate toward.
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    scan_method,
+                    target_class,
+                    target_method,
+                    value,
+                    ..
+                } if scan_class.contains("CompleteLandActivity") => {
+                    assert_eq!(
+                        op.file(),
+                        "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+                    );
+                    assert_eq!(scan_class, "Lcom/zui/setupwizard/CompleteLandActivity;");
+                    assert_eq!(scan_method.as_deref(), Some("onCreate"));
+                    assert_eq!(target_class, "Lcom/zui/setupwizard/common/AppHelper;");
+                    assert_eq!(target_method, "isSupportCCS");
+                    assert!(
+                        *value,
+                        "complete-screen gate must force isSupportCCS -> true"
+                    );
+                    fixed_complete = true;
+                }
+                // Wi-Fi activation: force the network gate true so Next / Set up
+                // later always take the Lenovo ID branch when combined with
+                // isPrcCommercial -> false.
+                DbpOp::FieldConstBool {
+                    scan_class,
+                    scan_method,
+                    target_class,
+                    target_field,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(op.file(), "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                    assert_eq!(
+                        scan_class,
+                        "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+                    );
+                    assert_eq!(scan_method.as_deref(), Some("startPrivacySettingsActivity"));
+                    assert_eq!(
+                        target_class,
+                        "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+                    );
+                    assert_eq!(target_field, "isNetworkAvail");
+                    assert!(*value, "network gate must force isNetworkAvail -> true");
+                    forced_network_avail = true;
+                }
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    scan_method,
+                    target_class,
+                    target_method,
+                    value,
+                    ..
+                } if scan_class.contains("DeviceActivationForWifiActivity") => {
+                    assert_eq!(op.file(), "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                    assert_eq!(scan_method.as_deref(), Some("startPrivacySettingsActivity"));
+                    assert_eq!(
+                        target_class,
+                        "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+                    );
+                    assert_eq!(target_method, "isPrcCommercial");
+                    assert!(!*value, "must force isPrcCommercial -> false");
+                    forced_non_commercial = true;
+                }
+                // Post-login EasySync launches become CLOUD_SKIP broadcasts.
+                DbpOp::IntentActionBroadcast {
+                    from_action,
+                    to_action,
+                    ..
+                } => {
+                    assert_eq!(op.file(), "system/priv-app/LenovoID/LenovoID.apk");
+                    assert_eq!(
+                        from_action,
+                        "com.zui.cloudservice.intent.action.GUIDE_DATA_RESTORE_FROM_PRIVACY"
+                    );
+                    assert_eq!(to_action, "com.zui.setupwizard.action.CLOUD_SKIP");
+                    redirected_easysync = true;
+                }
+                // Skip the Lenovo ID entry Activity before it draws.
+                DbpOp::MethodBroadcastFinish {
+                    class,
+                    method,
+                    proto,
+                    super_class,
+                    action,
+                    ..
+                } => {
+                    assert_eq!(op.file(), "system/priv-app/LenovoID/LenovoID.apk");
+                    assert_eq!(class, "Lcom/lenovo/lsf/lenovoid/ui/PsLoginWizardActivity;");
+                    assert_eq!(method, "onCreate");
+                    assert_eq!(proto, "(Landroid/os/Bundle;)V");
+                    assert_eq!(
+                        super_class,
+                        "Lcom/lenovo/lsf/lenovoid/ui/BaseWizardActivity;"
+                    );
+                    assert_eq!(action, "com.zui.setupwizard.action.CLOUD_SKIP");
+                    skipped_lenovoid_entry = true;
+                }
+                _ => panic!("unexpected op in debloat-setupwizard"),
+            }
+        }
+        assert!(
+            cloud_offline
+                && cloud_completed
+                && fixed_complete
+                && forced_network_avail
+                && forced_non_commercial
+                && redirected_easysync
+                && skipped_lenovoid_entry,
+            "all seven setup-wizard ops must parse"
+        );
         let gl = load_dbp(&patches_dir().join("google-lens-button.dbp"))
             .expect("google-lens-button.dbp");
         assert_eq!(gl.name, "google-lens-button");
@@ -1833,6 +2158,7 @@ value = false
             }
             _ => panic!("disable-quick-kill must use a text_replace op"),
         }
+
         // The merged security patch (former antivirus / autostart /
         // permission-manager / url-security / app-recommendation patches).
         let ds =
@@ -2005,6 +2331,7 @@ value = false
             sysui && settings && features,
             "all three CtS ops must parse"
         );
+
         let pgs = load_dbp(&patches_dir().join("power-gesture-settings.dbp"))
             .expect("power-gesture-settings.dbp");
         assert_eq!(pgs.name, "power-gesture-settings");
@@ -2230,6 +2557,167 @@ value = false
             }
         }
         assert_eq!(landed, 1, "fragment_hide should land in exactly one dex");
+    }
+
+    /// Every debloat-setupwizard op lands in exactly one dex of its real APK;
+    /// the LenovoID redirect covers all ten EasySync launch continuations
+    /// (nine source-action loads, with one shared across two branches). Set
+    /// `DYNOBOX_ZUISETUPWIZARD_APK`, `DYNOBOX_ZUISETTINGS_APK`, and/or
+    /// `DYNOBOX_LENOVOID_APK` to exercise the corresponding target.
+    #[test]
+
+    fn debloat_setupwizard_ops_land_on_real_apk() {
+        let doc = load_dbp(&patches_dir().join("debloat-setupwizard.dbp")).unwrap();
+        let targets = [
+            (
+                "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk",
+                "DYNOBOX_ZUISETUPWIZARD_APK",
+            ),
+            (
+                "system/priv-app/ZuiSettings/ZuiSettings.apk",
+                "DYNOBOX_ZUISETTINGS_APK",
+            ),
+            (
+                "system/priv-app/LenovoID/LenovoID.apk",
+                "DYNOBOX_LENOVOID_APK",
+            ),
+        ];
+
+        for (file, env_name) in targets {
+            let Ok(path) = std::env::var(env_name) else {
+                continue;
+            };
+            let apk = std::fs::read(&path).expect("read apk");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let dex_entries: Vec<_> = zip
+                .entries
+                .iter()
+                .filter(|e| {
+                    e.name.ends_with(".dex")
+                        && e.compression_method == 0
+                        && !e.uses_data_descriptor
+                        && !e.is_zip64
+                        && e.data_start + e.compressed_size <= apk.len()
+                })
+                .collect();
+            let ops: Vec<_> = doc.ops.iter().filter(|op| op.file() == file).collect();
+            assert!(!ops.is_empty(), "{file} must have bundled ops");
+            for op in ops {
+                let mut dex_hits = 0usize;
+                let mut redirect_sites = 0usize;
+                let mut field_sites = 0usize;
+                let mut entry_skip_sites = 0usize;
+                for e in &dex_entries {
+                    let original = &apk[e.data_start..e.data_start + e.compressed_size];
+                    let mut dex = original.to_vec();
+                    if apply_one_op(&mut dex, op).unwrap() {
+                        dex_hits += 1;
+                    }
+                    if let DbpOp::IntentActionBroadcast {
+                        from_action,
+                        to_action,
+                        ..
+                    } = op
+                    {
+                        let mut count_dex = original.to_vec();
+                        redirect_sites += redirect_intent_action_to_broadcast(
+                            &mut count_dex,
+                            from_action,
+                            to_action,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            redirect_intent_action_to_broadcast(
+                                &mut count_dex,
+                                from_action,
+                                to_action,
+                            )
+                            .unwrap(),
+                            0,
+                            "redirect must be idempotent"
+                        );
+                    }
+                    if let DbpOp::FieldConstBool {
+                        scan_class,
+                        scan_method,
+                        target_class,
+                        target_field,
+                        value,
+                        ..
+                    } = op
+                    {
+                        let mut count_dex = original.to_vec();
+                        field_sites += force_field_const_bool(
+                            &mut count_dex,
+                            scan_class,
+                            scan_method.as_deref(),
+                            target_class,
+                            target_field,
+                            *value,
+                        )
+                        .unwrap();
+                    }
+                    if let DbpOp::MethodBroadcastFinish {
+                        class,
+                        method,
+                        proto,
+                        super_class,
+                        action,
+                        ..
+                    } = op
+                    {
+                        let (ret, params) = parse_method_descriptor(proto).unwrap();
+                        let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+                        let mut count_dex = original.to_vec();
+                        if force_method_broadcast_finish(
+                            &mut count_dex,
+                            class,
+                            method,
+                            &ret,
+                            &param_refs,
+                            super_class,
+                            action,
+                        )
+                        .unwrap()
+                        {
+                            entry_skip_sites += 1;
+                        }
+                        // idempotent-ish: second apply should still succeed (rewrites same body)
+                        assert!(
+                            force_method_broadcast_finish(
+                                &mut count_dex,
+                                class,
+                                method,
+                                &ret,
+                                &param_refs,
+                                super_class,
+                                action,
+                            )
+                            .unwrap()
+                        );
+                    }
+                }
+                assert_eq!(
+                    dex_hits, 1,
+                    "{file} op must land in exactly one dex: {op:?}"
+                );
+                if matches!(op, DbpOp::IntentActionBroadcast { .. }) {
+                    assert_eq!(
+                        redirect_sites, 10,
+                        "all LenovoID EasySync launches redirect"
+                    );
+                }
+                if matches!(op, DbpOp::FieldConstBool { .. }) {
+                    assert_eq!(field_sites, 1, "the Wi-Fi network gate has one field read");
+                }
+                if matches!(op, DbpOp::MethodBroadcastFinish { .. }) {
+                    assert_eq!(
+                        entry_skip_sites, 1,
+                        "PsLoginWizardActivity.onCreate rewrites once"
+                    );
+                }
+            }
+        }
     }
 
     /// Land the three new debloat-security ops (app-recommendation hide +

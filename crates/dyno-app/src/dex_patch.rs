@@ -16,6 +16,13 @@
 //!   methods of a scan class into `const/16 vAA, #lit` + 2×`nop`. Forces a
 //!   specific boolean getter's result only at the call sites within one
 //!   class (optionally one method), leaving unrelated callers untouched.
+//! * [`force_field_const_bool`] — rewrite scoped `iget-boolean` reads of one
+//!   exact field to a constant without changing the field or other callers.
+//! * [`redirect_intent_action_to_broadcast`] — retarget an existing Intent
+//!   action string reference and replace the matching `startActivity` with a
+//!   `sendBroadcast`, without editing the sorted dex string-data table.
+//! * [`force_method_broadcast_finish`] — rewrite an Activity method body to
+//!   call `super`, `finish()`, broadcast an existing action string, and return.
 //! * [`force_nop_anchored_invoke`] — nop the first
 //!   `target_class.target_method(...)` invoke (whose result is discarded)
 //!   that follows a specific constant load inside one scan method. Drops a
@@ -24,6 +31,8 @@
 //!
 //! Both mirror the byte-rewrite shapes proven in `fuck_lgsi`; the dex table
 //! resolvers are the `pub(crate)` `fuck_lgsi::dex_walker` helpers.
+
+use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow};
 
@@ -92,6 +101,8 @@ struct DexHeader {
     type_ids_off: usize,
     proto_ids_size: usize,
     proto_ids_off: usize,
+    field_ids_size: usize,
+    field_ids_off: usize,
     method_ids_size: usize,
     method_ids_off: usize,
     class_defs_size: usize,
@@ -106,11 +117,64 @@ fn read_dex_header(dex: &[u8]) -> DexHeader {
         type_ids_off: read_u32_le(dex, 0x44) as usize,
         proto_ids_size: read_u32_le(dex, 0x48) as usize,
         proto_ids_off: read_u32_le(dex, 0x4C) as usize,
+        field_ids_size: read_u32_le(dex, 0x50) as usize,
+        field_ids_off: read_u32_le(dex, 0x54) as usize,
         method_ids_size: read_u32_le(dex, 0x58) as usize,
         method_ids_off: read_u32_le(dex, 0x5C) as usize,
         class_defs_size: read_u32_le(dex, 0x60) as usize,
         class_defs_off: read_u32_le(dex, 0x64) as usize,
     }
+}
+
+/// Resolve the exact field id for `class_descriptor.field_name:type_descriptor`.
+fn resolve_field_idx(
+    dex: &[u8],
+    h: &DexHeader,
+    class_descriptor: &str,
+    field_name: &str,
+    type_descriptor: &str,
+) -> Result<Option<u32>> {
+    let Some(class_idx) = dex_walker::find_type_idx(
+        dex,
+        h.string_ids_size,
+        h.string_ids_off,
+        h.type_ids_size,
+        h.type_ids_off,
+        class_descriptor,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(type_idx) = dex_walker::find_type_idx(
+        dex,
+        h.string_ids_size,
+        h.string_ids_off,
+        h.type_ids_size,
+        h.type_ids_off,
+        type_descriptor,
+    )?
+    else {
+        return Ok(None);
+    };
+    let Some(name_idx) =
+        dex_walker::find_string_idx_strict(dex, h.string_ids_size, h.string_ids_off, field_name)?
+    else {
+        return Ok(None);
+    };
+
+    for idx in 0..h.field_ids_size {
+        let off = h.field_ids_off + idx * 8;
+        if off + 8 > dex.len() {
+            return Ok(None);
+        }
+        if u32::from(read_u16_le(dex, off)) == class_idx
+            && u32::from(read_u16_le(dex, off + 2)) == type_idx
+            && read_u32_le(dex, off + 4) == name_idx
+        {
+            return Ok(Some(idx as u32));
+        }
+    }
+    Ok(None)
 }
 
 /// Walk a class_data_item's direct + virtual method tables, returning
@@ -626,14 +690,14 @@ pub fn force_fragment_render_gone(
 }
 
 // ---------------------------------------------------------------------------
-// primitive 2: force an invoke-static bool getter's result at call sites
+// primitive 2: force a bool getter's result at call sites
 // ---------------------------------------------------------------------------
 
-/// Force every `invoke-static {}, target_class.target_method(params...)Z`
-/// immediately followed by `move-result vAA` to the constant `value`, but only
-/// inside the methods of `scan_class` (optionally narrowed to `scan_method`).
-/// Returns the number of sites rewritten (0 when the scan class or target
-/// method isn't present in this dex).
+/// Force every format-35c invoke of `target_class.target_method(params...)Z`
+/// (static / virtual / super / direct / interface) immediately followed by
+/// `move-result vAA` to the constant `value`, but only inside the methods of
+/// `scan_class` (optionally narrowed to `scan_method`). Returns the number of
+/// sites rewritten (0 when the scan class or target method isn't present here).
 ///
 /// `ret_descriptor` must be `"Z"` (boolean getter). `scan_method`, when set,
 /// filters by method name only — over-matching an overload is harmless since
@@ -747,8 +811,8 @@ fn force_invoke_const_scoped(
     Ok(sites)
 }
 
-/// Walk one method's instruction stream and rewrite each
-/// `invoke-static {}, method@target_method_idx` (opcode 0x71) immediately
+/// Walk one method's instruction stream and rewrite each format-35c
+/// `invoke-* {}, method@target_method_idx` (opcodes 0x6e..=0x72) immediately
 /// followed by `move-result vAA` (opcode 0x0A) into a const load of `value`
 /// into vAA (`const/16` for i16-range values, else `const`), nop-padded to the
 /// original 4 units. Same-size, in place.
@@ -781,11 +845,14 @@ fn rewrite_invoke_sites(
         if pc + width > insns_end {
             return Ok(sites);
         }
-        if opcode == 0x71 && pc + 8 <= insns_end {
+        // Any format-35c invoke (0x6e virtual / 0x6f super / 0x70 direct /
+        // 0x71 static / 0x72 interface) carries the method idx at pc+2, so match
+        // the whole family — a getter is reached by whichever kind its class uses.
+        if (0x6e..=0x72).contains(&opcode) && pc + 8 <= insns_end {
             let method_idx = u32::from(read_u16_le(dex, pc + 2));
             if method_idx == target_method_idx && dex[pc + 6] == 0x0A {
                 let aa = dex[pc + 7];
-                // Overwrite the 4-unit `invoke-static … / move-result vAA` with a
+                // Overwrite the 4-unit `invoke-* … / move-result vAA` with a
                 // same-size const load of `value` into vAA, nop-padded.
                 if let Ok(v16) = i16::try_from(value) {
                     dex[pc] = 0x13; // const/16 vAA, #+v16
@@ -994,7 +1061,583 @@ fn rewrite_first_anchored_invoke(
 }
 
 // ---------------------------------------------------------------------------
-// primitive 5: force findViewById-bound views to setVisibility(GONE)
+// primitive 5: force a scoped boolean field read to a constant
+// ---------------------------------------------------------------------------
+
+/// Force reads of one exact boolean instance field to `value` inside the
+/// methods of `scan_class` (optionally only `scan_method`). Each matching
+/// two-unit `iget-boolean vA, vB, field@CCCC` becomes `const/4 vA, #value`
+/// followed by `nop`, so code size and every dex table offset stay unchanged.
+///
+/// Returns the number of rewritten field-read sites. A missing class, field,
+/// or method is a clean no-op.
+pub fn force_field_const_bool(
+    dex: &mut [u8],
+    scan_class: &str,
+    scan_method: Option<&str>,
+    target_class: &str,
+    target_field: &str,
+    value: bool,
+) -> Result<usize> {
+    let h = read_dex_header(dex);
+    let Some(scan_type_idx) = dex_walker::find_type_idx(
+        dex,
+        h.string_ids_size,
+        h.string_ids_off,
+        h.type_ids_size,
+        h.type_ids_off,
+        scan_class,
+    )?
+    else {
+        return Ok(0);
+    };
+    let Some(target_field_idx) = resolve_field_idx(dex, &h, target_class, target_field, "Z")?
+    else {
+        return Ok(0);
+    };
+    if target_field_idx > u32::from(u16::MAX) {
+        return Ok(0);
+    }
+    let Some(class_data_off) =
+        dex_walker::find_class_data_off(dex, h.class_defs_size, h.class_defs_off, scan_type_idx)?
+    else {
+        return Ok(0);
+    };
+
+    let mut sites = 0usize;
+    for (method_idx, code_off) in collect_method_code_offs(dex, class_data_off)? {
+        if let Some(want) = scan_method {
+            if method_name_of_idx(dex, &h, method_idx)?.as_deref() != Some(want) {
+                continue;
+            }
+        }
+        let Some((insns_off, insns_end)) = code_instruction_bounds(dex, code_off) else {
+            continue;
+        };
+        sites +=
+            rewrite_field_bool_sites(dex, insns_off, insns_end, target_field_idx as u16, value);
+    }
+    Ok(sites)
+}
+
+fn code_instruction_bounds(dex: &[u8], code_off: usize) -> Option<(usize, usize)> {
+    if code_off + 16 > dex.len() {
+        return None;
+    }
+    let insns_size = read_u32_le(dex, code_off + 12) as usize;
+    let insns_off = code_off + 16;
+    let bytes = insns_size.checked_mul(2)?;
+    let insns_end = insns_off.checked_add(bytes)?;
+    (insns_end <= dex.len()).then_some((insns_off, insns_end))
+}
+
+fn rewrite_field_bool_sites(
+    dex: &mut [u8],
+    insns_off: usize,
+    insns_end: usize,
+    target_field_idx: u16,
+    value: bool,
+) -> usize {
+    let mut sites = 0usize;
+    let mut pc = insns_off;
+    while pc + 1 < insns_end {
+        let opcode = dex[pc];
+        let width_units = dex_walker::insn_width_units(opcode);
+        if width_units == 0 {
+            break;
+        }
+        let width = usize::from(width_units) * 2;
+        if pc + width > insns_end {
+            break;
+        }
+        if opcode == 0x55 && width == 4 && read_u16_le(dex, pc + 2) == target_field_idx {
+            let result_reg = dex[pc + 1] & 0x0f;
+            dex[pc] = 0x12; // const/4
+            dex[pc + 1] = result_reg | (u8::from(value) << 4);
+            dex[pc + 2] = 0x00; // nop
+            dex[pc + 3] = 0x00;
+            sites += 1;
+        }
+        pc += width;
+    }
+    sites
+}
+
+// ---------------------------------------------------------------------------
+// primitive 6: redirect an Intent activity launch to an existing broadcast
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IntentRedirectSite {
+    string_off: usize,
+    string_opcode: u8,
+    start_off: usize,
+    context_reg: u8,
+    intent_reg: u8,
+}
+
+fn decode_invoke_35c_registers(dex: &[u8], pc: usize) -> Option<Vec<u8>> {
+    if pc + 6 > dex.len() {
+        return None;
+    }
+    let count = usize::from(dex[pc + 1] >> 4);
+    if count > 5 {
+        return None;
+    }
+    let regs = [
+        dex[pc + 4] & 0x0f,
+        dex[pc + 4] >> 4,
+        dex[pc + 5] & 0x0f,
+        dex[pc + 5] >> 4,
+        dex[pc + 1] & 0x0f,
+    ];
+    Some(regs[..count].to_vec())
+}
+
+fn collect_instruction_offsets(dex: &[u8], start: usize, end: usize) -> Option<Vec<usize>> {
+    let mut out = Vec::new();
+    let mut pc = start;
+    while pc + 1 < end {
+        let width_units = dex_walker::insn_width_units(dex[pc]);
+        if width_units == 0 {
+            return None;
+        }
+        let width = usize::from(width_units) * 2;
+        if pc + width > end {
+            return None;
+        }
+        out.push(pc);
+        pc += width;
+    }
+    (pc == end).then_some(out)
+}
+
+fn locate_intent_redirect_sites(
+    dex: &[u8],
+    insns_off: usize,
+    insns_end: usize,
+    from_string_idx: u32,
+    set_action_idx: u16,
+    start_activity_idx: u16,
+) -> Vec<IntentRedirectSite> {
+    let Some(insns) = collect_instruction_offsets(dex, insns_off, insns_end) else {
+        return Vec::new();
+    };
+    let mut sites = Vec::new();
+
+    for (pos, &string_off) in insns.iter().enumerate() {
+        let string_opcode = dex[string_off];
+        if read_const_string_idx(dex, string_opcode, string_off) != Some(from_string_idx) {
+            continue;
+        }
+        let action_reg = dex[string_off + 1];
+        let next_source = insns[pos + 1..]
+            .iter()
+            .position(|&off| read_const_string_idx(dex, dex[off], off) == Some(from_string_idx))
+            .map_or(insns.len(), |rel| pos + 1 + rel);
+
+        let mut candidates = Vec::new();
+        for &set_off in &insns[pos + 1..next_source] {
+            if dex[set_off] != 0x6e || read_u16_le(dex, set_off + 2) != set_action_idx {
+                continue;
+            }
+            let Some(set_regs) = decode_invoke_35c_registers(dex, set_off) else {
+                continue;
+            };
+            if set_regs.len() != 2 || set_regs[1] != action_reg {
+                continue;
+            }
+            let intent_reg = set_regs[0];
+            let Some(set_pos) = insns.iter().position(|&off| off == set_off) else {
+                continue;
+            };
+            for &start_off in &insns[set_pos + 1..next_source] {
+                if dex[start_off] != 0x6e || read_u16_le(dex, start_off + 2) != start_activity_idx {
+                    continue;
+                }
+                let Some(start_regs) = decode_invoke_35c_registers(dex, start_off) else {
+                    continue;
+                };
+                if start_regs.len() == 3 && start_regs[1] == intent_reg {
+                    candidates.push(IntentRedirectSite {
+                        string_off,
+                        string_opcode,
+                        start_off,
+                        context_reg: start_regs[0],
+                        intent_reg,
+                    });
+                }
+            }
+        }
+        candidates.sort_by_key(|site| site.start_off);
+        candidates.dedup();
+        sites.extend(candidates);
+    }
+    sites
+}
+
+fn write_intent_redirect_site(
+    dex: &mut [u8],
+    site: IntentRedirectSite,
+    to_string_idx: u32,
+    send_broadcast_idx: u16,
+) {
+    match site.string_opcode {
+        0x1a => {
+            dex[site.string_off + 2..site.string_off + 4]
+                .copy_from_slice(&(to_string_idx as u16).to_le_bytes());
+        }
+        0x1b => {
+            dex[site.string_off + 2..site.string_off + 6]
+                .copy_from_slice(&to_string_idx.to_le_bytes());
+        }
+        _ => unreachable!("validated const-string opcode"),
+    }
+    dex[site.start_off] = 0x6e; // invoke-virtual, format 35c
+    dex[site.start_off + 1] = 0x20; // A=2 args, G=0
+    dex[site.start_off + 2..site.start_off + 4].copy_from_slice(&send_broadcast_idx.to_le_bytes());
+    dex[site.start_off + 4] = site.context_reg | (site.intent_reg << 4);
+    dex[site.start_off + 5] = 0x00;
+}
+
+/// Replace an existing Intent action reference and turn its matching
+/// `Context.startActivity(Intent, Bundle)` into `Context.sendBroadcast(Intent)`.
+/// Both action strings must already exist in the dex; the string-data table is
+/// never edited, so its required lexical ordering remains intact. Only the
+/// actual three-unit `invoke-virtual` form used by LenovoID is accepted.
+///
+/// The scan is conservative and atomic per site: a source action must feed an
+/// `Intent.setAction`, followed by startActivity using that same Intent
+/// register. Incomplete sequences are unchanged; one shared action load may
+/// legitimately feed multiple branch-local pairs. Returns redirected launches.
+pub fn redirect_intent_action_to_broadcast(
+    dex: &mut [u8],
+    from_action: &str,
+    to_action: &str,
+) -> Result<usize> {
+    let h = read_dex_header(dex);
+    let Some(from_string_idx) =
+        dex_walker::find_string_idx_strict(dex, h.string_ids_size, h.string_ids_off, from_action)?
+    else {
+        return Ok(0);
+    };
+    let Some(to_string_idx) =
+        dex_walker::find_string_idx_strict(dex, h.string_ids_size, h.string_ids_off, to_action)?
+    else {
+        return Ok(0);
+    };
+    let Some(set_action_idx) = resolve_method_idx(
+        dex,
+        &h,
+        "Landroid/content/Intent;",
+        "setAction",
+        "Landroid/content/Intent;",
+        &["Ljava/lang/String;"],
+    )?
+    else {
+        return Ok(0);
+    };
+    let Some(start_activity_idx) = resolve_method_idx(
+        dex,
+        &h,
+        "Landroid/content/Context;",
+        "startActivity",
+        "V",
+        &["Landroid/content/Intent;", "Landroid/os/Bundle;"],
+    )?
+    else {
+        return Ok(0);
+    };
+    let Some(send_broadcast_idx) = resolve_method_idx(
+        dex,
+        &h,
+        "Landroid/content/Context;",
+        "sendBroadcast",
+        "V",
+        &["Landroid/content/Intent;"],
+    )?
+    else {
+        return Ok(0);
+    };
+    if set_action_idx > u32::from(u16::MAX)
+        || start_activity_idx > u32::from(u16::MAX)
+        || send_broadcast_idx > u32::from(u16::MAX)
+    {
+        return Ok(0);
+    }
+
+    let mut code_offsets = BTreeSet::new();
+    for idx in 0..h.class_defs_size {
+        let class_off = h.class_defs_off + idx * 32;
+        if class_off + 32 > dex.len() {
+            break;
+        }
+        let class_data_off = read_u32_le(dex, class_off + 24) as usize;
+        if class_data_off == 0 || class_data_off >= dex.len() {
+            continue;
+        }
+        if let Ok(methods) = collect_method_code_offs(dex, class_data_off) {
+            code_offsets.extend(methods.into_iter().map(|(_, code_off)| code_off));
+        }
+    }
+
+    let mut sites = Vec::new();
+    for code_off in code_offsets {
+        let Some((insns_off, insns_end)) = code_instruction_bounds(dex, code_off) else {
+            continue;
+        };
+        sites.extend(locate_intent_redirect_sites(
+            dex,
+            insns_off,
+            insns_end,
+            from_string_idx,
+            set_action_idx as u16,
+            start_activity_idx as u16,
+        ));
+    }
+
+    // Validate every edit before changing any bytes. In particular, a normal
+    // const-string cannot encode a target index above u16::MAX.
+    if sites.iter().any(|site| {
+        site.string_opcode == 0x1a && to_string_idx > u32::from(u16::MAX)
+            || !matches!(site.string_opcode, 0x1a | 0x1b)
+    }) {
+        return Ok(0);
+    }
+
+    for &site in &sites {
+        write_intent_redirect_site(dex, site, to_string_idx, send_broadcast_idx as u16);
+    }
+    Ok(sites.len())
+}
+
+// ---------------------------------------------------------------------------
+// primitive: rewrite a method to super + finish + broadcast(action) + return
+// ---------------------------------------------------------------------------
+
+/// Rewrite `class.method(Landroid/os/Bundle;)V` so it:
+/// 1. `invoke-super {this, bundle}, super_class.method(Bundle)V`
+/// 2. `Activity.finish()` before the next setup Activity can be launched
+/// 3. builds an `Intent` from the already-present `action` string
+/// 4. `Context.sendBroadcast(Intent)`
+/// 5. `return-void`
+///
+/// Used to skip an OOBE entry Activity (e.g. Lenovo ID's
+/// `PsLoginWizardActivity.onCreate`) without drawing its UI while still
+/// advancing the setup wizard through an existing broadcast action such as
+/// `com.zui.setupwizard.action.CLOUD_SKIP`.
+///
+/// Size-preserving: the replacement is written over the original instruction
+/// stream and padded with `nop`. The action string and every referenced method
+/// id must already exist in the dex. Returns `true` when the rewrite lands.
+pub fn force_method_broadcast_finish(
+    dex: &mut [u8],
+    class_descriptor: &str,
+    method_name: &str,
+    ret_descriptor: &str,
+    params: &[&str],
+    super_class: &str,
+    action: &str,
+) -> Result<bool> {
+    if ret_descriptor != "V" {
+        return Err(anyhow!(
+            "force_method_broadcast_finish requires a void (V) return, got `{ret_descriptor}`"
+        ));
+    }
+    // Only the Activity.onCreate shape (this + one Bundle) is encoded today —
+    // enough for the Lenovo ID entry skip and keeps the register layout simple.
+    if params != ["Landroid/os/Bundle;"] {
+        return Err(anyhow!(
+            "force_method_broadcast_finish currently supports only (Landroid/os/Bundle;)V, got params {params:?}"
+        ));
+    }
+
+    let h = read_dex_header(dex);
+    let Some(code_off) = find_method_code_off(
+        dex,
+        &h,
+        class_descriptor,
+        method_name,
+        ret_descriptor,
+        params,
+    )?
+    else {
+        return Ok(false);
+    };
+    if code_off_is_shared(dex, &h, code_off)? {
+        return Ok(false);
+    }
+    if code_off + 16 > dex.len() {
+        return Ok(false);
+    }
+
+    let registers_size = u32::from(read_u16_le(dex, code_off));
+    let ins_size = u32::from(read_u16_le(dex, code_off + 2));
+    let outs_size = u32::from(read_u16_le(dex, code_off + 4));
+    let tries_size = read_u16_le(dex, code_off + 6);
+    if tries_size != 0 {
+        // Emitted body can throw (Intent construction / broadcast); refuse to
+        // leave a leftover catch table aimed at the old register state.
+        return Ok(false);
+    }
+    // this + Bundle occupy the last two parameter registers.
+    if ins_size != 2 || registers_size < ins_size || outs_size < 2 {
+        return Ok(false);
+    }
+    let first_param = registers_size - ins_size;
+    // Need v0 (Intent) + v1 (action string) below the parameters.
+    if first_param < 2 {
+        return Ok(false);
+    }
+    let p0 = first_param; // this
+    let p1 = first_param + 1; // Bundle
+    // Every 35c register must be nibble-encodable.
+    if p0 > 0x0f || p1 > 0x0f {
+        return Ok(false);
+    }
+
+    let Some(action_idx) =
+        dex_walker::find_string_idx_strict(dex, h.string_ids_size, h.string_ids_off, action)?
+    else {
+        return Ok(false);
+    };
+    let Some(intent_type_idx) = dex_walker::find_type_idx(
+        dex,
+        h.string_ids_size,
+        h.string_ids_off,
+        h.type_ids_size,
+        h.type_ids_off,
+        "Landroid/content/Intent;",
+    )?
+    else {
+        return Ok(false);
+    };
+    if intent_type_idx > u32::from(u16::MAX) {
+        return Ok(false);
+    }
+
+    let Some(super_on_create_idx) =
+        resolve_method_idx(dex, &h, super_class, method_name, ret_descriptor, params)?
+    else {
+        return Ok(false);
+    };
+    let Some(intent_init_idx) = resolve_method_idx(
+        dex,
+        &h,
+        "Landroid/content/Intent;",
+        "<init>",
+        "V",
+        &["Ljava/lang/String;"],
+    )?
+    else {
+        return Ok(false);
+    };
+    let Some(send_broadcast_idx) = resolve_method_idx(
+        dex,
+        &h,
+        "Landroid/content/Context;",
+        "sendBroadcast",
+        "V",
+        &["Landroid/content/Intent;"],
+    )?
+    else {
+        return Ok(false);
+    };
+    let Some(finish_idx) =
+        resolve_method_idx(dex, &h, "Landroid/app/Activity;", "finish", "V", &[])?
+    else {
+        return Ok(false);
+    };
+    for idx in [
+        super_on_create_idx,
+        intent_init_idx,
+        send_broadcast_idx,
+        finish_idx,
+    ] {
+        if idx > u32::from(u16::MAX) {
+            return Ok(false);
+        }
+    }
+
+    let replacement = encode_method_broadcast_finish_body(
+        super_on_create_idx as u16,
+        finish_idx as u16,
+        intent_type_idx as u16,
+        action_idx,
+        intent_init_idx as u16,
+        send_broadcast_idx as u16,
+        p0 as u16,
+        p1 as u16,
+    );
+
+    let insns_size = read_u32_le(dex, code_off + 12) as usize;
+    let insns_off = code_off + 16;
+    let insns_end = match insns_off.checked_add(insns_size.checked_mul(2).unwrap_or(0)) {
+        Some(e) if e <= dex.len() => e,
+        _ => return Ok(false),
+    };
+    if replacement.len() > insns_end - insns_off {
+        return Ok(false);
+    }
+
+    let body = &mut dex[insns_off..insns_end];
+    body[..replacement.len()].copy_from_slice(&replacement);
+    for pad in body.iter_mut().skip(replacement.len()) {
+        *pad = 0x00; // nop
+    }
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_method_broadcast_finish_body(
+    super_on_create_idx: u16,
+    finish_idx: u16,
+    intent_type_idx: u16,
+    action_idx: u32,
+    intent_init_idx: u16,
+    send_broadcast_idx: u16,
+    this_reg: u16,
+    bundle_reg: u16,
+) -> Vec<u8> {
+    let (v_intent, v_action): (u16, u16) = (0, 1);
+    let mut replacement = Vec::with_capacity(36);
+    let mut push_u16 = |u: u16| replacement.extend_from_slice(&u.to_le_bytes());
+
+    // invoke-super {this, bundle}, super.onCreate
+    push_u16(0x6f | (0x20 << 8));
+    push_u16(super_on_create_idx);
+    push_u16(this_reg | (bundle_reg << 4));
+    // Finish before the broadcast receiver can launch the next Activity.
+    push_u16(0x6e | (0x10 << 8));
+    push_u16(finish_idx);
+    push_u16(this_reg);
+    // new-instance v0, Intent
+    push_u16(0x22 | (v_intent << 8));
+    push_u16(intent_type_idx);
+    // const-string[/jumbo] v1, action
+    if let Ok(short_idx) = u16::try_from(action_idx) {
+        push_u16(0x1a | (v_action << 8));
+        push_u16(short_idx);
+    } else {
+        push_u16(0x1b | (v_action << 8));
+        push_u16(action_idx as u16);
+        push_u16((action_idx >> 16) as u16);
+    }
+    // invoke-direct {v0, v1}, Intent.<init>(String)
+    push_u16(0x70 | (0x20 << 8));
+    push_u16(intent_init_idx);
+    push_u16(v_intent | (v_action << 4));
+    // invoke-virtual {this, v0}, Context.sendBroadcast(Intent)
+    push_u16(0x6e | (0x20 << 8));
+    push_u16(send_broadcast_idx);
+    push_u16(this_reg | (v_intent << 4));
+    push_u16(0x000e); // return-void
+
+    replacement
+}
+
+// ---------------------------------------------------------------------------
+// primitive 7: force findViewById-bound views to setVisibility(GONE)
 // ---------------------------------------------------------------------------
 
 /// A located `findViewById` binding inside one method's instruction stream.
@@ -1435,6 +2078,165 @@ mod tests {
         assert_eq!(parse_method_descriptor("(L)Z"), None);
     }
 
+    #[test]
+    fn field_const_bool_rewrites_only_matching_iget_boolean() {
+        // iget-boolean v3,v7,field@0x1234; unrelated iget-boolean; return-void
+        let mut insns = vec![0x55, 0x73, 0x34, 0x12, 0x55, 0x21, 0x78, 0x56, 0x0e, 0x00];
+        let end = insns.len();
+        let sites = rewrite_field_bool_sites(&mut insns, 0, end, 0x1234, true);
+        assert_eq!(sites, 1);
+        assert_eq!(&insns[..4], &[0x12, 0x13, 0x00, 0x00]);
+        assert_eq!(&insns[4..8], &[0x55, 0x21, 0x78, 0x56]);
+    }
+
+    #[test]
+    fn field_const_bool_writes_false_and_missing_field_is_noop() {
+        let original = vec![0x55, 0x84, 0x34, 0x12, 0x0e, 0x00];
+        let mut false_case = original.clone();
+        let false_end = false_case.len();
+        assert_eq!(
+            rewrite_field_bool_sites(&mut false_case, 0, false_end, 0x1234, false),
+            1
+        );
+        assert_eq!(&false_case[..4], &[0x12, 0x04, 0x00, 0x00]);
+
+        let mut missing = original.clone();
+        let missing_end = missing.len();
+        assert_eq!(
+            rewrite_field_bool_sites(&mut missing, 0, missing_end, 0xabcd, true),
+            0
+        );
+        assert_eq!(missing, original);
+    }
+
+    fn invoke_35c(method_idx: u16, regs: &[u8]) -> [u8; 6] {
+        assert!(regs.len() <= 5);
+        let mut out = [0u8; 6];
+        out[0] = 0x6e;
+        out[1] = (regs.len() as u8) << 4;
+        out[2..4].copy_from_slice(&method_idx.to_le_bytes());
+        if let Some(&reg) = regs.first() {
+            out[4] |= reg;
+        }
+        if let Some(&reg) = regs.get(1) {
+            out[4] |= reg << 4;
+        }
+        if let Some(&reg) = regs.get(2) {
+            out[5] |= reg;
+        }
+        if let Some(&reg) = regs.get(3) {
+            out[5] |= reg << 4;
+        }
+        if let Some(&reg) = regs.get(4) {
+            out[1] |= reg;
+        }
+        out
+    }
+
+    #[test]
+    fn intent_redirect_locates_exact_action_intent_and_start() {
+        const FROM: u32 = 0x1234;
+        const SET_ACTION: u16 = 0x20;
+        const START: u16 = 0x21;
+        let mut insns = vec![0x1a, 0x02, 0x34, 0x12]; // const-string v2, FROM
+        insns.extend(invoke_35c(SET_ACTION, &[5, 2])); // setAction(v5,v2)
+        insns.extend([0x12, 0x01]); // harmless const/4
+        insns.extend(invoke_35c(START, &[7, 5, 9])); // startActivity(v7,v5,v9)
+        insns.extend([0x0e, 0x00]);
+        let sites = locate_intent_redirect_sites(&insns, 0, insns.len(), FROM, SET_ACTION, START);
+        assert_eq!(
+            sites,
+            vec![IntentRedirectSite {
+                string_off: 0,
+                string_opcode: 0x1a,
+                start_off: 12,
+                context_reg: 7,
+                intent_reg: 5,
+            }]
+        );
+
+        write_intent_redirect_site(&mut insns, sites[0], 0x4321, 0x6543);
+        assert_eq!(&insns[..4], &[0x1a, 0x02, 0x21, 0x43]);
+        assert_eq!(
+            &insns[12..18],
+            &[0x6e, 0x20, 0x43, 0x65, 0x57, 0x00],
+            "sendBroadcast(v7,v5) keeps the three-unit invoke width"
+        );
+    }
+
+    #[test]
+    fn method_broadcast_finish_encodes_super_broadcast_and_finish() {
+        let super_idx: u16 = 0x1111;
+        let intent_type: u16 = 0x2222;
+        let init_idx: u16 = 0x3333;
+        let action_idx: u16 = 0x4444;
+        let send_bc: u16 = 0x6666;
+        let finish: u16 = 0x7777;
+        let this_reg: u16 = 2;
+        let bundle_reg: u16 = 3;
+        let body = encode_method_broadcast_finish_body(
+            super_idx,
+            finish,
+            intent_type,
+            u32::from(action_idx),
+            init_idx,
+            send_bc,
+            this_reg,
+            bundle_reg,
+        );
+
+        assert_eq!(body.len(), 34);
+        assert_eq!(&body[0..6], &[0x6f, 0x20, 0x11, 0x11, 0x32, 0x00]);
+        assert_eq!(
+            &body[6..12],
+            &[0x6e, 0x10, 0x77, 0x77, this_reg as u8, 0x00],
+            "finish must precede all broadcast work"
+        );
+        assert_eq!(&body[12..16], &[0x22, 0x00, 0x22, 0x22]);
+        assert_eq!(&body[16..20], &[0x1a, 0x01, 0x44, 0x44]);
+        assert_eq!(&body[20..26], &[0x70, 0x20, 0x33, 0x33, 0x10, 0x00]);
+        assert_eq!(
+            &body[26..34],
+            &[0x6e, 0x20, 0x66, 0x66, this_reg as u8, 0x00, 0x0e, 0x00]
+        );
+
+        let jumbo = encode_method_broadcast_finish_body(
+            super_idx,
+            finish,
+            intent_type,
+            0x0001_4444,
+            init_idx,
+            send_bc,
+            this_reg,
+            bundle_reg,
+        );
+        assert_eq!(jumbo.len(), 36);
+        assert_eq!(&jumbo[16..22], &[0x1b, 0x01, 0x44, 0x44, 0x01, 0x00]);
+    }
+
+    #[test]
+    fn intent_redirect_skips_wrong_register_and_keeps_branch_local_starts() {
+        const FROM: u32 = 0x1234;
+        const SET_ACTION: u16 = 0x20;
+        const START: u16 = 0x21;
+
+        let mut wrong = vec![0x1a, 0x02, 0x34, 0x12];
+        wrong.extend(invoke_35c(SET_ACTION, &[5, 3])); // action is v3, not v2
+        wrong.extend(invoke_35c(START, &[7, 5, 9]));
+        assert!(
+            locate_intent_redirect_sites(&wrong, 0, wrong.len(), FROM, SET_ACTION, START)
+                .is_empty()
+        );
+
+        let mut ambiguous = vec![0x1a, 0x02, 0x34, 0x12];
+        ambiguous.extend(invoke_35c(SET_ACTION, &[5, 2]));
+        ambiguous.extend(invoke_35c(START, &[7, 5, 9]));
+        ambiguous.extend(invoke_35c(START, &[7, 5, 8]));
+        let sites =
+            locate_intent_redirect_sites(&ambiguous, 0, ambiguous.len(), FROM, SET_ACTION, START);
+        assert_eq!(sites.len(), 2, "both action-derived launches are matched");
+    }
+
     fn code_item_with_nops(insns_size: u32) -> Vec<u8> {
         let mut code = vec![0u8; 16 + insns_size as usize * 2];
         code[0..2].copy_from_slice(&1u16.to_le_bytes());
@@ -1624,6 +2426,15 @@ mod tests {
         assert_eq!(big[17], 0x05);
         assert_eq!(&big[18..22], &0x0001_0000i32.to_le_bytes());
         assert_eq!(&big[22..24], &[0x00, 0x00], "nop tail");
+
+        // invoke-virtual (0x6e) is matched too, not just invoke-static.
+        let mut virt = code_item_with_nops(4);
+        virt[16] = 0x6e; // invoke-virtual
+        virt[18] = 0x09;
+        virt[22] = 0x0A;
+        virt[23] = 0x05;
+        assert_eq!(rewrite_invoke_sites(&mut virt, 0, 9, 1).unwrap(), 1);
+        assert_eq!(&virt[16..20], &[0x13, 0x05, 0x01, 0x00], "const/16 v5, #1");
     }
 
     #[test]
