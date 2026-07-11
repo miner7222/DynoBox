@@ -101,6 +101,14 @@ pub enum DbpOp {
         resource: String,
         value: bool,
     },
+    /// Force a compiled dimension resource inside a STORED `resources.arsc` APK
+    /// entry to `dp` density-independent pixels.
+    ResourceDimen {
+        partition: String,
+        file: String,
+        resource: String,
+        dp: i32,
+    },
     /// Replace one exact byte string inside a regular file with another
     /// string of identical byte length. Intended for small property-file
     /// edits where growing the ext4 file would be unnecessary risk.
@@ -132,6 +140,7 @@ impl DbpOp {
             DbpOp::MethodConstBool { partition, .. }
             | DbpOp::MethodConstInt { partition, .. }
             | DbpOp::ResourceBool { partition, .. }
+            | DbpOp::ResourceDimen { partition, .. }
             | DbpOp::TextReplace { partition, .. }
             | DbpOp::InvokeConstBool { partition, .. } => partition,
         }
@@ -142,6 +151,7 @@ impl DbpOp {
             DbpOp::MethodConstBool { file, .. }
             | DbpOp::MethodConstInt { file, .. }
             | DbpOp::ResourceBool { file, .. }
+            | DbpOp::ResourceDimen { file, .. }
             | DbpOp::TextReplace { file, .. }
             | DbpOp::InvokeConstBool { file, .. } => file,
         }
@@ -217,6 +227,18 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
                 if !resource_name_is_safe(resource) {
                     return Err(bail(format!(
                         "unsafe resource name `{resource}` (expected an Android resource entry name)"
+                    )));
+                }
+            }
+            DbpOp::ResourceDimen { resource, dp, .. } => {
+                if !resource_name_is_safe(resource) {
+                    return Err(bail(format!(
+                        "unsafe resource name `{resource}` (expected an Android resource entry name)"
+                    )));
+                }
+                if !(0..=0x00ff_ffff).contains(dp) {
+                    return Err(bail(format!(
+                        "resource dimension `{resource}` value {dp}dp out of range (0..=16777215)"
                     )));
                 }
             }
@@ -472,14 +494,18 @@ fn apply_ops_to_apk(
         {
             let arsc = &mut apk_bytes[arsc_off..arsc_end];
             for (i, op) in ops.iter().enumerate() {
-                if let DbpOp::ResourceBool {
-                    resource, value, ..
-                } = op
-                {
-                    if patch_resources_arsc_bool(arsc, resource, *value)? {
-                        op_landed[i] = true;
-                        arsc_modified = true;
+                let landed = match op {
+                    DbpOp::ResourceBool {
+                        resource, value, ..
+                    } => patch_resources_arsc_bool(arsc, resource, *value)?,
+                    DbpOp::ResourceDimen { resource, dp, .. } => {
+                        patch_resources_arsc_dimen(arsc, resource, *dp)?
                     }
+                    _ => false,
+                };
+                if landed {
+                    op_landed[i] = true;
+                    arsc_modified = true;
                 }
             }
         }
@@ -555,7 +581,7 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
             )?;
             Ok(sites > 0)
         }
-        DbpOp::ResourceBool { .. } => Ok(false),
+        DbpOp::ResourceBool { .. } | DbpOp::ResourceDimen { .. } => Ok(false),
         DbpOp::TextReplace { .. } => Ok(false),
     }
 }
@@ -566,6 +592,12 @@ const RES_TABLE_PACKAGE_TYPE: u16 = 0x0200;
 const RES_TABLE_TYPE_TYPE: u16 = 0x0201;
 const RES_TABLE_ENTRY_FLAG_COMPLEX: u16 = 0x0001;
 const TYPE_INT_BOOLEAN: u8 = 0x12;
+/// `Res_value` data type for a complex dimension (`TYPE_DIMENSION`).
+const TYPE_DIMENSION: u8 = 0x05;
+/// Complex-dimension unit for density-independent pixels (`COMPLEX_UNIT_DIP`).
+const COMPLEX_UNIT_DIP: u32 = 0x0000_0001;
+/// Bit shift of the mantissa within a complex value.
+const COMPLEX_MANTISSA_SHIFT: u32 = 8;
 
 #[derive(Debug, Clone, Copy)]
 struct ChunkHeader {
@@ -686,18 +718,59 @@ fn parse_string_pool(buf: &[u8], off: usize) -> Result<Vec<String>> {
 #[cfg(test)]
 fn read_resources_arsc_bool(arsc: &[u8], resource_name: &str) -> Result<Option<bool>> {
     let mut data = arsc.to_vec();
-    find_or_patch_resources_arsc_bool(&mut data, resource_name, None)
+    let old = find_or_patch_resources_arsc_value(&mut data, resource_name, None)?;
+    match old {
+        Some((ty, d)) if ty == TYPE_INT_BOOLEAN => Ok(Some(d != 0)),
+        Some(_) => Err(anyhow!(
+            "resource `{resource_name}` is not a compiled boolean value"
+        )),
+        None => Ok(None),
+    }
 }
 
 fn patch_resources_arsc_bool(arsc: &mut [u8], resource_name: &str, value: bool) -> Result<bool> {
-    Ok(find_or_patch_resources_arsc_bool(arsc, resource_name, Some(value))?.is_some())
+    let new = (TYPE_INT_BOOLEAN, if value { u32::MAX } else { 0 });
+    match find_or_patch_resources_arsc_value(arsc, resource_name, Some(new))? {
+        Some((ty, _)) if ty == TYPE_INT_BOOLEAN => Ok(true),
+        // Landed on a value of the wrong type — reject rather than silently
+        // rewriting a non-boolean resource.
+        Some(_) => Err(anyhow!(
+            "resource `{resource_name}` is not a compiled boolean value"
+        )),
+        None => Ok(false),
+    }
 }
 
-fn find_or_patch_resources_arsc_bool(
+/// Encode an integer `dp` value as an Android complex dimension `Res_value`
+/// data word: mantissa in the integer (23p0) radix, `COMPLEX_UNIT_DIP` unit.
+fn encode_dimension_dp(dp: i32) -> Result<u32> {
+    if !(0..=0x00ff_ffff).contains(&dp) {
+        return Err(anyhow!("dimension {dp}dp out of range (0..=16777215)"));
+    }
+    Ok(((dp as u32) << COMPLEX_MANTISSA_SHIFT) | COMPLEX_UNIT_DIP)
+}
+
+fn patch_resources_arsc_dimen(arsc: &mut [u8], resource_name: &str, dp: i32) -> Result<bool> {
+    let new = (TYPE_DIMENSION, encode_dimension_dp(dp)?);
+    match find_or_patch_resources_arsc_value(arsc, resource_name, Some(new))? {
+        Some((ty, _)) if ty == TYPE_DIMENSION => Ok(true),
+        Some(_) => Err(anyhow!(
+            "resource `{resource_name}` is not a compiled dimension value"
+        )),
+        None => Ok(false),
+    }
+}
+
+/// Walk `resources.arsc` for the resource entry keyed `resource_name`. Returns
+/// its current `(data_type, data)` `Res_value`. When `new` is set, rewrites the
+/// value in place (same 8-byte `Res_value`, size-preserving) *only if the entry
+/// already has `new.0`'s type* — a type mismatch leaves the buffer untouched so
+/// the caller can reject it. Returns `None` when the key isn't found.
+fn find_or_patch_resources_arsc_value(
     arsc: &mut [u8],
     resource_name: &str,
-    new_value: Option<bool>,
-) -> Result<Option<bool>> {
+    new: Option<(u8, u32)>,
+) -> Result<Option<(u8, u32)>> {
     let table = chunk_header(arsc, 0)?;
     if table.ty != RES_TABLE_TYPE || table.header_size < 12 {
         return Err(anyhow!(
@@ -708,8 +781,7 @@ fn find_or_patch_resources_arsc_bool(
     while off < table.size {
         let chunk = chunk_header(arsc, off)?;
         if chunk.ty == RES_TABLE_PACKAGE_TYPE {
-            if let Some(value) =
-                find_or_patch_package_bool(arsc, off, chunk, resource_name, new_value)?
+            if let Some(value) = find_or_patch_package_value(arsc, off, chunk, resource_name, new)?
             {
                 return Ok(Some(value));
             }
@@ -719,13 +791,13 @@ fn find_or_patch_resources_arsc_bool(
     Ok(None)
 }
 
-fn find_or_patch_package_bool(
+fn find_or_patch_package_value(
     arsc: &mut [u8],
     package_off: usize,
     package: ChunkHeader,
     resource_name: &str,
-    new_value: Option<bool>,
-) -> Result<Option<bool>> {
+    new: Option<(u8, u32)>,
+) -> Result<Option<(u8, u32)>> {
     if package.header_size < 288 {
         return Err(anyhow!(
             "resource table package at offset {package_off} has unsupported header size {}",
@@ -740,7 +812,7 @@ fn find_or_patch_package_bool(
         let chunk = chunk_header(arsc, off)?;
         if chunk.ty == RES_TABLE_TYPE_TYPE {
             if let Some(value) =
-                find_or_patch_type_bool(arsc, off, chunk, &key_strings, resource_name, new_value)?
+                find_or_patch_type_value(arsc, off, chunk, &key_strings, resource_name, new)?
             {
                 return Ok(Some(value));
             }
@@ -750,14 +822,14 @@ fn find_or_patch_package_bool(
     Ok(None)
 }
 
-fn find_or_patch_type_bool(
+fn find_or_patch_type_value(
     arsc: &mut [u8],
     type_off: usize,
     type_chunk: ChunkHeader,
     key_strings: &[String],
     resource_name: &str,
-    new_value: Option<bool>,
-) -> Result<Option<bool>> {
+    new: Option<(u8, u32)>,
+) -> Result<Option<(u8, u32)>> {
     if type_chunk.header_size < 20 {
         return Err(anyhow!(
             "resource type chunk at offset {type_off} has unsupported header size {}",
@@ -789,18 +861,24 @@ fn find_or_patch_type_bool(
         }
         let value_off = entry_off + entry_size;
         let value_size = read_u16(arsc, value_off)?;
+        if value_size < 8 {
+            return Err(anyhow!(
+                "resource `{resource_name}` has an unexpectedly small Res_value"
+            ));
+        }
         let data_type = *arsc
             .get(value_off + 3)
             .ok_or_else(|| anyhow!("resource value is truncated at offset {value_off}"))?;
-        if value_size < 8 || data_type != TYPE_INT_BOOLEAN {
-            return Err(anyhow!(
-                "resource `{resource_name}` is not a compiled boolean value"
-            ));
-        }
         let data_off = value_off + 4;
-        let old = read_u32(arsc, data_off)? != 0;
-        if let Some(value) = new_value {
-            write_u32(arsc, data_off, if value { u32::MAX } else { 0 })?;
+        let old = (data_type, read_u32(arsc, data_off)?);
+        if let Some((new_type, new_data)) = new {
+            // Only rewrite when the existing value already has the requested
+            // type: patches are size- and type-preserving, and a caller that
+            // targeted the wrong resource type must see the mismatch with the
+            // buffer left untouched (never punned to a different type).
+            if data_type == new_type {
+                write_u32(arsc, data_off, new_data)?;
+            }
         }
         return Ok(Some(old));
     }
@@ -960,6 +1038,51 @@ to = "ro.product.countrycode=US\n##\n"
     }
 
     #[test]
+    fn encode_dimension_dp_packs_integer_dip() {
+        // data = (dp << 8) | COMPLEX_UNIT_DIP; radix 23p0 (bits 4..8 = 0).
+        assert_eq!(encode_dimension_dp(0).unwrap(), 0x0000_0001);
+        assert_eq!(encode_dimension_dp(9).unwrap(), 0x0000_0901);
+        assert_eq!(encode_dimension_dp(28).unwrap(), 0x0000_1c01);
+        assert_eq!(encode_dimension_dp(0x00ff_ffff).unwrap(), 0xffff_ff01);
+        assert!(encode_dimension_dp(-1).is_err());
+        assert!(encode_dimension_dp(0x0100_0000).is_err());
+    }
+
+    #[test]
+    fn resource_dimen_rewrites_named_dimension_only() {
+        // Two dimension entries; only the named one is rewritten to 9dp.
+        let mut arsc = synthetic_value_arsc(&[
+            ("pad_a", TYPE_DIMENSION, encode_dimension_dp(2).unwrap()),
+            ("pad_b", TYPE_DIMENSION, encode_dimension_dp(4).unwrap()),
+        ]);
+
+        assert!(patch_resources_arsc_dimen(&mut arsc, "pad_b", 9).unwrap());
+        assert_eq!(
+            arsc_raw_value(&arsc, "pad_a").unwrap(),
+            Some((TYPE_DIMENSION, encode_dimension_dp(2).unwrap()))
+        );
+        assert_eq!(
+            arsc_raw_value(&arsc, "pad_b").unwrap(),
+            Some((TYPE_DIMENSION, 0x0000_0901))
+        );
+    }
+
+    #[test]
+    fn resource_dimen_rejects_wrong_value_type() {
+        // Targeting a boolean entry as a dimension must be refused, not coerced.
+        let mut arsc = synthetic_bool_arsc(&[("feature_gate", true)]);
+        assert!(patch_resources_arsc_dimen(&mut arsc, "feature_gate", 9).is_err());
+        // And the boolean stays intact.
+        assert_eq!(arsc_bool_value(&arsc, "feature_gate").unwrap(), Some(true));
+    }
+
+    #[test]
+    fn resource_dimen_missing_resource_reports_not_found() {
+        let mut arsc = synthetic_value_arsc(&[("pad_a", TYPE_DIMENSION, 0x0000_0201)]);
+        assert!(!patch_resources_arsc_dimen(&mut arsc, "nope", 9).unwrap());
+    }
+
+    #[test]
     fn referenced_partitions_dedups() {
         let doc: DbpDocument = toml::from_str(
             r#"
@@ -1077,6 +1200,102 @@ value = false
             }
             _ => panic!("google-services must use method_const_int"),
         }
+        let gl = load_dbp(&patches_dir().join("google-lens-button.dbp"))
+            .expect("google-lens-button.dbp");
+        assert_eq!(gl.name, "google-lens-button");
+        assert_eq!(gl.ops.len(), 3);
+        match &gl.ops[2] {
+            DbpOp::ResourceDimen {
+                file, resource, dp, ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiCamera/ZuiCamera.apk");
+                assert_eq!(resource, "google_lens_button_padding");
+                assert_eq!(*dp, 9);
+            }
+            _ => panic!("google-lens-button op[2] must be resource_dimen"),
+        }
+        match &gl.ops[0] {
+            DbpOp::InvokeConstBool {
+                scan_class,
+                scan_method,
+                target_class,
+                target_method,
+                value,
+                ..
+            } => {
+                assert_eq!(scan_class, "Lcom/zui/camera/module/capture/CaptureModule;");
+                assert_eq!(scan_method.as_deref(), Some("getUISpec"));
+                assert_eq!(target_class, "Lcom/zui/camera/developer/common/ApiHelper;");
+                assert_eq!(target_method, "isRow");
+                assert!(*value);
+            }
+            _ => panic!("google-lens-button must use invoke_const_bool"),
+        }
+    }
+
+    /// Apply the bundled google-lens-button dex ops to the real ZuiCamera
+    /// dexes. Set `DYNOBOX_ZUICAMERA_DEX_DIR`; optionally
+    /// `DYNOBOX_ZUICAMERA_DEX_OUT` to dump patched dexes for disassembly.
+    /// The third op (`resource_dimen`) targets resources.arsc, not a dex, so
+    /// it is a no-op here and covered by the arsc test below.
+    #[test]
+    fn bundled_google_lens_button_lands_on_real_dex() {
+        let Ok(dir) = std::env::var("DYNOBOX_ZUICAMERA_DEX_DIR") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("google-lens-button.dbp")).unwrap();
+        let dir = std::path::Path::new(&dir);
+        let mut landed = 0usize;
+        for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
+            let Ok(mut dex) = std::fs::read(dir.join(name)) else {
+                continue;
+            };
+            let mut modified = false;
+            for op in &doc.ops {
+                if apply_one_op(&mut dex, op).unwrap() {
+                    landed += 1;
+                    modified = true;
+                }
+            }
+            if modified {
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                if let Ok(out) = std::env::var("DYNOBOX_ZUICAMERA_DEX_OUT") {
+                    std::fs::write(std::path::Path::new(&out).join(name), &dex).unwrap();
+                }
+            }
+        }
+        assert_eq!(landed, 2, "both google-lens-button dex ops should land");
+    }
+
+    /// Apply the google-lens-button `resource_dimen` op to a real ZuiCamera
+    /// `resources.arsc` (STORED APK entry, extract it verbatim). Set
+    /// `DYNOBOX_ZUICAMERA_ARSC`; optionally `DYNOBOX_ZUICAMERA_ARSC_OUT` to
+    /// dump the patched arsc.
+    #[test]
+    fn bundled_google_lens_dimen_lands_on_real_arsc() {
+        let Ok(path) = std::env::var("DYNOBOX_ZUICAMERA_ARSC") else {
+            return;
+        };
+        let mut arsc = std::fs::read(&path).unwrap();
+        // Stock value is 2.25dp — a compiled dimension (fractional, radix != 0).
+        let before = arsc_raw_value(&arsc, "google_lens_button_padding")
+            .unwrap()
+            .expect("google_lens_button_padding must exist");
+        assert_eq!(before.0, TYPE_DIMENSION, "stock value must be a dimension");
+        assert!(
+            patch_resources_arsc_dimen(&mut arsc, "google_lens_button_padding", 9).unwrap(),
+            "resource_dimen op should land"
+        );
+        // 9dp integer dimension = (9 << 8) | COMPLEX_UNIT_DIP.
+        assert_eq!(
+            arsc_raw_value(&arsc, "google_lens_button_padding").unwrap(),
+            Some((TYPE_DIMENSION, 0x0000_0901))
+        );
+        if let Ok(out) = std::env::var("DYNOBOX_ZUICAMERA_ARSC_OUT") {
+            std::fs::write(&out, &arsc).unwrap();
+        }
+    }
+
     }
 
     /// Apply the bundled google-services op to the real ZuiSettings dexes.
@@ -1380,6 +1599,16 @@ bogus = 1
     }
 
     fn synthetic_bool_arsc(entries: &[(&str, bool)]) -> Vec<u8> {
+        let mapped: Vec<(&str, u8, u32)> = entries
+            .iter()
+            .map(|(name, value)| (*name, 0x12u8, if *value { u32::MAX } else { 0 }))
+            .collect();
+        synthetic_value_arsc(&mapped)
+    }
+
+    /// Build a minimal single-package `resources.arsc` whose entries carry an
+    /// arbitrary `Res_value` `(data_type, data)` each, keyed by name.
+    fn synthetic_value_arsc(entries: &[(&str, u8, u32)]) -> Vec<u8> {
         let mut out = Vec::new();
         let table = push_chunk_header(&mut out, 0x0002, 12);
         out.extend_from_slice(&1u32.to_le_bytes()); // package count
@@ -1403,7 +1632,7 @@ bogus = 1
         out.extend_from_slice(&0u32.to_le_bytes()); // typeIdOffset
 
         out.extend_from_slice(&string_pool(&["bool"]));
-        let key_names: Vec<&str> = entries.iter().map(|(name, _)| *name).collect();
+        let key_names: Vec<&str> = entries.iter().map(|(name, _, _)| *name).collect();
         out.extend_from_slice(&string_pool(&key_names));
 
         let type_spec = push_chunk_header(&mut out, 0x0202, 16);
@@ -1428,14 +1657,13 @@ bogus = 1
         for (i, _) in entries.iter().enumerate() {
             out.extend_from_slice(&((i * 16) as u32).to_le_bytes());
         }
-        for (i, (_, value)) in entries.iter().enumerate() {
+        for (i, (_, data_type, data)) in entries.iter().enumerate() {
             out.extend_from_slice(&8u16.to_le_bytes()); // ResTable_entry size
             out.extend_from_slice(&0u16.to_le_bytes());
             out.extend_from_slice(&(i as u32).to_le_bytes());
             out.extend_from_slice(&8u16.to_le_bytes()); // Res_value size
             out.push(0);
-            out.push(0x12); // TYPE_INT_BOOLEAN
-            let data = if *value { u32::MAX } else { 0 };
+            out.push(*data_type);
             out.extend_from_slice(&data.to_le_bytes());
         }
         finish_chunk(&mut out, ty);
@@ -1446,5 +1674,11 @@ bogus = 1
 
     fn arsc_bool_value(arsc: &[u8], resource: &str) -> Result<Option<bool>> {
         read_resources_arsc_bool(arsc, resource)
+    }
+
+    /// Read the raw `(data_type, data)` of a resource entry without mutating it.
+    fn arsc_raw_value(arsc: &[u8], resource: &str) -> Result<Option<(u8, u32)>> {
+        let mut data = arsc.to_vec();
+        find_or_patch_resources_arsc_value(&mut data, resource, None)
     }
 }

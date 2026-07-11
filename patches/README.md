@@ -83,6 +83,19 @@ rebuilding the APK would be excessive.
 | `resource` | yes      | resource entry name, e.g. `config_wifi6ghzSupport` |
 | `value`    | yes      | `true` / `false`                                   |
 
+### `resource_dimen`
+
+Force a compiled **dimension** resource inside a STORED `resources.arsc` APK
+entry to an integer `dp` value. Same in-place, size-preserving `Res_value`
+rewrite as `resource_bool`; the target must already be a dimension (the op is
+refused on any other value type). The value is encoded as an integer-radix
+`TYPE_DIMENSION` with `COMPLEX_UNIT_DIP`, i.e. `data = (dp << 8) | 1`.
+
+| field      | required | meaning                                             |
+|------------|----------|-----------------------------------------------------|
+| `resource` | yes      | dimension entry name, e.g. `google_lens_button_padding` |
+| `dp`       | yes      | integer dp, `0..=16777215`                          |
+
 ### `text_replace`
 
 Replace the first exact byte-string match inside a regular file with another
@@ -137,3 +150,11 @@ only at the call sites inside one class (optionally one method). Rewrites each
   `GoogleServicesPreferenceController.getAvailabilityStatus()` → `0`
   (`AVAILABLE`) so the entry appears regardless of the `cn.google.services`
   system feature.
+* **`google-lens-button.dbp`** — show the Google Lens camera button instead
+  of ZUI AI Lens on a PRC ZuiCamera. `CaptureModule`/`WideCaptureModule`
+  `getUISpec()` pick the lens button by `ApiHelper.isRow()`; forcing it →
+  `true` only at those call sites turns the Google Lens button
+  (`ic_google_lens`) on and the `com.zui.ai.lens` OCR button off. The button
+  only launches Google Lens if the Google app is installed. A `resource_dimen`
+  op also bumps `google_lens_button_padding` 2.25dp → 9dp so the `fitCenter`
+  icon draws at 46 − 2·9 = 28dp, matching the ZUI AI Lens icon size.
