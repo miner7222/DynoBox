@@ -256,6 +256,41 @@ fn find_method_code_off(
     Ok(None)
 }
 
+/// Whether `code_off` is referenced by more than one method entry across the
+/// whole dex. R8/redex deduplicate identical code items — every trivial
+/// `return 0` / `return false` / `return-void` body can collapse onto a single
+/// shared item — so rewriting such an item in place silently changes *every*
+/// method that points to it. In particular, forcing a shared `()I` method to a
+/// non-boolean constant (e.g. `getAvailabilityStatus` → 3) corrupts a `()Z`
+/// sharer (`ImmutableMap.isHashCodeFast`) into a `VerifyError`. Body-rewriting
+/// ops must refuse a shared item. Best-effort: unparseable class_data is skipped.
+fn code_off_is_shared(dex: &[u8], h: &DexHeader, code_off: usize) -> Result<bool> {
+    let mut seen = 0usize;
+    for idx in 0..h.class_defs_size {
+        let entry_off = h.class_defs_off + idx * 32;
+        if entry_off + 32 > dex.len() {
+            break;
+        }
+        // class_data_off is at class_def + 24.
+        let class_data_off = read_u32_le(dex, entry_off + 24) as usize;
+        if class_data_off == 0 || class_data_off >= dex.len() {
+            continue;
+        }
+        let Ok(offs) = collect_method_code_offs(dex, class_data_off) else {
+            continue;
+        };
+        for (_m, off) in offs {
+            if off == code_off {
+                seen += 1;
+                if seen >= 2 {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 // ---------------------------------------------------------------------------
 // primitive 1: force a `()Z` method body to a constant
 // ---------------------------------------------------------------------------
@@ -291,6 +326,11 @@ pub fn force_method_return_bool(
     else {
         return Ok(false);
     };
+    // Refuse a deduplicated (shared) code item — rewriting it would corrupt the
+    // other methods that share it.
+    if code_off_is_shared(dex, &h, code_off)? {
+        return Ok(false);
+    }
     rewrite_method_body_const_bool(dex, code_off, value)
 }
 
@@ -331,6 +371,10 @@ pub fn force_method_return_int(
     else {
         return Ok(false);
     };
+    // Refuse a deduplicated (shared) code item (see `code_off_is_shared`).
+    if code_off_is_shared(dex, &h, code_off)? {
+        return Ok(false);
+    }
     rewrite_method_body_const_int(dex, code_off, value)
 }
 
@@ -410,6 +454,10 @@ pub fn force_method_return_void(
     else {
         return Ok(false);
     };
+    // Refuse a deduplicated (shared) code item (see `code_off_is_shared`).
+    if code_off_is_shared(dex, &h, code_off)? {
+        return Ok(false);
+    }
     rewrite_method_body_return_void(dex, code_off)
 }
 
@@ -483,6 +531,10 @@ pub fn force_fragment_render_gone(
     else {
         return Ok(false);
     };
+    // Refuse a deduplicated (shared) code item (see `code_off_is_shared`).
+    if code_off_is_shared(dex, &h, code_off)? {
+        return Ok(false);
+    }
 
     // Framework method ids the emitted body invokes. A genuine `onCreateView`
     // that inflates a layout always carries both, so an absence here means a

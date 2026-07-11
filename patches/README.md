@@ -276,6 +276,22 @@ register and `rv_reg`/`scratch_reg` must all be < 16. Size-preserving.
   only launches Google Lens if the Google app is installed. A `resource_dimen`
   op also bumps `google_lens_button_padding` 2.25dp → 9dp so the `fitCenter`
   icon draws at 46 − 2·9 = 28dp, matching the ZUI AI Lens icon size.
+* **`debloat-settings.dbp`** — trim Lenovo-specific ZuiSettings entries. Two
+  `method_const_int` ops on `getAvailabilityStatus()`: force
+  `TopLevelLenovoAccountPreferenceController` → `3` (`UNSUPPORTED_ON_DEVICE`) so
+  the "Accounts & cloud service" / LeCloud tile is never shown, and force
+  `TopLevelAccountEntryPreferenceController` → `0` (`AVAILABLE`) so the AOSP
+  "Accounts & sync" entry always shows (otherwise hidden on PRC via
+  `isPrcVersion()`). Plus two `invoke_const_bool` ops that hide the "Service
+  hotline" (`LenovoServicePreferenceController`, About / device info) by flipping
+  its region gate to ROW: it is shown only on PRC — `updateState()`
+  `setVisible(isLenovoServiceVisible())` (= `!com.lenovo.xbb installed &&
+  isPrcVersion()`) and `onResume()` `setVisible(false)` when `isRowVersion()`. So
+  force `LenovoUtils.isPrcVersion()` → `false` and `isRowVersion()` → `true` at
+  their call sites in that controller. (Its `getAvailabilityStatus()` is a trivial
+  `return 0` that R8 deduplicated with `ImmutableMap.isHashCodeFast():Z`, so it
+  can't be rewritten — DynoBox refuses shared/deduped code items, see
+  `dex_patch::code_off_is_shared` — but the region gate is the real switch anyway.)
 * **`disable-quick-kill.dbp`** — turn off Lenovo's ZMC "quick kill" aggressive
   reclaim. `system.img:/system/etc/ZuiMemCleanerConfig.xml` is parsed by
   `/system/bin/lmkd`, which `property_set()`s each `<Prop>`, so

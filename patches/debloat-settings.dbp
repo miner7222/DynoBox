@@ -1,0 +1,58 @@
+# debloat-settings.dbp - trim Lenovo-specific ZuiSettings entries.
+#
+#   * TopLevelLenovoAccountPreferenceController - the "Accounts & cloud service"
+#     / LeCloud tile (key top_level_lenovo_account). getAvailabilityStatus() -> 3
+#     (UNSUPPORTED_ON_DEVICE) so it is never shown.
+#   * TopLevelAccountEntryPreferenceController - the AOSP "Accounts & sync" entry
+#     (key top_level_accounts), normally hidden on PRC (isPrcVersion() == true ->
+#     3). getAvailabilityStatus() -> 0 (AVAILABLE) so it always shows.
+#   * LenovoServicePreferenceController - the "Service hotline" entry in About /
+#     device info (res/xml/about_device.xml key key_lenovo_serve). It is shown
+#     only on PRC: updateState() setVisible(isLenovoServiceVisible()) where
+#     isLenovoServiceVisible() = (!com.lenovo.xbb installed && isPrcVersion()),
+#     and onResume() setVisible(false) when isRowVersion(). Its
+#     getAvailabilityStatus() is a trivial `return 0` that R8 DEDUPLICATED (shares
+#     a code item with ImmutableMap.isHashCodeFast():Z), so it can't be rewritten.
+#     Instead flip the region gate to ROW at its two call sites in this controller:
+#     isPrcVersion() -> false (hides via updateState) and isRowVersion() -> true
+#     (hides via onResume). These are call-site rewrites, not a deduped body.
+#
+# Apply with:  dynobox resign ... --plus patches/debloat-settings.dbp
+
+name = "debloat-settings"
+description = "Hide the ZuiSettings LeCloud account tile + Service hotline, and always show the AOSP Accounts & sync entry."
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/homepage/controller/TopLevelLenovoAccountPreferenceController;"
+method = "getAvailabilityStatus"
+value = 3
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/android/settings/accounts/TopLevelAccountEntryPreferenceController;"
+method = "getAvailabilityStatus"
+value = 0
+
+# Service hotline: make the controller take the ROW (hidden) path.
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/deviceinfo/controller/LenovoServicePreferenceController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/deviceinfo/controller/LenovoServicePreferenceController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true

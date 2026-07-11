@@ -1761,6 +1761,58 @@ value = false
             }
             _ => panic!("google-lens-button must use invoke_const_bool"),
         }
+        let ds2 =
+            load_dbp(&patches_dir().join("debloat-settings.dbp")).expect("debloat-settings.dbp");
+        assert_eq!(ds2.name, "debloat-settings");
+        assert_eq!(ds2.ops.len(), 4);
+        let mut hide = false;
+        let mut show = false;
+        let mut hotline_prc = false;
+        let mut hotline_row = false;
+        for op in &ds2.ops {
+            match op {
+                DbpOp::MethodConstInt {
+                    file,
+                    class,
+                    method,
+                    proto,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                    assert_eq!(method, "getAvailabilityStatus");
+                    assert_eq!(proto, "()I");
+                    if class.contains("TopLevelLenovoAccountPreferenceController") && *value == 3 {
+                        hide = true;
+                    }
+                    if class.contains("TopLevelAccountEntryPreferenceController") && *value == 0 {
+                        show = true;
+                    }
+                }
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    target_method,
+                    value,
+                    ..
+                } => {
+                    assert!(scan_class.contains("LenovoServicePreferenceController"));
+                    if target_method == "isPrcVersion" && !*value {
+                        hotline_prc = true;
+                    }
+                    if target_method == "isRowVersion" && *value {
+                        hotline_row = true;
+                    }
+                }
+                _ => panic!("unexpected op in debloat-settings"),
+            }
+        }
+        assert!(hide, "must hide the LeCloud tile (-> 3)");
+        assert!(show, "must show the Accounts & sync entry (-> 0)");
+        assert!(
+            hotline_prc && hotline_row,
+            "must flip the hotline region gate to ROW (isPrcVersion->false, isRowVersion->true)"
+        );
+
         let qk = load_dbp(&patches_dir().join("disable-quick-kill.dbp"))
             .expect("disable-quick-kill.dbp");
         assert_eq!(qk.name, "disable-quick-kill");
@@ -1974,6 +2026,81 @@ value = false
             }
             _ => panic!("power-gesture-settings must use invoke_const_bool"),
         }
+    }
+
+    /// Apply the bundled debloat-settings ops to the real ZuiSettings dexes.
+    /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`; optionally
+    /// `DYNOBOX_ZUISETTINGS_DEX_OUT` to dump patched dexes for disassembly.
+    #[test]
+    fn bundled_debloat_settings_land_on_real_dex() {
+        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("debloat-settings.dbp")).unwrap();
+        let dir = std::path::Path::new(&dir);
+        let mut landed = 0usize;
+        for name in [
+            "classes.dex",
+            "classes2.dex",
+            "classes3.dex",
+            "classes4.dex",
+            "classes5.dex",
+            "classes6.dex",
+        ] {
+            let Ok(mut dex) = std::fs::read(dir.join(name)) else {
+                continue;
+            };
+            let mut modified = false;
+            for op in &doc.ops {
+                if apply_one_op(&mut dex, op).unwrap() {
+                    landed += 1;
+                    modified = true;
+                }
+            }
+            if modified {
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                if let Ok(out) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_OUT") {
+                    std::fs::write(std::path::Path::new(&out).join(name), &dex).unwrap();
+                }
+            }
+        }
+        assert_eq!(landed, 4, "all four debloat-settings ops should land");
+    }
+
+    /// The deduplicated-code-item guard: forcing the "Service hotline"
+    /// `LenovoServicePreferenceController.getAvailabilityStatus()` (a trivial
+    /// `return 0` R8-shared with `ImmutableMap.isHashCodeFast():Z`) must be
+    /// REFUSED, not corrupt the shared item. Set `DYNOBOX_ZUISETTINGS_APK`.
+    #[test]
+    fn shared_code_item_guard_refuses_deduped_getavailability() {
+        let Ok(path) = std::env::var("DYNOBOX_ZUISETTINGS_APK") else {
+            return;
+        };
+        let op = DbpOp::MethodConstInt {
+            partition: "system".into(),
+            file: "system/priv-app/ZuiSettings/ZuiSettings.apk".into(),
+            class: "Lcom/lenovo/settings/deviceinfo/controller/LenovoServicePreferenceController;"
+                .into(),
+            method: "getAvailabilityStatus".into(),
+            proto: "()I".into(),
+            value: 3,
+        };
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let mut hits = 0usize;
+        for e in zip.entries.iter().filter(|e| {
+            e.name.ends_with(".dex")
+                && e.compression_method == 0
+                && !e.uses_data_descriptor
+                && !e.is_zip64
+                && e.data_start + e.compressed_size <= apk.len()
+        }) {
+            let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
+            if apply_one_op(&mut dex, &op).unwrap() {
+                hits += 1;
+            }
+        }
+        assert_eq!(hits, 0, "a shared/deduped code item must not be rewritten");
     }
 
     /// Apply the bundled google-lens-button dex ops to the real ZuiCamera
