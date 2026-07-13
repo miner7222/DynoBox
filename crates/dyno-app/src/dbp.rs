@@ -109,14 +109,18 @@ pub enum DbpOp {
         resource: String,
         dp: i32,
     },
-    /// Replace one exact byte string inside a regular file with another
-    /// string of identical byte length. Intended for small property-file
-    /// edits where growing the ext4 file would be unnecessary risk.
+    /// Replace an exact byte string inside a regular file with another string
+    /// of identical byte length. Replaces only the first match by default, or
+    /// every non-overlapping match when `all` is set. Intended for small
+    /// property-file edits where growing the ext4 file would be unnecessary
+    /// risk.
     TextReplace {
         partition: String,
         file: String,
         from: String,
         to: String,
+        #[serde(default)]
+        all: bool,
     },
     /// Force `invoke-static target_class.target_method()Z` results to `value`
     /// at every call site inside `scan_class` (optionally one `scan_method`).
@@ -390,10 +394,10 @@ fn apply_text_ops_to_file(
 
     let mut op_landed = vec![false; ops.len()];
     for (i, op) in ops.iter().enumerate() {
-        let DbpOp::TextReplace { from, to, .. } = op else {
+        let DbpOp::TextReplace { from, to, all, .. } = op else {
             unreachable!("caller filtered non-text ops");
         };
-        if patch_text_replacement(&mut bytes, from.as_bytes(), to.as_bytes()) {
+        if patch_text_replacement(&mut bytes, from.as_bytes(), to.as_bytes(), *all) > 0 {
             op_landed[i] = true;
         }
     }
@@ -411,14 +415,26 @@ fn apply_text_ops_to_file(
     }))
 }
 
-fn patch_text_replacement(bytes: &mut [u8], from: &[u8], to: &[u8]) -> bool {
+/// Overwrite `from` with `to` in place (identical byte length, size-preserving)
+/// and return how many matches were replaced. Replaces only the first match
+/// unless `all` is set, in which case every non-overlapping match is replaced
+/// (the scan resumes past each replacement, so a `to` that contains `from` is
+/// never re-matched). Returns 0 when nothing matched.
+fn patch_text_replacement(bytes: &mut [u8], from: &[u8], to: &[u8], all: bool) -> usize {
     debug_assert!(!from.is_empty());
     debug_assert_eq!(from.len(), to.len());
-    let Some(pos) = memmem::find(bytes, from) else {
-        return false;
-    };
-    bytes[pos..pos + to.len()].copy_from_slice(to);
-    true
+    let mut count = 0;
+    let mut start = 0;
+    while let Some(rel) = memmem::find(&bytes[start..], from) {
+        let pos = start + rel;
+        bytes[pos..pos + to.len()].copy_from_slice(to);
+        count += 1;
+        start = pos + to.len();
+        if !all {
+            break;
+        }
+    }
+    count
 }
 
 /// Open `file` inside `image_path`, apply `ops` to supported STORED APK
@@ -998,6 +1014,7 @@ to = "ro.product.countrycode=US\n##\n"
                 file,
                 from,
                 to,
+                ..
             } => {
                 assert_eq!(partition, "system");
                 assert_eq!(file, "system/build.prop");
@@ -1016,12 +1033,38 @@ to = "ro.product.countrycode=US\n##\n"
             &mut bytes,
             b"ro.config.zui.education=true\n",
             b"ro.product.countrycode=US\n##\n",
+            false,
         );
 
-        assert!(landed);
+        assert_eq!(landed, 1);
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             "a=1\nro.product.countrycode=US\n##\nb=2\nro.config.zui.education=true\n"
+        );
+    }
+
+    #[test]
+    fn text_replace_all_rewrites_every_match() {
+        // Mirrors ZuiMemCleanerConfig.xml: the same size-preserving swap on
+        // every occurrence, absorbing true->false (+1) into the trailing space.
+        let line = |v: &str| {
+            format!(
+                "<Prop Name=\"zuimemory.use_quick_kill\" Value=\"{v}\"{}/>\n",
+                if v == "true" { " " } else { "" }
+            )
+        };
+        let mut bytes =
+            format!("{}x=1\n{}{}", line("true"), line("true"), line("true")).into_bytes();
+        let count = patch_text_replacement(
+            &mut bytes,
+            b"use_quick_kill\" Value=\"true\" />",
+            b"use_quick_kill\" Value=\"false\"/>",
+            true,
+        );
+        assert_eq!(count, 3);
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            format!("{}x=1\n{}{}", line("false"), line("false"), line("false"))
         );
     }
 
@@ -1152,6 +1195,7 @@ value = false
                 file,
                 from,
                 to,
+                ..
             } => {
                 assert_eq!(partition, "system");
                 assert_eq!(file, "system/build.prop");
@@ -1167,6 +1211,7 @@ value = false
                 file,
                 from,
                 to,
+                ..
             } => {
                 assert_eq!(partition, "system");
                 assert_eq!(file, "system/bin/init");
@@ -1231,6 +1276,28 @@ value = false
             }
             _ => panic!("google-lens-button must use invoke_const_bool"),
         }
+        let qk = load_dbp(&patches_dir().join("disable-quick-kill.dbp"))
+            .expect("disable-quick-kill.dbp");
+        assert_eq!(qk.name, "disable-quick-kill");
+        assert_eq!(qk.ops.len(), 1);
+        match &qk.ops[0] {
+            DbpOp::TextReplace {
+                file,
+                from,
+                to,
+                all,
+                ..
+            } => {
+                assert_eq!(file, "system/etc/ZuiMemCleanerConfig.xml");
+                assert_eq!(from, "use_quick_kill\" Value=\"true\" />");
+                assert_eq!(to, "use_quick_kill\" Value=\"false\"/>");
+                assert_eq!(from.len(), to.len(), "must stay size-preserving");
+                assert!(*all, "must replace every occurrence");
+            }
+            _ => panic!("disable-quick-kill must use a text_replace op"),
+        }
+    }
+
     }
 
     /// Apply the bundled google-lens-button dex ops to the real ZuiCamera
@@ -1294,6 +1361,36 @@ value = false
         if let Ok(out) = std::env::var("DYNOBOX_ZUICAMERA_ARSC_OUT") {
             std::fs::write(&out, &arsc).unwrap();
         }
+    }
+
+    /// Apply the bundled disable-quick-kill op to the real ZuiMemCleanerConfig
+    /// XML. Set `DYNOBOX_ZMC_XML` to the extracted file path.
+    #[test]
+    fn bundled_disable_quick_kill_lands_on_real_xml() {
+        let Ok(path) = std::env::var("DYNOBOX_ZMC_XML") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("disable-quick-kill.dbp")).unwrap();
+        let DbpOp::TextReplace { from, to, all, .. } = &doc.ops[0] else {
+            panic!("disable-quick-kill op[0] must be text_replace");
+        };
+        let mut bytes = std::fs::read(&path).unwrap();
+        let before_len = bytes.len();
+        let occurrences = bytes
+            .windows(from.len())
+            .filter(|w| *w == from.as_bytes())
+            .count();
+        let count = patch_text_replacement(&mut bytes, from.as_bytes(), to.as_bytes(), *all);
+        assert_eq!(count, occurrences, "must replace every match");
+        assert_eq!(
+            count, 10,
+            "TB322 ZuiMemCleanerConfig has 10 use_quick_kill blocks"
+        );
+        assert_eq!(bytes.len(), before_len, "swap must be size-preserving");
+        assert!(
+            memmem::find(&bytes, from.as_bytes()).is_none(),
+            "no Value=\"true\" occurrence should remain"
+        );
     }
 
     }

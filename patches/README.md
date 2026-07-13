@@ -98,14 +98,16 @@ refused on any other value type). The value is encoded as an integer-radix
 
 ### `text_replace`
 
-Replace the first exact byte-string match inside a regular file with another
-byte string of identical length. This is intended for tiny property-file edits
-where growing the ext4 file would be unnecessary risk.
+Replace an exact byte-string match inside a regular file with another byte
+string of identical length — the first match by default, or every
+non-overlapping match with `all = true`. This is intended for tiny
+property-file edits where growing the ext4 file would be unnecessary risk.
 
 | field  | required | meaning                                  |
 |--------|----------|------------------------------------------|
 | `from` | yes      | source text/bytes to find; must be non-empty |
 | `to`   | yes      | replacement text/bytes; same byte length as `from` |
+| `all`  | no       | replace every match instead of just the first (default `false`) |
 
 ### `invoke_const_bool`
 
@@ -158,3 +160,10 @@ only at the call sites inside one class (optionally one method). Rewrites each
   only launches Google Lens if the Google app is installed. A `resource_dimen`
   op also bumps `google_lens_button_padding` 2.25dp → 9dp so the `fitCenter`
   icon draws at 46 − 2·9 = 28dp, matching the ZUI AI Lens icon size.
+* **`disable-quick-kill.dbp`** — turn off Lenovo's ZMC "quick kill" aggressive
+  reclaim. `system.img:/system/etc/ZuiMemCleanerConfig.xml` is parsed by
+  `/system/bin/lmkd`, which `property_set()`s each `<Prop>`, so
+  `zuimemory.use_quick_kill` drives lmkd's quick-kill path (ZuiSecurity reads
+  the same file but only `zuimemory.enable`). A single `all` `text_replace`
+  flips every `use_quick_kill` block `true → false`, size-preserved by dropping
+  the space before `/>`.
