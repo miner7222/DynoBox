@@ -167,3 +167,13 @@ only at the call sites inside one class (optionally one method). Rewrites each
   the same file but only `zuimemory.enable`). A single `all` `text_replace`
   flips every `use_quick_kill` block `true → false`, size-preserved by dropping
   the space before `/>`.
+* **`circle-to-search.dbp`** — enable Google Circle to Search (long-press Home)
+  on a PRC build by clearing its three region gates. Forces
+  `XSystemUtil.isDeviceRow()` → `true` only inside SystemUI's `AssistManager`
+  (so `startAssist` takes the `ContextualSearchManager` path), forces
+  `LenovoUtils.isPrcVersion()` → `false` only inside `isCircleToSearchEnable()`
+  (so the ZuiSettings toggle appears), and declares the
+  `CONTEXTUAL_SEARCH` + `GEMINI_EXPERIENCE` Google system features in
+  `product.img:/etc/sysconfig/google.xml` (size-preserving, overwriting an
+  obsolete TODO comment). Still requires the Google app's
+  `ContextualSearchManager` service to actually run the search.

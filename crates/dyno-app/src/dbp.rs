@@ -1296,6 +1296,60 @@ value = false
             }
             _ => panic!("disable-quick-kill must use a text_replace op"),
         }
+        let cts =
+            load_dbp(&patches_dir().join("circle-to-search.dbp")).expect("circle-to-search.dbp");
+        assert_eq!(cts.name, "circle-to-search");
+        assert_eq!(cts.ops.len(), 3);
+        let mut sysui = false;
+        let mut settings = false;
+        let mut features = false;
+        for op in &cts.ops {
+            match op {
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    target_method,
+                    value,
+                    ..
+                } if scan_class.contains("AssistManager") => {
+                    assert_eq!(target_method, "isDeviceRow");
+                    assert!(*value);
+                    sysui = true;
+                }
+                DbpOp::InvokeConstBool {
+                    scan_method,
+                    target_method,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(scan_method.as_deref(), Some("isCircleToSearchEnable"));
+                    assert_eq!(target_method, "isPrcVersion");
+                    assert!(!*value);
+                    settings = true;
+                }
+                DbpOp::TextReplace {
+                    partition,
+                    file,
+                    from,
+                    to,
+                    ..
+                } => {
+                    assert_eq!(partition, "product");
+                    assert_eq!(file, "etc/sysconfig/google.xml");
+                    assert_eq!(
+                        from.len(),
+                        to.len(),
+                        "google.xml swap must be size-preserving"
+                    );
+                    assert!(to.contains("CONTEXTUAL_SEARCH") && to.contains("GEMINI_EXPERIENCE"));
+                    features = true;
+                }
+                _ => panic!("unexpected op in circle-to-search"),
+            }
+        }
+        assert!(
+            sysui && settings && features,
+            "all three CtS ops must parse"
+        );
     }
 
     }
@@ -1391,6 +1445,72 @@ value = false
             memmem::find(&bytes, from.as_bytes()).is_none(),
             "no Value=\"true\" occurrence should remain"
         );
+    }
+
+    /// Apply the circle-to-search dex ops to the real apks. Set
+    /// `DYNOBOX_ZUISYSTEMUI_DEX_DIR` (AssistManager op) and/or
+    /// `DYNOBOX_ZUISETTINGS_DEX_DIR` (isCircleToSearchEnable op); optionally the
+    /// matching `*_OUT` dirs to dump patched dexes for disassembly.
+    #[test]
+    fn bundled_circle_to_search_lands_on_real_dex() {
+        let doc = load_dbp(&patches_dir().join("circle-to-search.dbp")).unwrap();
+        let sysui_op = doc
+            .ops
+            .iter()
+            .find(|o| matches!(o, DbpOp::InvokeConstBool { scan_class, .. } if scan_class.contains("AssistManager")))
+            .expect("AssistManager op");
+        let settings_op = doc
+            .ops
+            .iter()
+            .find(|o| matches!(o, DbpOp::InvokeConstBool { scan_method: Some(m), .. } if m == "isCircleToSearchEnable"))
+            .expect("isCircleToSearchEnable op");
+
+        let apply_dir = |env_dir: &str, env_out: &str, op: &DbpOp| {
+            let Ok(dir) = std::env::var(env_dir) else {
+                return None;
+            };
+            let dir = std::path::Path::new(&dir);
+            let mut landed = 0usize;
+            for n in 1..=9 {
+                let name = if n == 1 {
+                    "classes.dex".to_string()
+                } else {
+                    format!("classes{n}.dex")
+                };
+                let Ok(mut dex) = std::fs::read(dir.join(&name)) else {
+                    continue;
+                };
+                if apply_one_op(&mut dex, op).unwrap() {
+                    landed += 1;
+                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    if let Ok(out) = std::env::var(env_out) {
+                        std::fs::write(std::path::Path::new(&out).join(&name), &dex).unwrap();
+                    }
+                }
+            }
+            Some(landed)
+        };
+
+        if let Some(landed) = apply_dir(
+            "DYNOBOX_ZUISYSTEMUI_DEX_DIR",
+            "DYNOBOX_ZUISYSTEMUI_DEX_OUT",
+            sysui_op,
+        ) {
+            assert_eq!(
+                landed, 1,
+                "AssistManager isDeviceRow op should land in one dex"
+            );
+        }
+        if let Some(landed) = apply_dir(
+            "DYNOBOX_ZUISETTINGS_DEX_DIR",
+            "DYNOBOX_ZUISETTINGS_DEX_OUT",
+            settings_op,
+        ) {
+            assert_eq!(
+                landed, 1,
+                "isCircleToSearchEnable op should land in one dex"
+            );
+        }
     }
 
     }
