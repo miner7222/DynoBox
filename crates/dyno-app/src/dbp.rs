@@ -42,8 +42,9 @@ use memchr::memmem;
 use serde::Deserialize;
 
 use crate::dex_patch::{
-    force_invoke_const_bool, force_method_return_bool, force_method_return_int,
-    parse_method_descriptor,
+    NopAnchor, force_fragment_render_gone, force_invoke_const_bool, force_invoke_const_int,
+    force_method_return_bool, force_method_return_int, force_method_return_void,
+    force_nop_anchored_invoke, force_remoteviews_gone, force_view_gone, parse_method_descriptor,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
 use crate::fuck_lgsi::{
@@ -57,6 +58,14 @@ fn default_bool_proto() -> String {
 
 fn default_int_proto() -> String {
     "()I".to_string()
+}
+
+fn default_void_proto() -> String {
+    "()V".to_string()
+}
+
+fn default_on_create_view() -> String {
+    "onCreateView".to_string()
 }
 
 /// A parsed `.dbp` document.
@@ -92,6 +101,16 @@ pub enum DbpOp {
         #[serde(default = "default_int_proto")]
         proto: String,
         value: i32,
+    },
+    /// Neutralize a `void` method: rewrite its body to `return-void` for every
+    /// caller (used to disable init/register hooks at their source).
+    MethodNop {
+        partition: String,
+        file: String,
+        class: String,
+        method: String,
+        #[serde(default = "default_void_proto")]
+        proto: String,
     },
     /// Force a compiled boolean resource inside a STORED `resources.arsc` APK
     /// entry to `value`.
@@ -136,6 +155,73 @@ pub enum DbpOp {
         proto: String,
         value: bool,
     },
+    /// Like [`DbpOp::InvokeConstBool`] but for an int-returning (`I`) method:
+    /// force each `target_class.target_method(...)I` result to `value` at its
+    /// call sites in `scan_class` (e.g. pin a `Settings.*.getInt(...)` gate).
+    InvokeConstInt {
+        partition: String,
+        file: String,
+        scan_class: String,
+        #[serde(default)]
+        scan_method: Option<String>,
+        target_class: String,
+        target_method: String,
+        #[serde(default = "default_int_proto")]
+        proto: String,
+        value: i32,
+    },
+    /// Collapse a statically-embedded `<fragment>` tile by rewriting its
+    /// `onCreateView` to inflate `layout` and return it with visibility `GONE`.
+    /// Removes a homepage/entry tile without editing the compiled binary layout.
+    FragmentHide {
+        partition: String,
+        file: String,
+        class: String,
+        #[serde(default = "default_on_create_view")]
+        method: String,
+        layout: u32,
+    },
+    /// Nop the first `target_class.target_method(...)` invoke (result
+    /// discarded) that follows a constant load inside `scan_class.scan_method`.
+    /// Drops a single imperative call site (e.g. a `List.add`/`Map.put`)
+    /// disambiguated by a nearby anchor constant.
+    NopInvoke {
+        partition: String,
+        file: String,
+        scan_class: String,
+        scan_method: String,
+        target_class: String,
+        target_method: String,
+        proto: String,
+        #[serde(default)]
+        anchor_string: Option<String>,
+        #[serde(default)]
+        anchor_int: Option<i32>,
+    },
+    /// Force `setVisibility(GONE)` on the `findViewById`-bound views in
+    /// `view_ids` inside `scan_class.scan_method`. Hides static layout entries
+    /// that have no visibility gate; one field-backed view is the anchor that
+    /// loads `View.GONE` into `scratch_reg`, reused by the other views.
+    ForceViewGone {
+        partition: String,
+        file: String,
+        scan_class: String,
+        scan_method: String,
+        view_ids: Vec<i32>,
+        scratch_reg: u8,
+    },
+    /// Hide a `RemoteViews` view by rewriting one of its setup call sites in
+    /// `scan_class.scan_method` (a `const vId, view_id` followed by a 2-unit
+    /// arg-load + 3-unit invoke) into `RemoteViews.setViewVisibility(id, GONE)`.
+    RemoteviewsHide {
+        partition: String,
+        file: String,
+        scan_class: String,
+        scan_method: String,
+        view_id: i32,
+        rv_reg: u8,
+        scratch_reg: u8,
+    },
 }
 
 impl DbpOp {
@@ -143,10 +229,16 @@ impl DbpOp {
         match self {
             DbpOp::MethodConstBool { partition, .. }
             | DbpOp::MethodConstInt { partition, .. }
+            | DbpOp::MethodNop { partition, .. }
             | DbpOp::ResourceBool { partition, .. }
             | DbpOp::ResourceDimen { partition, .. }
             | DbpOp::TextReplace { partition, .. }
-            | DbpOp::InvokeConstBool { partition, .. } => partition,
+            | DbpOp::InvokeConstBool { partition, .. }
+            | DbpOp::InvokeConstInt { partition, .. }
+            | DbpOp::FragmentHide { partition, .. }
+            | DbpOp::NopInvoke { partition, .. }
+            | DbpOp::ForceViewGone { partition, .. }
+            | DbpOp::RemoteviewsHide { partition, .. } => partition,
         }
     }
 
@@ -154,10 +246,16 @@ impl DbpOp {
         match self {
             DbpOp::MethodConstBool { file, .. }
             | DbpOp::MethodConstInt { file, .. }
+            | DbpOp::MethodNop { file, .. }
             | DbpOp::ResourceBool { file, .. }
             | DbpOp::ResourceDimen { file, .. }
             | DbpOp::TextReplace { file, .. }
-            | DbpOp::InvokeConstBool { file, .. } => file,
+            | DbpOp::InvokeConstBool { file, .. }
+            | DbpOp::InvokeConstInt { file, .. }
+            | DbpOp::FragmentHide { file, .. }
+            | DbpOp::NopInvoke { file, .. }
+            | DbpOp::ForceViewGone { file, .. }
+            | DbpOp::RemoteviewsHide { file, .. } => file,
         }
     }
 
@@ -224,8 +322,11 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
             DbpOp::MethodConstBool { proto, .. } | DbpOp::InvokeConstBool { proto, .. } => {
                 validate_method_proto(proto, "Z", "boolean (`Z`)", &bail)?;
             }
-            DbpOp::MethodConstInt { proto, .. } => {
+            DbpOp::MethodConstInt { proto, .. } | DbpOp::InvokeConstInt { proto, .. } => {
                 validate_method_proto(proto, "I", "integer (`I`)", &bail)?;
+            }
+            DbpOp::MethodNop { proto, .. } => {
+                validate_method_proto(proto, "V", "void (`V`)", &bail)?;
             }
             DbpOp::ResourceBool { resource, .. } => {
                 if !resource_name_is_safe(resource) {
@@ -256,6 +357,130 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
                         from.len(),
                         to.len()
                     )));
+                }
+            }
+            DbpOp::FragmentHide { class, method, .. } => {
+                if !(class.starts_with('L') && class.ends_with(';') && class.len() > 2) {
+                    return Err(bail(format!(
+                        "fragment_hide `class` must be a JVM descriptor like `Lcom/x/Frag;`, got `{class}`"
+                    )));
+                }
+                if method.is_empty() {
+                    return Err(bail("fragment_hide `method` must not be empty".to_string()));
+                }
+            }
+            DbpOp::NopInvoke {
+                scan_class,
+                scan_method,
+                target_class,
+                proto,
+                anchor_string,
+                anchor_int,
+                ..
+            } => {
+                if !(scan_class.starts_with('L')
+                    && scan_class.ends_with(';')
+                    && scan_class.len() > 2)
+                {
+                    return Err(bail(format!(
+                        "nop_invoke `scan_class` must be a JVM descriptor like `Lcom/x/Y;`, got `{scan_class}`"
+                    )));
+                }
+                if !(target_class.starts_with('L')
+                    && target_class.ends_with(';')
+                    && target_class.len() > 2)
+                {
+                    return Err(bail(format!(
+                        "nop_invoke `target_class` must be a JVM descriptor like `Lcom/x/Y;`, got `{target_class}`"
+                    )));
+                }
+                if scan_method.is_empty() {
+                    return Err(bail(
+                        "nop_invoke `scan_method` must not be empty".to_string(),
+                    ));
+                }
+                if parse_method_descriptor(proto).is_none() {
+                    return Err(bail(format!("invalid method descriptor `{proto}`")));
+                }
+                match (anchor_string, anchor_int) {
+                    (Some(s), None) => {
+                        if s.is_empty() {
+                            return Err(bail(
+                                "nop_invoke `anchor_string` must not be empty".to_string(),
+                            ));
+                        }
+                    }
+                    (None, Some(_)) => {}
+                    (None, None) => {
+                        return Err(bail(
+                            "nop_invoke requires exactly one of `anchor_string` / `anchor_int`"
+                                .to_string(),
+                        ));
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(bail(
+                            "nop_invoke must set only one of `anchor_string` / `anchor_int`, not both"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            DbpOp::ForceViewGone {
+                scan_class,
+                scan_method,
+                view_ids,
+                scratch_reg,
+                ..
+            } => {
+                if !(scan_class.starts_with('L')
+                    && scan_class.ends_with(';')
+                    && scan_class.len() > 2)
+                {
+                    return Err(bail(format!(
+                        "force_view_gone `scan_class` must be a JVM descriptor like `Lcom/x/Y;`, got `{scan_class}`"
+                    )));
+                }
+                if scan_method.is_empty() {
+                    return Err(bail(
+                        "force_view_gone `scan_method` must not be empty".to_string(),
+                    ));
+                }
+                if view_ids.is_empty() {
+                    return Err(bail(
+                        "force_view_gone `view_ids` must not be empty".to_string(),
+                    ));
+                }
+                if *scratch_reg >= 16 {
+                    return Err(bail(format!(
+                        "force_view_gone `scratch_reg` must be a nibble-encodable register (0..=15), got {scratch_reg}"
+                    )));
+                }
+            }
+            DbpOp::RemoteviewsHide {
+                scan_class,
+                scan_method,
+                rv_reg,
+                scratch_reg,
+                ..
+            } => {
+                if !(scan_class.starts_with('L')
+                    && scan_class.ends_with(';')
+                    && scan_class.len() > 2)
+                {
+                    return Err(bail(format!(
+                        "remoteviews_hide `scan_class` must be a JVM descriptor like `Lcom/x/Y;`, got `{scan_class}`"
+                    )));
+                }
+                if scan_method.is_empty() {
+                    return Err(bail(
+                        "remoteviews_hide `scan_method` must not be empty".to_string(),
+                    ));
+                }
+                if *rv_reg >= 16 || *scratch_reg >= 16 {
+                    return Err(bail(
+                        "remoteviews_hide `rv_reg` / `scratch_reg` must be nibble-encodable registers (0..=15)"
+                            .to_string(),
+                    ));
                 }
             }
         }
@@ -573,6 +798,17 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
             let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
             force_method_return_int(dex, class, method, &ret, &param_refs, *value)
         }
+        DbpOp::MethodNop {
+            class,
+            method,
+            proto,
+            ..
+        } => {
+            let (ret, params) = parse_method_descriptor(proto)
+                .ok_or_else(|| anyhow!("invalid descriptor `{proto}`"))?;
+            let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+            force_method_return_void(dex, class, method, &ret, &param_refs)
+        }
         DbpOp::InvokeConstBool {
             scan_class,
             scan_method,
@@ -596,6 +832,98 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
                 *value,
             )?;
             Ok(sites > 0)
+        }
+        DbpOp::InvokeConstInt {
+            scan_class,
+            scan_method,
+            target_class,
+            target_method,
+            proto,
+            value,
+            ..
+        } => {
+            let (ret, params) = parse_method_descriptor(proto)
+                .ok_or_else(|| anyhow!("invalid descriptor `{proto}`"))?;
+            let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+            let sites = force_invoke_const_int(
+                dex,
+                scan_class,
+                scan_method.as_deref(),
+                target_class,
+                target_method,
+                &ret,
+                &param_refs,
+                *value,
+            )?;
+            Ok(sites > 0)
+        }
+        DbpOp::FragmentHide {
+            class,
+            method,
+            layout,
+            ..
+        } => force_fragment_render_gone(dex, class, method, *layout),
+        DbpOp::NopInvoke {
+            scan_class,
+            scan_method,
+            target_class,
+            target_method,
+            proto,
+            anchor_string,
+            anchor_int,
+            ..
+        } => {
+            let (ret, params) = parse_method_descriptor(proto)
+                .ok_or_else(|| anyhow!("invalid descriptor `{proto}`"))?;
+            let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
+            let anchor = match (anchor_string.as_deref(), anchor_int) {
+                (Some(s), None) => NopAnchor::Str(s),
+                (None, Some(v)) => NopAnchor::Int(*v),
+                _ => {
+                    return Err(anyhow!(
+                        "nop_invoke requires exactly one of `anchor_string` / `anchor_int`"
+                    ));
+                }
+            };
+            let sites = force_nop_anchored_invoke(
+                dex,
+                scan_class,
+                scan_method,
+                target_class,
+                target_method,
+                &ret,
+                &param_refs,
+                anchor,
+            )?;
+            Ok(sites > 0)
+        }
+        DbpOp::ForceViewGone {
+            scan_class,
+            scan_method,
+            view_ids,
+            scratch_reg,
+            ..
+        } => {
+            let hidden = force_view_gone(dex, scan_class, scan_method, view_ids, *scratch_reg)?;
+            Ok(hidden > 0)
+        }
+        DbpOp::RemoteviewsHide {
+            scan_class,
+            scan_method,
+            view_id,
+            rv_reg,
+            scratch_reg,
+            ..
+        } => {
+            let hit = force_remoteviews_gone(
+                dex,
+                scan_class,
+                scan_method,
+                *view_id,
+                *rv_reg,
+                *scratch_reg,
+            )?;
+            Ok(hit > 0)
         }
         DbpOp::ResourceBool { .. } | DbpOp::ResourceDimen { .. } => Ok(false),
         DbpOp::TextReplace { .. } => Ok(false),
@@ -937,6 +1265,74 @@ value = true
     }
 
     #[test]
+    fn parse_method_nop_op() {
+        let doc: DbpDocument = toml::from_str(
+            r#"
+name = "t"
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/X/X.apk"
+class = "Lcom/x/Y;"
+method = "initTMSApplication"
+proto = "(Landroid/content/Context;Z)V"
+"#,
+        )
+        .unwrap();
+        match &doc.ops[0] {
+            DbpOp::MethodNop {
+                class,
+                method,
+                proto,
+                ..
+            } => {
+                assert_eq!(class, "Lcom/x/Y;");
+                assert_eq!(method, "initTMSApplication");
+                assert_eq!(proto, "(Landroid/content/Context;Z)V");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn method_nop_requires_void_proto() {
+        let doc: DbpDocument = toml::from_str(
+            r#"
+name = "t"
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/X/X.apk"
+class = "Lcom/x/Y;"
+method = "foo"
+proto = "()I"
+"#,
+        )
+        .unwrap();
+        // Parses, but load-time validation rejects a non-void proto. Exercise
+        // the validator via a temp file.
+        let dir = std::env::temp_dir().join(format!("dbp_mnop_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("t.dbp");
+        std::fs::write(
+            &p,
+            r#"name = "t"
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/X/X.apk"
+class = "Lcom/x/Y;"
+method = "foo"
+proto = "()I"
+"#,
+        )
+        .unwrap();
+        assert!(load_dbp(&p).is_err(), "non-void proto must be rejected");
+        let _ = doc; // parsed form is fine; validation is the gate
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn parse_invoke_op_with_scan_method() {
         let doc: DbpDocument = toml::from_str(
             r#"
@@ -959,6 +1355,116 @@ value = true
             } => {
                 assert_eq!(scan_method.as_deref(), Some("getChangedName"));
                 assert!(*value);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_nop_invoke_op() {
+        let doc: DbpDocument = toml::from_str(
+            r#"
+name = "t"
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/X/X.apk"
+scan_class = "Lcom/x/Scan;"
+scan_method = "<init>"
+target_class = "Ljava/util/List;"
+target_method = "add"
+proto = "(Ljava/lang/Object;)Z"
+anchor_int = 0x7f12006d
+"#,
+        )
+        .unwrap();
+        match &doc.ops[0] {
+            DbpOp::NopInvoke {
+                scan_class,
+                scan_method,
+                target_class,
+                target_method,
+                proto,
+                anchor_string,
+                anchor_int,
+                ..
+            } => {
+                assert_eq!(scan_class, "Lcom/x/Scan;");
+                assert_eq!(scan_method, "<init>");
+                assert_eq!(target_class, "Ljava/util/List;");
+                assert_eq!(target_method, "add");
+                assert_eq!(proto, "(Ljava/lang/Object;)Z");
+                assert_eq!(anchor_string, &None);
+                assert_eq!(anchor_int, &Some(0x7f12006d));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_force_view_gone_op() {
+        let doc: DbpDocument = toml::from_str(
+            r#"
+name = "t"
+[[op]]
+kind = "force_view_gone"
+partition = "system"
+file = "system/priv-app/X/X.apk"
+scan_class = "Lcom/x/MainActivity;"
+scan_method = "initView"
+view_ids = [0x7f0903f1, 0x7f0903d7]
+scratch_reg = 1
+"#,
+        )
+        .unwrap();
+        match &doc.ops[0] {
+            DbpOp::ForceViewGone {
+                scan_class,
+                scan_method,
+                view_ids,
+                scratch_reg,
+                ..
+            } => {
+                assert_eq!(scan_class, "Lcom/x/MainActivity;");
+                assert_eq!(scan_method, "initView");
+                assert_eq!(view_ids, &vec![0x7f0903f1, 0x7f0903d7]);
+                assert_eq!(*scratch_reg, 1);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn parse_remoteviews_hide_op() {
+        let doc: DbpDocument = toml::from_str(
+            r#"
+name = "t"
+[[op]]
+kind = "remoteviews_hide"
+partition = "system"
+file = "system/priv-app/X/X.apk"
+scan_class = "Lcom/x/Widget;"
+scan_method = "refreshWidget"
+view_id = 0x7f09009e
+rv_reg = 8
+scratch_reg = 1
+"#,
+        )
+        .unwrap();
+        match &doc.ops[0] {
+            DbpOp::RemoteviewsHide {
+                scan_class,
+                scan_method,
+                view_id,
+                rv_reg,
+                scratch_reg,
+                ..
+            } => {
+                assert_eq!(scan_class, "Lcom/x/Widget;");
+                assert_eq!(scan_method, "refreshWidget");
+                assert_eq!(*view_id, 0x7f09009e);
+                assert_eq!(*rv_reg, 8);
+                assert_eq!(*scratch_reg, 1);
             }
             _ => panic!("wrong variant"),
         }
@@ -1275,6 +1781,124 @@ value = false
             }
             _ => panic!("disable-quick-kill must use a text_replace op"),
         }
+        // The merged security patch (former antivirus / autostart /
+        // permission-manager / url-security / app-recommendation patches).
+        let ds =
+            load_dbp(&patches_dir().join("debloat-security.dbp")).expect("debloat-security.dbp");
+        assert_eq!(ds.name, "debloat-security");
+        assert_eq!(ds.ops.len(), 17);
+        let mut av_nops = 0usize; // AntiVirusInterface hub method_nops
+        let mut got_getrecommendapp_nop = false;
+        let mut got_install_scan = false; // invoke_const_int getInt -> 0
+        let mut got_apprec_hide = false; // isRowVersion in ZuiEmergencyDashboardFragment.onCreate
+        let mut got_perm_route = false; // isRowVersion in AppPermissionPreferenceController
+        let mut got_perm_viewgone = false;
+        let mut got_url_security = false;
+        let mut nop_invokes = 0usize;
+        let mut const_int_hides = 0usize;
+        let mut fragment_hides = 0usize;
+        let mut remoteviews_hides = 0usize;
+        for op in &ds.ops {
+            match op {
+                DbpOp::MethodNop {
+                    class,
+                    method,
+                    proto,
+                    ..
+                } => {
+                    assert!(
+                        proto.ends_with(")V"),
+                        "method_nop must target a void method"
+                    );
+                    if class.contains("AntiVirusInterface") {
+                        av_nops += 1;
+                    } else if method == "getRecommendApp" {
+                        assert!(class.contains("InstallInstallingExtra"));
+                        got_getrecommendapp_nop = true;
+                    } else {
+                        panic!("unexpected method_nop target {class}->{method}");
+                    }
+                }
+                DbpOp::InvokeConstInt {
+                    file,
+                    scan_class,
+                    target_class,
+                    target_method,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(
+                        file,
+                        "system/priv-app/ZuiPackageInstaller/ZuiPackageInstaller.apk"
+                    );
+                    assert!(scan_class.contains("PackageInstallerActivityExtra"));
+                    assert_eq!(target_class, "Landroid/provider/Settings$Global;");
+                    assert_eq!(target_method, "getInt");
+                    assert_eq!(*value, 0, "force safeInstallEnable -> false");
+                    got_install_scan = true;
+                }
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    scan_method,
+                    target_method,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(target_method, "isRowVersion");
+                    assert!(*value);
+                    if scan_class.contains("ZuiEmergencyDashboardFragment") {
+                        assert_eq!(scan_method.as_deref(), Some("onCreate"));
+                        got_apprec_hide = true;
+                    } else if scan_class.contains("AppPermissionPreferenceController") {
+                        got_perm_route = true;
+                    } else {
+                        panic!("unexpected invoke_const_bool scan_class {scan_class}");
+                    }
+                }
+                DbpOp::ForceViewGone {
+                    scan_class,
+                    view_ids,
+                    ..
+                } => {
+                    assert!(scan_class.contains("MainNavigationActivity"));
+                    assert_eq!(view_ids, &vec![0x7f0903f1, 0x7f090406, 0x7f0903d7]);
+                    got_perm_viewgone = true;
+                }
+                DbpOp::TextReplace { file, from, to, .. } => {
+                    assert_eq!(file, "system/build.prop");
+                    assert_eq!(from, "ro.zui.software.safeurl=true");
+                    assert_eq!(from.len(), to.len(), "must stay size-preserving");
+                    got_url_security = true;
+                }
+                DbpOp::NopInvoke { .. } => nop_invokes += 1,
+                DbpOp::MethodConstInt { method, value, .. } => {
+                    assert_eq!(method, "getAvailabilityStatus");
+                    assert_eq!(*value, 3);
+                    const_int_hides += 1;
+                }
+                DbpOp::FragmentHide { .. } => fragment_hides += 1,
+                DbpOp::RemoteviewsHide { .. } => remoteviews_hides += 1,
+                _ => panic!("unexpected op kind in debloat-security"),
+            }
+        }
+        assert_eq!(av_nops, 3, "3 AntiVirusInterface hub method_nops");
+        assert_eq!(nop_invokes, 3, "antivirus item + 2 autostart nop_invokes");
+        assert_eq!(
+            const_int_hides, 3,
+            "KillVirus + AppInstallationGuard + SelfStart -> 3"
+        );
+        assert_eq!(fragment_hides, 1);
+        assert_eq!(remoteviews_hides, 1);
+        assert!(
+            got_getrecommendapp_nop
+                && got_install_scan
+                && got_apprec_hide
+                && got_perm_route
+                && got_perm_viewgone
+                && got_url_security,
+            "all new/key debloat-security ops must be present"
+        );
+
         let cts =
             load_dbp(&patches_dir().join("circle-to-search.dbp")).expect("circle-to-search.dbp");
         assert_eq!(cts.name, "circle-to-search");
@@ -1350,8 +1974,6 @@ value = false
             }
             _ => panic!("power-gesture-settings must use invoke_const_bool"),
         }
-    }
-
     }
 
     /// Apply the bundled google-lens-button dex ops to the real ZuiCamera
@@ -1447,6 +2069,151 @@ value = false
         );
     }
 
+    /// Apply the debloat-security `fragment_hide` op to the real ZuiSecurity
+    /// dexes. Set `DYNOBOX_ZUISECURITY_DEX_DIR`; optionally
+    /// `DYNOBOX_ZUISECURITY_DEX_OUT` to dump patched dexes for disassembly.
+    #[test]
+    fn bundled_fragment_hide_lands_on_real_dex() {
+        let Ok(dir) = std::env::var("DYNOBOX_ZUISECURITY_DEX_DIR") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("debloat-security.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|o| matches!(o, DbpOp::FragmentHide { .. }))
+            .expect("fragment_hide op");
+        let dir = std::path::Path::new(&dir);
+        let mut landed = 0usize;
+        for name in [
+            "classes.dex",
+            "classes2.dex",
+            "classes3.dex",
+            "classes4.dex",
+        ] {
+            let Ok(mut dex) = std::fs::read(dir.join(name)) else {
+                continue;
+            };
+            if apply_one_op(&mut dex, op).unwrap() {
+                landed += 1;
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                if let Ok(out) = std::env::var("DYNOBOX_ZUISECURITY_DEX_OUT") {
+                    std::fs::write(std::path::Path::new(&out).join(name), &dex).unwrap();
+                }
+            }
+        }
+        assert_eq!(landed, 1, "fragment_hide should land in exactly one dex");
+    }
+
+    /// Land the three new debloat-security ops (app-recommendation hide +
+    /// disable, install-scan disable) on the real apks. Set
+    /// `DYNOBOX_ZUISETTINGS_APK` and/or `DYNOBOX_ZUIPACKAGEINSTALLER_APK`.
+    #[test]
+    fn debloat_security_new_ops_land_on_real_apks() {
+        fn land(apk_path: &str, op: &DbpOp) -> usize {
+            let apk = std::fs::read(apk_path).expect("read apk");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let mut hits = 0usize;
+            for e in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            }) {
+                let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    hits += 1;
+                }
+            }
+            hits
+        }
+        let doc = load_dbp(&patches_dir().join("debloat-security.dbp")).unwrap();
+
+        if let Ok(p) = std::env::var("DYNOBOX_ZUISETTINGS_APK") {
+            let hide = doc
+                .ops
+                .iter()
+                .find(|o| matches!(o, DbpOp::InvokeConstBool { scan_class, .. } if scan_class.contains("ZuiEmergencyDashboardFragment")))
+                .expect("app-recommendation hide op");
+            assert_eq!(
+                land(&p, hide),
+                1,
+                "app-recommendation hide should land once"
+            );
+            let guard = doc
+                .ops
+                .iter()
+                .find(|o| matches!(o, DbpOp::MethodConstInt { class, .. } if class.contains("AppInstallationGuardPreferenceController")))
+                .expect("app-installation-guard hide op");
+            assert_eq!(
+                land(&p, guard),
+                1,
+                "app-installation-guard hide should land"
+            );
+        }
+
+        if let Ok(p) = std::env::var("DYNOBOX_ZUISECURITY_APK") {
+            let nav = doc
+                .ops
+                .iter()
+                .find(|o| matches!(o, DbpOp::ForceViewGone { scan_class, .. } if scan_class.contains("MainNavigationActivity")))
+                .expect("nav force_view_gone op");
+            assert_eq!(land(&p, nav), 1, "nav row hide should land in one dex");
+            // Emit the ZuiSecurity dex with the nav op applied for dexdump check
+            // (permission + antivirus + autostart rows -> 3 setVisibility(GONE)).
+            if let Ok(out) = std::env::var("DYNOBOX_ZUISECURITY_NAV_DEX_OUT") {
+                let apk = std::fs::read(&p).expect("read apk");
+                let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+                for e in zip
+                    .entries
+                    .iter()
+                    .filter(|e| e.name.ends_with(".dex") && e.compression_method == 0)
+                {
+                    let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
+                    if apply_one_op(&mut dex, nav).unwrap() {
+                        crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                        std::fs::write(std::path::Path::new(&out).join(&e.name), &dex).unwrap();
+                    }
+                }
+            }
+        }
+
+        if let Ok(p) = std::env::var("DYNOBOX_ZUIPACKAGEINSTALLER_APK") {
+            let rec = doc
+                .ops
+                .iter()
+                .find(
+                    |o| matches!(o, DbpOp::MethodNop { method, .. } if method == "getRecommendApp"),
+                )
+                .expect("getRecommendApp nop op");
+            assert_eq!(land(&p, rec), 1, "getRecommendApp nop should land once");
+            let scan = doc
+                .ops
+                .iter()
+                .find(|o| matches!(o, DbpOp::InvokeConstInt { .. }))
+                .expect("install-scan op");
+            assert_eq!(land(&p, scan), 1, "install-scan getInt force should land");
+
+            // Optionally emit the classes.dex with BOTH installer ops applied
+            // (sums recomputed) for structural validation via dexdump.
+            if let Ok(out) = std::env::var("DYNOBOX_ZUIPACKAGEINSTALLER_DEX_OUT") {
+                let apk = std::fs::read(&p).expect("read apk");
+                let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+                let e = zip
+                    .entries
+                    .iter()
+                    .find(|e| e.name == "classes.dex" && e.compression_method == 0)
+                    .expect("classes.dex");
+                let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
+                assert!(apply_one_op(&mut dex, rec).unwrap());
+                assert!(apply_one_op(&mut dex, scan).unwrap());
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                std::fs::write(std::path::Path::new(&out).join("classes.dex"), &dex).unwrap();
+            }
+        }
+    }
+
     /// Apply the circle-to-search dex ops to the real apks. Set
     /// `DYNOBOX_ZUISYSTEMUI_DEX_DIR` (AssistManager op) and/or
     /// `DYNOBOX_ZUISETTINGS_DEX_DIR` (isCircleToSearchEnable op); optionally the
@@ -1511,8 +2278,6 @@ value = false
                 "isCircleToSearchEnable op should land in one dex"
             );
         }
-    }
-
     }
 
     /// Apply the bundled google-services op to the real ZuiSettings dexes.

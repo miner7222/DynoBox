@@ -72,6 +72,18 @@ instructions with `nop`.
 | `proto`  | no       | JVM method descriptor; defaults to `()I`       |
 | `value`  | yes      | signed 32-bit integer                          |
 
+### `method_nop`
+
+Neutralize a **void** method for every caller: rewrite its body to `return-void`
+(the first instruction nop-padded, `tries_size` zeroed). Used to disable an
+init/register hook at its source so all call sites become no-ops.
+
+| field    | required | meaning                                        |
+|----------|----------|------------------------------------------------|
+| `class`  | yes      | JVM class descriptor                           |
+| `method` | yes      | method name                                    |
+| `proto`  | no       | JVM method descriptor; must return `V`; defaults to `()V` |
+
 ### `resource_bool`
 
 Force a compiled boolean resource inside a STORED `resources.arsc` APK entry to
@@ -124,6 +136,115 @@ only at the call sites inside one class (optionally one method). Rewrites each
 | `proto`         | no       | getter descriptor; defaults to `()Z`                     |
 | `value`         | yes      | `true` / `false`                                         |
 
+### `invoke_const_int`
+
+Like `invoke_const_bool`, but for an int-returning (`I`) method: forces each
+`invoke-static target_class.target_method(...)I` result to `value` at its call
+sites inside `scan_class` (optionally `scan_method`). Handy to pin a
+`Settings.*.getInt(...)` feature gate to a constant. Same-size, in place
+(`const/16` for i16-range values, else `const`), nop-padded.
+
+| field           | required | meaning                                                  |
+|-----------------|----------|----------------------------------------------------------|
+| `scan_class`    | yes      | class whose methods are scanned for call sites           |
+| `scan_method`   | no       | narrow the scan to one method name                       |
+| `target_class`  | yes      | class of the invoked method, e.g. `Landroid/provider/Settings$Global;` |
+| `target_method` | yes      | method name, e.g. `getInt`                               |
+| `proto`         | no       | method descriptor; defaults to `()I`                     |
+| `value`         | yes      | integer to force the result to                           |
+
+### `fragment_hide`
+
+Collapse a `Fragment` tile that is embedded statically as a `<fragment>` in a
+compiled layout (which dbp can't edit). Rewrites the fragment's `onCreateView`
+to inflate `layout` and return that view with `setVisibility(GONE)`, so the
+`<fragment>` still gets a non-null view (no `IllegalStateException`) but the
+slot collapses and weighted siblings reflow. The emitted body only calls
+`LayoutInflater.inflate` and `View.setVisibility` — method ids a real
+`onCreateView` already carries — so it stays size-preserving.
+
+| field    | required | meaning                                                       |
+|----------|----------|---------------------------------------------------------------|
+| `class`  | yes      | fragment class descriptor, e.g. `Lcom/x/HomeCardFragment;`    |
+| `method` | no       | view-creating method; defaults to `onCreateView`              |
+| `layout` | yes      | layout resource id to inflate (integer, e.g. `0x7f0c0118`)    |
+
+> The target must be a real `onCreateView(LayoutInflater, ViewGroup, Bundle)`
+> returning a `View`; obfuscated names are matched by that exact signature.
+
+### `nop_invoke`
+
+Nop the first `target_class.target_method(...)` invoke that follows a
+constant load inside one scanned method, but only when that invoke's result
+is discarded (never nopped if a `move-result*` consumes it). Useful for
+dropping a single imperative call — e.g. one `List.add()` in a menu-building
+constructor, or one `Map.put()` in a static initializer — that can only be
+disambiguated by a nearby constant (a string or literal loaded just before
+the call). Size-preserving: the invoke's instruction is overwritten with
+`nop`.
+
+| field           | required | meaning                                                       |
+|-----------------|----------|----------------------------------------------------------------|
+| `scan_class`    | yes      | class whose method is scanned                                  |
+| `scan_method`   | yes      | exact method name, e.g. `<init>` or `<clinit>`                 |
+| `target_class`  | yes      | class of the invoked method to nop                              |
+| `target_method` | yes      | method name to nop                                              |
+| `proto`         | yes      | full JVM descriptor of the invoked method, e.g. `(Ljava/lang/Object;)Z` |
+| `anchor_string` | one of   | a `const-string` operand that arms the scan                    |
+| `anchor_int`    | one of   | a `const`/`const/4`/`const/16`/`const/high16` literal that arms the scan |
+
+Exactly one of `anchor_string` / `anchor_int` must be set. The scan walks
+`scan_method`'s instructions in order; once the anchor constant is loaded it
+arms, and the very next matching-target invoke is nopped (unless a following
+`move-result*` consumes its result, in which case it is left untouched and
+the op reports no site).
+
+### `force_view_gone`
+
+Force `setVisibility(GONE)` on one or more views bound by `findViewById` inside
+one scanned method, hiding static layout entries that have no visibility gate
+(and whose compiled, deflated layout XML can't be edited size-preservingly).
+The op finds each view's `const vView, id` / `findViewById` / `move-result` /
+… / `setOnClickListener` binding. One **field-backed** view among `view_ids`
+(one whose `check-cast`+`iput`+`setOnClickListener` tail is wide enough) is the
+*anchor*: its tail is rewritten to load `View.GONE` into `scratch_reg` and call
+`setVisibility`, dropping its click/field binding. Every other listed view's
+`setOnClickListener` call is then swapped in place to
+`setVisibility(view, scratch_reg)`, reusing the register the anchor loaded.
+
+| field         | required | meaning                                                           |
+|---------------|----------|-------------------------------------------------------------------|
+| `scan_class`  | yes      | activity class whose method is scanned                            |
+| `scan_method` | yes      | exact method name, e.g. `initView`                                |
+| `view_ids`    | yes      | list of view resource ids to hide (integers)                      |
+| `scratch_reg` | yes      | a nibble register (0..=15) free to clobber for the `GONE` constant |
+
+Requires `Landroid/view/View;->setVisibility(I)V` to already be referenced in
+the dex, at least one field-backed anchor among `view_ids`, and that the
+anchor's dropped `iput` field is not read elsewhere. Size-preserving.
+
+### `remoteviews_hide`
+
+Hide a `RemoteViews` child (e.g. a home-screen widget row) that a static,
+compiled layout always shows and no code path gates. Inside
+`scan_class.scan_method`, the op finds the `const vId, view_id` that loads the
+target id, immediately followed by a 2-unit arg-load and a 3-unit `invoke-*`
+(typically the item's click-intent registration), and overwrites those 10 bytes
+in place with `const/16 scratch, #8` + `invoke-virtual {rv_reg, vId, scratch},
+RemoteViews->setViewVisibility(I,I)V`. The row collapses and its siblings reflow.
+
+| field         | required | meaning                                                     |
+|---------------|----------|-------------------------------------------------------------|
+| `scan_class`  | yes      | class whose method builds the RemoteViews                   |
+| `scan_method` | yes      | exact method name, e.g. `refreshWidget`                     |
+| `view_id`     | yes      | the RemoteViews target view id (integer)                    |
+| `rv_reg`      | yes      | register holding the `RemoteViews` at the site (0..=15)     |
+| `scratch_reg` | yes      | a free nibble register for the `GONE` constant (0..=15)     |
+
+Requires `RemoteViews.setViewVisibility(I,I)V` already referenced in the dex, and
+the exact `[const id][2-unit load][3-unit invoke]` shape at the site. The id's
+register and `rv_reg`/`scratch_reg` must all be < 16. Size-preserving.
+
 ## Bundled patches
 
 * **`clean-launcher.dbp`** — force ZuiLauncher to ROW behaviour (home slide-up
@@ -162,6 +283,44 @@ only at the call sites inside one class (optionally one method). Rewrites each
   the same file but only `zuimemory.enable`). A single `all` `text_replace`
   flips every `use_quick_kill` block `true → false`, size-preserved by dropping
   the space before `/>`.
+* **`debloat-security.dbp`** — one patch that hides / disables / AOSP-replaces
+  the ZuiSecurity-driven "security" surfaces across ZuiSettings, ZuiSecurity and
+  ZuiPackageInstaller (merges the former antivirus, autostart, permission-manager,
+  url-security and app-recommendation patches). Groups:
+  * **Antivirus** — three `method_nop`s on `AntiVirusInterface`
+    (`initTMSApplication` / `startAutoScanBroadcastReceiver` /
+    `startUpdateTMSVirusDbReceiver`) kill the Tencent TMS engine, auto-scan and
+    DB updates; a `nop_invoke` drops the phone main-list item, the
+    `force_view_gone` below hides the `MainNavigationActivity` "Antivirus" nav row
+    (`layout_virus`), and two `method_const_int`s (→ 3) hide the ZuiSettings
+    `KillVirusPreferenceController` (antivirus) and
+    `AppInstallationGuardPreferenceController` ("Safe installation", which
+    configures the now-disabled install-scan) entries.
+  * **Install-time virus scan** — an `invoke_const_int` forces
+    `PackageInstallerActivityExtra`'s `Settings.Global "pi_safeinstall_switch"`
+    `getInt` → 0 (in onCreate + onResume), so `safeInstallEnable` stays false and
+    ZuiPackageInstaller does a normal install without binding ZuiSecurity's
+    `ScanAppService`.
+  * **Autostart** — pairs with the `ZuiAutorunManager` LGSI feature being
+    disabled: `SelfStartPreferenceController` → 3, `fragment_hide` of the
+    SafeCenter homepage tile, two `nop_invoke`s (main-list item + the per-app
+    "Autostart Apps" permission group via `RECEIVE_BOOT_COMPLETED`), and a
+    `remoteviews_hide` of the home-screen widget item.
+  * **Permission manager** — `invoke_const_bool` forces `isRowVersion()` → true
+    in `AppPermissionPreferenceController` (routes app permissions to the AOSP
+    PermissionController), and `force_view_gone` hides the static "Permission
+    manager", "Antivirus" and leftover "Autostart" nav rows on
+    `MainNavigationActivity` (`layout_permission` anchor + `layout_virus` +
+    `layout_auto`).
+  * **URL security** — a `text_replace` renames `ro.zui.software.safeurl` in
+    `system/build.prop` (size-preserving), so `isSafeUrlSupported()` reads false
+    and `ZuiEmergencyDashboardFragment` removes the toggle.
+  * **App recommendation** — the "Apps recommendation" toggle drives
+    ZuiPackageInstaller's post-install ad list. `invoke_const_bool` forces
+    `isRowVersion()` → true in `ZuiEmergencyDashboardFragment.onCreate` (so it
+    `removePreference("app_recommendation")`), and a `method_nop` on
+    `InstallInstallingExtra.getRecommendApp()` stops the fetch regardless of the
+    setting.
 * **`circle-to-search.dbp`** — enable Google Circle to Search (long-press Home)
   on a PRC build by clearing its three region gates. Forces
   `XSystemUtil.isDeviceRow()` → `true` only inside SystemUI's `AssistManager`
