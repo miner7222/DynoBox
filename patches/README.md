@@ -136,11 +136,6 @@ only at the call sites inside one class (optionally one method). Rewrites each
   `isRowVersion()` → `true` at the call sites inside the affected classes.
   Formerly fired automatically when `--fuck-lgsi` flipped `ZuiAntiCrossSell`
   `true→false`; now applied on demand.
-* **`power-menu.dbp`** — show Global Actions instead of Lenovo LeVoice when
-  the power key is held. Forces
-  `PhoneWindowManager.getResolvedLongPressOnPowerBehavior()` → `1`
-  (`LONG_PRESS_POWER_GLOBAL_ACTIONS`), including when `--fuck-lgsi` disables
-  the LeVoice feature and its helper is never created.
 * **`wifi-unlock.dbp`** — keep TB322 PRC Wi-Fi on a US regulatory domain by
   neutralizing Lenovo's pre-property-load assignment in
   `system.img:/system/bin/init`, replacing one duplicate
@@ -177,3 +172,18 @@ only at the call sites inside one class (optionally one method). Rewrites each
   `product.img:/etc/sysconfig/google.xml` (size-preserving, overwriting an
   obsolete TODO comment). Still requires the Google app's
   `ContextualSearchManager` service to actually run the search.
+* **`power-gesture-settings.dbp`** — show the "Press and hold power button"
+  gesture setting (ZuiSettings → gestures) on PRC. `invoke_const_bool` forces
+  `LenovoUtils.isRowVersion()` → `true` only inside `PowerMenuPreferenceController`
+  so its `getAvailabilityStatus()` stops returning UNSUPPORTED (the other gate —
+  `config_longPressOnPowerForAssistantSettingAvailable=true` and
+  `config_longPressOnPowerBehavior ∈ {1,5}` — is already met). For the toggle to
+  actually switch behavior, disable LeVoice with `--fuck-lgsi` so
+  `PhoneWindowManager.getResolvedLongPressOnPowerBehavior()` returns the
+  setting-driven value (do not force that resolver to a constant, e.g. via a
+  `method_const_int` on `getResolvedLongPressOnPowerBehavior`, or long-press is
+  pinned to one behavior regardless of the setting). ZuiSystemUI needs no change
+  (stock AOSP global actions + assist). The boot default
+  (`config_longPressOnPowerBehavior` = 5 = Assistant) is left as-is — changing it
+  means editing framework-res.apk's `resources.arsc`, which DynoBox's arsc walker
+  doesn't parse.

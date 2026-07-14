@@ -1165,27 +1165,6 @@ value = false
             .expect("zuisettings-locale.dbp");
         assert_eq!(zs.name, "zuisettings-locale");
         assert_eq!(zs.ops.len(), 22);
-        let pm = load_dbp(&patches_dir().join("power-menu.dbp")).expect("power-menu.dbp");
-        assert_eq!(pm.name, "power-menu");
-        assert_eq!(pm.ops.len(), 1);
-        match &pm.ops[0] {
-            DbpOp::MethodConstInt {
-                partition,
-                file,
-                class,
-                method,
-                proto,
-                value,
-            } => {
-                assert_eq!(partition, "system");
-                assert_eq!(file, "system/framework/services.jar");
-                assert_eq!(class, "Lcom/android/server/policy/PhoneWindowManager;");
-                assert_eq!(method, "getResolvedLongPressOnPowerBehavior");
-                assert_eq!(proto, "()I");
-                assert_eq!(*value, 1);
-            }
-            _ => panic!("power-menu must use method_const_int"),
-        }
         let wu = load_dbp(&patches_dir().join("wifi-unlock.dbp")).expect("wifi-unlock.dbp");
         assert_eq!(wu.name, "wifi-unlock");
         assert_eq!(wu.ops.len(), 2);
@@ -1350,6 +1329,27 @@ value = false
             sysui && settings && features,
             "all three CtS ops must parse"
         );
+        let pgs = load_dbp(&patches_dir().join("power-gesture-settings.dbp"))
+            .expect("power-gesture-settings.dbp");
+        assert_eq!(pgs.name, "power-gesture-settings");
+        assert_eq!(pgs.ops.len(), 1);
+        match &pgs.ops[0] {
+            DbpOp::InvokeConstBool {
+                file,
+                scan_class,
+                target_class,
+                target_method,
+                value,
+                ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                assert!(scan_class.contains("PowerMenuPreferenceController"));
+                assert_eq!(target_class, "Lcom/lenovo/common/utils/LenovoUtils;");
+                assert_eq!(target_method, "isRowVersion");
+                assert!(*value, "must force isRowVersion -> true");
+            }
+            _ => panic!("power-gesture-settings must use invoke_const_bool"),
+        }
     }
 
     }
@@ -1598,38 +1598,6 @@ value = false
         assert!(
             landed >= 10,
             "expected most ZuiSettings ops to land, got {landed}"
-        );
-    }
-
-    /// Apply the bundled power-menu op to a real services.jar/APK dump.
-    /// Set `DYNOBOX_SERVICES_ARCHIVE`.
-    #[test]
-    fn bundled_power_menu_lands_on_real_services() {
-        let Ok(path) = std::env::var("DYNOBOX_SERVICES_ARCHIVE") else {
-            return;
-        };
-        let archive = std::fs::read(path).expect("read services archive");
-        let zip = parse_zip_central_directory(&archive).expect("parse services archive");
-        let doc = load_dbp(&patches_dir().join("power-menu.dbp")).unwrap();
-        let mut landed = 0usize;
-        for entry in zip.entries.iter().filter(|entry| {
-            entry.name.ends_with(".dex")
-                && entry.compression_method == 0
-                && !entry.uses_data_descriptor
-                && !entry.is_zip64
-                && entry.data_start + entry.compressed_size <= archive.len()
-        }) {
-            let mut dex =
-                archive[entry.data_start..entry.data_start + entry.compressed_size].to_vec();
-            for op in &doc.ops {
-                if apply_one_op(&mut dex, op).unwrap() {
-                    landed += 1;
-                }
-            }
-        }
-        assert_eq!(
-            landed, 1,
-            "the power-menu method rewrite should land exactly once"
         );
     }
 

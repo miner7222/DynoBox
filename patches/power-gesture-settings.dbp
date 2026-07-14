@@ -1,0 +1,43 @@
+# power-gesture-settings.dbp - show the "Press and hold power button" gesture
+# setting on PRC and make it actually take effect.
+#
+# ZuiSettings gestures.xml lists the entry (key "gesture_power_menu_summary",
+# controller PowerMenuPreferenceController). getAvailabilityStatus() returns
+# UNSUPPORTED unless LenovoUtils.isRowVersion() && isLongPressPowerSettingAvailable();
+# on PRC isRowVersion() is false, so the entry is hidden. Force isRowVersion()
+# -> true, scoped to that controller class only, and the entry appears (the
+# other gate is already satisfied: framework-res
+# config_longPressOnPowerForAssistantSettingAvailable=true and
+# config_longPressOnPowerBehavior in {1,5}).
+#
+# For the toggle to actually switch behavior (Assistant <-> Power menu):
+#   * --fuck-lgsi must disable LongPressPowerStartLevoice, so
+#     PhoneWindowManager.getResolvedLongPressOnPowerBehavior() falls through to
+#     the setting-driven mLongPressOnPowerBehavior
+#     (= Settings.Global "power_button_long_press", default config_longPressOnPowerBehavior).
+#   * Do NOT force getResolvedLongPressOnPowerBehavior() to a constant (e.g. a
+#     method_const_int on it) - that pins long-press to one behavior regardless
+#     of the setting.
+# ZuiSystemUI needs no change: it uses stock AOSP GlobalActionsDialogLite (power
+# menu) and AssistManager (assistant).
+#
+# NOTE: config_longPressOnPowerBehavior is the boot default (5 = Assistant). To
+# default it to 1 (power menu) it would have to be edited inside
+# framework-res.apk's resources.arsc, which DynoBox's arsc walker cannot parse
+# (framework-res is far larger/more complex than app arsc), so that is left as
+# the setting's job - the user picks Power menu from the now-working toggle.
+#
+# Apply with:  dynobox resign ... --plus patches/power-gesture-settings.dbp
+
+name = "power-gesture-settings"
+description = "Show the Press-and-hold-power gesture setting on PRC (isRowVersion in PowerMenuPreferenceController). Requires --fuck-lgsi; do not force getResolvedLongPressOnPowerBehavior to a constant."
+
+# ZuiSettings: make the gesture entry available on PRC.
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/gestures/PowerMenuPreferenceController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
