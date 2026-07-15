@@ -2378,6 +2378,34 @@ value = false
             }
             _ => panic!("show-power-gesture must use invoke_const_bool"),
         }
+
+        let dt = load_dbp(&patches_dir().join("debloat-theme.dbp")).expect("debloat-theme.dbp");
+        assert_eq!(dt.name, "debloat-theme");
+        assert_eq!(dt.ops.len(), 1);
+        match &dt.ops[0] {
+            DbpOp::InvokeConstBool {
+                file,
+                scan_class,
+                scan_method,
+                target_class,
+                target_method,
+                proto,
+                value,
+                ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiHomeSettings/ZuiHomeSettings.apk");
+                assert_eq!(scan_class, "Lcom/zui/font/activity/FontActivity;");
+                assert_eq!(scan_method.as_deref(), None);
+                assert_eq!(target_class, "Lcom/zui/font/util/Utilities;");
+                assert_eq!(target_method, "isBusinessProject");
+                assert_eq!(proto, "(Landroid/content/Context;)Z");
+                assert!(
+                    *value,
+                    "font online catalog gate must force isBusinessProject -> true"
+                );
+            }
+            _ => panic!("debloat-theme must contain only the FontActivity invoke_const_bool op"),
+        }
     }
 
     /// Apply the bundled debloat-settings ops to the real ZuiSettings dexes.
@@ -3012,6 +3040,51 @@ value = false
             }
         }
         assert_eq!(landed, 3, "all three debloat-launcher ops should land");
+    }
+
+    /// Apply the bundled debloat-theme FontActivity op to a real HomeSettings APK.
+    /// Set `DYNOBOX_ZUIHOMESETTINGS_APK`.
+    #[test]
+    fn bundled_debloat_theme_lands_on_real_apk() {
+        fn land(apk_path: &str, op: &DbpOp) -> usize {
+            let apk = std::fs::read(apk_path).expect("read apk");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let mut hits = 0usize;
+            for e in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            }) {
+                let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    hits += 1;
+                }
+            }
+            hits
+        }
+        let doc = load_dbp(&patches_dir().join("debloat-theme.dbp")).unwrap();
+
+        if let Ok(p) = std::env::var("DYNOBOX_ZUIHOMESETTINGS_APK") {
+            let font = doc
+                .ops
+                .iter()
+                .find(|o| {
+                    matches!(
+                        o,
+                        DbpOp::InvokeConstBool { scan_class, target_method, .. }
+                            if scan_class.contains("FontActivity")
+                                && target_method == "isBusinessProject"
+                    )
+                })
+                .expect("FontActivity isBusinessProject op");
+            assert_eq!(
+                land(&p, font),
+                1,
+                "FontActivity isBusinessProject force should land in one dex"
+            );
+        }
     }
 
     /// Apply the bundled ZuiSettings ops to the real ZuiSettings dexes.

@@ -394,6 +394,11 @@ while still advancing the setup wizard.
   `return 0` that R8 deduplicated with `ImmutableMap.isHashCodeFast():Z`, so it
   can't be rewritten — DynoBox refuses shared/deduped code items, see
   `dex_patch::code_off_is_shared` — but the region gate is the real switch anyway.)
+* **`debloat-theme.dbp`** — hide the ZuiHomeSettings FontActivity online catalog
+  while keeping Local fonts. Forces every
+  `Utilities.isBusinessProject(Context)` call inside `FontActivity` → true so
+  OEM drops Featured online catalog / payment init and keeps `LocalFragment`.
+
 * **`disable-quick-kill.dbp`** — turn off Lenovo's ZMC "quick kill" aggressive
   reclaim. `system.img:/system/etc/ZuiMemCleanerConfig.xml` is parsed by
   `/system/bin/lmkd`, which `property_set()`s each `<Prop>`, so

@@ -1,0 +1,14 @@
+# Drop FontActivity online catalog while keeping Local fonts.
+
+name = "debloat-theme"
+description = "Hide ZuiHomeSettings FontActivity online catalog while keeping Local fonts."
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiHomeSettings/ZuiHomeSettings.apk"
+scan_class = "Lcom/zui/font/activity/FontActivity;"
+target_class = "Lcom/zui/font/util/Utilities;"
+target_method = "isBusinessProject"
+proto = "(Landroid/content/Context;)Z"
+value = true
