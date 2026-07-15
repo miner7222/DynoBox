@@ -1,0 +1,22 @@
+# Show the Google services menu and prevent first-boot package disabling.
+
+name = "enable-google-services"
+description = "Show the ZuiSettings Google services menu and skip first-boot GMS package disable on PRC."
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/applications/GoogleServicesPreferenceController;"
+method = "getAvailabilityStatus"
+value = 0
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/framework/services.jar"
+scan_class = "Lcom/android/server/pm/PackageManagerService;"
+scan_method = "disableGmsApps"
+target_class = "Lcom/android/server/pm/PackageManagerService;"
+target_method = "isPrcVersion"
+value = false

@@ -325,11 +325,13 @@ while still advancing the setup wizard.
   `system.img:/system/build.prop` property with
   `ro.product.countrycode=US`. This avoids patching the compressed Mainline
   Wi-Fi APEX.
-* **`show-google-services.dbp`** — always show the ZuiSettings "Google services"
-  menu. Forces
-  `GoogleServicesPreferenceController.getAvailabilityStatus()` → `0`
-  (`AVAILABLE`) so the entry appears regardless of the `cn.google.services`
-  system feature.
+* **`enable-google-services.dbp`** — keep Google services enabled on PRC builds:
+  * force `GoogleServicesPreferenceController.getAvailabilityStatus()` → `0`
+    (`AVAILABLE`) so the ZuiSettings "Google services" menu appears regardless
+    of the `cn.google.services` system feature;
+  * in `PackageManagerService.disableGmsApps`, force the scoped
+    `isPrcVersion()` call → `false` so the first-boot one-shot disable of the
+    nine Google packages (Play Store / GmsCore / GSF / …) does not run.
 * **`debloat-setupwizard.dbp`** — make the first-boot flow independent of the
   removed `XuiEasySync.apk`, skip the Lenovo ID entry screen, and keep the final
   home button usable without the Vantage widget (7 ops across the

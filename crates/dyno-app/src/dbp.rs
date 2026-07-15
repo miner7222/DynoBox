@@ -1878,10 +1878,10 @@ value = false
             }
             _ => panic!("unlock-wifi second op must neutralize Lenovo init country mapping"),
         }
-        let gs = load_dbp(&patches_dir().join("show-google-services.dbp"))
-            .expect("show-google-services.dbp");
-        assert_eq!(gs.name, "show-google-services");
-        assert_eq!(gs.ops.len(), 1);
+        let gs = load_dbp(&patches_dir().join("enable-google-services.dbp"))
+            .expect("enable-google-services.dbp");
+        assert_eq!(gs.name, "enable-google-services");
+        assert_eq!(gs.ops.len(), 2);
         match &gs.ops[0] {
             DbpOp::MethodConstInt {
                 partition,
@@ -1901,7 +1901,31 @@ value = false
                 assert_eq!(proto, "()I");
                 assert_eq!(*value, 0);
             }
-            _ => panic!("show-google-services must use method_const_int"),
+            _ => panic!("enable-google-services op[0] must use method_const_int"),
+        }
+        match &gs.ops[1] {
+            DbpOp::InvokeConstBool {
+                partition,
+                file,
+                scan_class,
+                scan_method,
+                target_class,
+                target_method,
+                value,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(scan_class, "Lcom/android/server/pm/PackageManagerService;");
+                assert_eq!(scan_method.as_deref(), Some("disableGmsApps"));
+                assert_eq!(
+                    target_class,
+                    "Lcom/android/server/pm/PackageManagerService;"
+                );
+                assert_eq!(target_method, "isPrcVersion");
+                assert!(!*value);
+            }
+            _ => panic!("enable-google-services op[1] must use invoke_const_bool"),
         }
         let sw = load_dbp(&patches_dir().join("debloat-setupwizard.dbp"))
             .expect("debloat-setupwizard.dbp");
@@ -2896,37 +2920,75 @@ value = false
         }
     }
 
-    /// Apply the bundled show-google-services op to the real ZuiSettings dexes.
-    /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
+    /// Apply the bundled enable-google-services ops to real firmware fixtures.
+    /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR` and/or `DYNOBOX_SERVICES_DEX_DIR`.
     #[test]
-    fn bundled_show_google_services_lands_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
-        let doc = load_dbp(&patches_dir().join("show-google-services.dbp")).unwrap();
-        let dir = std::path::Path::new(&dir);
-        let mut landed = 0usize;
-        for name in [
-            "classes.dex",
-            "classes2.dex",
-            "classes3.dex",
-            "classes4.dex",
-            "classes5.dex",
-            "classes6.dex",
-        ] {
-            let Ok(mut dex) = std::fs::read(dir.join(name)) else {
-                continue;
+    fn bundled_enable_google_services_lands_on_real_dex() {
+        let doc = load_dbp(&patches_dir().join("enable-google-services.dbp")).unwrap();
+        let settings_op = doc
+            .ops
+            .iter()
+            .find(|o| {
+                matches!(
+                    o,
+                    DbpOp::MethodConstInt {
+                        class,
+                        method,
+                        ..
+                    } if class.contains("GoogleServicesPreferenceController")
+                        && method == "getAvailabilityStatus"
+                )
+            })
+            .expect("GoogleServicesPreferenceController op");
+        let services_op = doc
+            .ops
+            .iter()
+            .find(|o| {
+                matches!(
+                    o,
+                    DbpOp::InvokeConstBool {
+                        scan_method: Some(m),
+                        target_method,
+                        ..
+                    } if m == "disableGmsApps" && target_method == "isPrcVersion"
+                )
+            })
+            .expect("disableGmsApps isPrcVersion op");
+
+        let apply_dir = |env_dir: &str, op: &DbpOp| {
+            let Ok(dir) = std::env::var(env_dir) else {
+                return None;
             };
-            for op in &doc.ops {
+            let dir = std::path::Path::new(&dir);
+            let mut landed = 0usize;
+            for n in 1..=9 {
+                let name = if n == 1 {
+                    "classes.dex".to_string()
+                } else {
+                    format!("classes{n}.dex")
+                };
+                let Ok(mut dex) = std::fs::read(dir.join(&name)) else {
+                    continue;
+                };
                 if apply_one_op(&mut dex, op).unwrap() {
                     landed += 1;
                 }
             }
+            Some(landed)
+        };
+
+        if let Some(landed) = apply_dir("DYNOBOX_ZUISETTINGS_DEX_DIR", settings_op) {
+            assert_eq!(
+                landed, 1,
+                "GoogleServicesPreferenceController op should land exactly once"
+            );
         }
-        assert_eq!(
-            landed, 1,
-            "show-google-services op should land exactly once"
-        );
+        if let Some(landed) = apply_dir("DYNOBOX_SERVICES_DEX_DIR", services_op) {
+            assert_eq!(
+                landed, 1,
+                "disableGmsApps isPrcVersion op should land exactly once"
+            );
+        }
     }
 
     /// Apply the bundled debloat-launcher ops to the real ZuiLauncher dexes.
