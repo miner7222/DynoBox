@@ -1,17 +1,6 @@
-# zuisettings-locale.dbp - make ZuiSettings behave like a ROW build.
-#
-# The PRC build gates the language picker and the "Regional preferences"
-# category on LenovoUtils.isPrcVersion()/isRowVersion(). This rewrites those
-# invoke-static results inside the affected classes so the ROW UI path is
-# taken: full language picker (Add language, Edit menu, drag-reorder, Terms of
-# Address) plus the previously-hidden Regional preferences category (Region
-# picker, Temperature unit, Measurement system, First day of week).
-#
-# Formerly fired automatically when --fuck-lgsi flipped ZuiAntiCrossSell
-# true->false; now an independent patch. Apply with:
-#   dynobox resign ... --plus patches/zuisettings-locale.dbp
+# Unlock the full language picker and regional preferences in PRC ZuiSettings.
 
-name = "zuisettings-locale"
+name = "unlock-locale"
 description = "PRC ZuiSettings language picker + Regional preferences -> ROW."
 
 [[op]]

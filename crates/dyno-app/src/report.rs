@@ -604,7 +604,7 @@ mod tests {
     #[test]
     fn render_html_redacts_absolute_paths() {
         let r = PipelineReport {
-            command_line: r"dynobox apply --input D:\Downloads\Tool\image --output=D:\Downloads\Tool\final --plus=C:\Git\DynoBox\patches\wifi-unlock.dbp".to_string(),
+            command_line: r"dynobox apply --input D:\Downloads\Tool\image --output=D:\Downloads\Tool\final --plus=C:\Git\DynoBox\patches\unlock-wifi.dbp".to_string(),
             command_kind: "apply".to_string(),
             started_at: "2026-05-02T10:00:00Z".to_string(),
             finished_at: "2026-05-02T10:01:00Z".to_string(),
@@ -612,8 +612,8 @@ mod tests {
             resigned_images: vec!["boot.img".to_string()],
             plus: Some(PlusRecord {
                 patches: vec![PlusPatchRecord {
-                    name: "wifi-unlock".to_string(),
-                    source: r"C:\Git\DynoBox\patches\wifi-unlock.dbp".to_string(),
+                    name: "unlock-wifi".to_string(),
+                    source: r"C:\Git\DynoBox\patches\unlock-wifi.dbp".to_string(),
                     files: vec![PlusFileRecord {
                         partition: "product".to_string(),
                         file: r"D:\staging\product\overlay\WifiOverlay.apk".to_string(),
@@ -631,7 +631,7 @@ mod tests {
 
         assert!(html.contains("--input image"));
         assert!(html.contains("--output=final"));
-        assert!(html.contains("--plus=wifi-unlock.dbp"));
+        assert!(html.contains("--plus=unlock-wifi.dbp"));
         assert!(html.contains("WifiOverlay.apk"));
         assert!(html.contains("resign_stage"));
         assert!(!html.contains(r"D:\Downloads"));

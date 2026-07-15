@@ -1,0 +1,12 @@
+# Show the Google services menu in ZuiSettings.
+
+name = "show-google-services"
+description = "Always show the ZuiSettings Google services menu (ignore cn.google.services feature)."
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/applications/GoogleServicesPreferenceController;"
+method = "getAvailabilityStatus"
+value = 0

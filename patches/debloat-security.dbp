@@ -1,18 +1,8 @@
-# debloat-security.dbp - hide / disable / AOSP-replace the ZuiSecurity-driven
-# "security" surfaces across ZuiSettings, ZuiSecurity and ZuiPackageInstaller.
-# Merges the former antivirus / autostart / permission-manager / url-security /
-# app-recommendation patches into one. Each op is commented in 1-2 lines; see
-# git history of the split patches for the full reverse-engineering notes.
-#
-# Apply with:  dynobox resign ... --plus patches/debloat-security.dbp
+# Hide ZuiSecurity surfaces and route app permissions to AOSP.
 
 name = "debloat-security"
 description = "Hide/disable ZuiSecurity's security surfaces (antivirus, autostart, permission manager, URL-security, app-recommendation, install-scan) across ZuiSettings/ZuiSecurity/ZuiPackageInstaller and route app permissions to AOSP."
 
-# ============================ ANTIVIRUS ============================
-# Antivirus has no single gate; everything hangs off AntiVirusInterface. Nop the
-# three hub methods so the Tencent TMS engine, auto-scan and DB-update never
-# start (engine dead => the UI, Optimize and install-scan all no-op).
 [[op]]
 kind = "method_nop"
 partition = "system"
@@ -37,8 +27,6 @@ class = "Lcom/lenovo/safecenter/antivirus/external/AntiVirusInterface;"
 method = "startUpdateTMSVirusDbReceiver"
 proto = "(Landroid/content/Context;)V"
 
-# ZuiSecurity phone main-list "Antivirus" item: nop its List.add
-# (anchor R.string.antivirusapp_name 0x7f12003a).
 [[op]]
 kind = "nop_invoke"
 partition = "system"
@@ -50,7 +38,6 @@ target_method = "add"
 proto = "(Ljava/lang/Object;)Z"
 anchor_int = 0x7f12003a
 
-# ZuiSettings > Safety & emergency "Antivirus" entry: hide via UNSUPPORTED.
 [[op]]
 kind = "method_const_int"
 partition = "system"
@@ -59,8 +46,6 @@ class = "Lcom/lenovo/settings/emergency/KillVirusPreferenceController;"
 method = "getAvailabilityStatus"
 value = 3
 
-# ZuiSettings > Safety & emergency "Safe installation" (app-installation guard)
-# entry - the install-scan feature it configures is disabled below, so hide it.
 [[op]]
 kind = "method_const_int"
 partition = "system"
@@ -69,12 +54,6 @@ class = "Lcom/lenovo/settings/emergency/AppInstallationGuardPreferenceController
 method = "getAvailabilityStatus"
 value = 3
 
-# ======================= INSTALL-TIME VIRUS SCAN =======================
-# ZuiPackageInstaller "safe install" scan binds ZuiSecurity's ScanAppService.
-# It is gated by safeInstallEnable, set from Settings.Global pi_safeinstall_switch
-# in onCreate/onResume. Force that getInt -> 0 (only pi_safeinstall_switch is read
-# via Settings$Global.getInt in this class) so safeInstallEnable stays false and
-# the installer does a normal install with no virus scan.
 [[op]]
 kind = "invoke_const_int"
 partition = "system"
@@ -85,11 +64,6 @@ target_method = "getInt"
 proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)I"
 value = 0
 
-# ============================ AUTOSTART ============================
-# Pairs with the ZuiAutorunManager LGSI feature being disabled (autostart no
-# longer intercepted); these ops just remove the now-dead entry points.
-
-# ZuiSettings: hide the "Autostart" preference row.
 [[op]]
 kind = "method_const_int"
 partition = "system"
@@ -98,7 +72,6 @@ class = "Lcom/lenovo/settings/emergency/SelfStartPreferenceController;"
 method = "getAvailabilityStatus"
 value = 3
 
-# ZuiSecurity: collapse the homepage "Autostart" <fragment> tile (GONE view).
 [[op]]
 kind = "fragment_hide"
 partition = "system"
@@ -106,8 +79,6 @@ file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
 class = "Lcom/lenovo/safecenter/main/ui/fragment/HomepageAutoStartFragment;"
 layout = 0x7f0c0118
 
-# ZuiSecurity: drop the main-page "Autostart Manager" list item
-# (PhoneMainViewModel.<init> List.add, anchor R.string.auto_start 0x7f12006d).
 [[op]]
 kind = "nop_invoke"
 partition = "system"
@@ -119,8 +90,6 @@ target_method = "add"
 proto = "(Ljava/lang/Object;)Z"
 anchor_int = 0x7f12006d
 
-# ZuiSecurity: drop the per-app "Autostart Apps" permission row by unmapping
-# RECEIVE_BOOT_COMPLETED -> "boot_start_up" in BasePermissionGroup.<clinit>.
 [[op]]
 kind = "nop_invoke"
 partition = "system"
@@ -132,9 +101,6 @@ target_method = "put"
 proto = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
 anchor_string = "android.permission.RECEIVE_BOOT_COMPLETED"
 
-# ZuiSecurity: hide the home-screen widget's "Autostart Apps" item
-# (SafecenterWidget.refreshWidget auto_apps_layout 0x7f09009e -> setViewVisibility
-# GONE; rv_reg 8 = the RemoteViews param). The capacity item reflows.
 [[op]]
 kind = "remoteviews_hide"
 partition = "system"
@@ -145,9 +111,6 @@ view_id = 0x7f09009e
 rv_reg = 8
 scratch_reg = 1
 
-# ======================== PERMISSION MANAGER ========================
-# ZuiSettings: force the app-permission controller onto the AOSP route
-# (isRowVersion -> true here only => MANAGE_APP_PERMISSIONS instead of ZuiSecurity).
 [[op]]
 kind = "invoke_const_bool"
 partition = "system"
@@ -157,9 +120,6 @@ target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
 target_method = "isRowVersion"
 value = true
 
-# ZuiSecurity: hide the static "Permission manager", "Antivirus" (layout_virus)
-# and leftover "Autostart" nav rows in MainNavigationActivity.initView via
-# setVisibility(GONE). layout_permission (field-backed) is the anchor.
 [[op]]
 kind = "force_view_gone"
 partition = "system"
@@ -169,10 +129,6 @@ scan_method = "initView"
 view_ids = [0x7f0903f1, 0x7f090406, 0x7f0903d7]
 scratch_reg = 1
 
-# ======================== URL SECURITY ========================
-# Hide the "URL security detection" toggle by neutralizing its enabling prop in
-# build.prop (key renamed, size-preserving); isSafeUrlSupported() then reads the
-# false default and ZuiEmergencyDashboardFragment removes the toggle.
 [[op]]
 kind = "text_replace"
 partition = "system"
@@ -180,13 +136,6 @@ file = "system/build.prop"
 from = "ro.zui.software.safeurl=true"
 to = "ro.zui.software.safeurL=true"
 
-# ======================== APP RECOMMENDATION ========================
-# The "Apps recommendation" toggle drives ZuiPackageInstaller's post-install ad
-# list (Settings.Global pi_recommendapp_switch).
-
-# ZuiSettings > Safety & emergency: hide the toggle. onCreate shows it only when
-# !isRowVersion() (PRC consumer); force isRowVersion -> true here so onCreate
-# calls removePreference("app_recommendation").
 [[op]]
 kind = "invoke_const_bool"
 partition = "system"
@@ -197,9 +146,6 @@ target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
 target_method = "isRowVersion"
 value = true
 
-# ZuiPackageInstaller: disable the recommendation fetch itself (nop the sole
-# InstallInstallingExtra.getRecommendApp(), so no post-install ads regardless of
-# the setting).
 [[op]]
 kind = "method_nop"
 partition = "system"

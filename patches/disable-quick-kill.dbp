@@ -1,23 +1,4 @@
-# disable-quick-kill.dbp - turn off the ZMC "quick kill" aggressive reclaim.
-#
-# /system/etc/ZuiMemCleanerConfig.xml tunes Lenovo's memory cleaner (ZMC). It
-# is parsed by the native low-memory-killer daemon /system/bin/lmkd (which
-# carries the XML literals MemorySize/MemoryExt/Prop/Name/Value/switch plus
-# property_set): lmkd picks the block matching the device RAM size and the
-# accessibility on/off switch, then property_set()s every <Prop> as a runtime
-# system property, so zuimemory.use_quick_kill drives lmkd's quick-kill path.
-# (ZuiSecurity's ZuiMemoryCleanerUtils.parseConfigXml reads this same file but
-# only extracts zuimemory.enable, so it is NOT the consumer of use_quick_kill.)
-#
-# This flips every
-#   <Prop Name="zuimemory.use_quick_kill" Value="true" />
-# to
-#   <Prop Name="zuimemory.use_quick_kill" Value="false"/>
-# for all RAM-size / on-off blocks (10 occurrences on TB322). The replacement
-# is size-preserving: true->false adds one byte, absorbed by dropping the space
-# before "/>", so the ext4 file length is unchanged.
-#
-# Apply with:  dynobox resign ... --plus patches/disable-quick-kill.dbp
+# Disable ZMC quick-kill memory reclamation.
 
 name = "disable-quick-kill"
 description = "Disable the ZMC quick-kill reclaim path (zuimemory.use_quick_kill -> false in ZuiMemCleanerConfig.xml)."

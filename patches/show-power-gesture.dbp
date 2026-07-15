@@ -1,0 +1,13 @@
+# Show the press-and-hold power gesture setting on PRC builds.
+
+name = "show-power-gesture"
+description = "Show the Press-and-hold-power gesture setting on PRC (isRowVersion in PowerMenuPreferenceController). Requires --fuck-lgsi; do not force getResolvedLongPressOnPowerBehavior to a constant."
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/gestures/PowerMenuPreferenceController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true

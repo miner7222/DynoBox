@@ -6,13 +6,13 @@
 //! result, field read, Intent launch, or compiled resource in place. Text ops
 //! replace one exact byte string inside a regular file with another same-length
 //! string. Dex rewrites use the [`crate::dex_patch`] primitives. This is how DynoBox ships
-//! the former built-in "clean-launcher" and ZuiSettings locale patches as data
+//! the former built-in launcher and ZuiSettings locale patches as data
 //! instead of code.
 //!
 //! Example:
 //!
 //! ```toml
-//! name = "clean-launcher"
+//! name = "debloat-launcher"
 //! description = "Force ZuiLauncher home search + first-run to ROW."
 //!
 //! [[op]]
@@ -1676,7 +1676,7 @@ value = false
     fn parse_text_replace_op() {
         let doc: DbpDocument = toml::from_str(
             r#"
-name = "wifi-unlock"
+name = "unlock-wifi"
 [[op]]
 kind = "text_replace"
 partition = "system"
@@ -1836,15 +1836,15 @@ value = false
 
     #[test]
     fn bundled_dbp_files_parse() {
-        let cl = load_dbp(&patches_dir().join("clean-launcher.dbp")).expect("clean-launcher.dbp");
-        assert_eq!(cl.name, "clean-launcher");
+        let cl =
+            load_dbp(&patches_dir().join("debloat-launcher.dbp")).expect("debloat-launcher.dbp");
+        assert_eq!(cl.name, "debloat-launcher");
         assert_eq!(cl.ops.len(), 3);
-        let zs = load_dbp(&patches_dir().join("zuisettings-locale.dbp"))
-            .expect("zuisettings-locale.dbp");
-        assert_eq!(zs.name, "zuisettings-locale");
+        let zs = load_dbp(&patches_dir().join("unlock-locale.dbp")).expect("unlock-locale.dbp");
+        assert_eq!(zs.name, "unlock-locale");
         assert_eq!(zs.ops.len(), 22);
-        let wu = load_dbp(&patches_dir().join("wifi-unlock.dbp")).expect("wifi-unlock.dbp");
-        assert_eq!(wu.name, "wifi-unlock");
+        let wu = load_dbp(&patches_dir().join("unlock-wifi.dbp")).expect("unlock-wifi.dbp");
+        assert_eq!(wu.name, "unlock-wifi");
         assert_eq!(wu.ops.len(), 2);
         match &wu.ops[0] {
             DbpOp::TextReplace {
@@ -1860,7 +1860,7 @@ value = false
                 assert_eq!(to, "ro.product.countrycode=US\n##\n");
                 assert_eq!(from.len(), to.len());
             }
-            _ => panic!("wifi-unlock first op must pin system build.prop"),
+            _ => panic!("unlock-wifi first op must pin system build.prop"),
         }
         match &wu.ops[1] {
             DbpOp::TextReplace {
@@ -1876,10 +1876,11 @@ value = false
                 assert_eq!(to, "ro.product.countrycodE");
                 assert_eq!(from.len(), to.len());
             }
-            _ => panic!("wifi-unlock second op must neutralize Lenovo init country mapping"),
+            _ => panic!("unlock-wifi second op must neutralize Lenovo init country mapping"),
         }
-        let gs = load_dbp(&patches_dir().join("google-services.dbp")).expect("google-services.dbp");
-        assert_eq!(gs.name, "google-services");
+        let gs = load_dbp(&patches_dir().join("show-google-services.dbp"))
+            .expect("show-google-services.dbp");
+        assert_eq!(gs.name, "show-google-services");
         assert_eq!(gs.ops.len(), 1);
         match &gs.ops[0] {
             DbpOp::MethodConstInt {
@@ -1900,7 +1901,7 @@ value = false
                 assert_eq!(proto, "()I");
                 assert_eq!(*value, 0);
             }
-            _ => panic!("google-services must use method_const_int"),
+            _ => panic!("show-google-services must use method_const_int"),
         }
         let sw = load_dbp(&patches_dir().join("debloat-setupwizard.dbp"))
             .expect("debloat-setupwizard.dbp");
@@ -2055,9 +2056,9 @@ value = false
                 && skipped_lenovoid_entry,
             "all seven setup-wizard ops must parse"
         );
-        let gl = load_dbp(&patches_dir().join("google-lens-button.dbp"))
-            .expect("google-lens-button.dbp");
-        assert_eq!(gl.name, "google-lens-button");
+        let gl =
+            load_dbp(&patches_dir().join("show-google-lens.dbp")).expect("show-google-lens.dbp");
+        assert_eq!(gl.name, "show-google-lens");
         assert_eq!(gl.ops.len(), 3);
         match &gl.ops[2] {
             DbpOp::ResourceDimen {
@@ -2067,7 +2068,7 @@ value = false
                 assert_eq!(resource, "google_lens_button_padding");
                 assert_eq!(*dp, 9);
             }
-            _ => panic!("google-lens-button op[2] must be resource_dimen"),
+            _ => panic!("show-google-lens op[2] must be resource_dimen"),
         }
         match &gl.ops[0] {
             DbpOp::InvokeConstBool {
@@ -2084,7 +2085,7 @@ value = false
                 assert_eq!(target_method, "isRow");
                 assert!(*value);
             }
-            _ => panic!("google-lens-button must use invoke_const_bool"),
+            _ => panic!("show-google-lens must use invoke_const_bool"),
         }
         let ds2 =
             load_dbp(&patches_dir().join("debloat-settings.dbp")).expect("debloat-settings.dbp");
@@ -2277,9 +2278,9 @@ value = false
             "all new/key debloat-security ops must be present"
         );
 
-        let cts =
-            load_dbp(&patches_dir().join("circle-to-search.dbp")).expect("circle-to-search.dbp");
-        assert_eq!(cts.name, "circle-to-search");
+        let cts = load_dbp(&patches_dir().join("enable-circle-to-search.dbp"))
+            .expect("enable-circle-to-search.dbp");
+        assert_eq!(cts.name, "enable-circle-to-search");
         assert_eq!(cts.ops.len(), 3);
         let mut sysui = false;
         let mut settings = false;
@@ -2324,7 +2325,7 @@ value = false
                     assert!(to.contains("CONTEXTUAL_SEARCH") && to.contains("GEMINI_EXPERIENCE"));
                     features = true;
                 }
-                _ => panic!("unexpected op in circle-to-search"),
+                _ => panic!("unexpected op in enable-circle-to-search"),
             }
         }
         assert!(
@@ -2332,9 +2333,9 @@ value = false
             "all three CtS ops must parse"
         );
 
-        let pgs = load_dbp(&patches_dir().join("power-gesture-settings.dbp"))
-            .expect("power-gesture-settings.dbp");
-        assert_eq!(pgs.name, "power-gesture-settings");
+        let pgs = load_dbp(&patches_dir().join("show-power-gesture.dbp"))
+            .expect("show-power-gesture.dbp");
+        assert_eq!(pgs.name, "show-power-gesture");
         assert_eq!(pgs.ops.len(), 1);
         match &pgs.ops[0] {
             DbpOp::InvokeConstBool {
@@ -2351,7 +2352,7 @@ value = false
                 assert_eq!(target_method, "isRowVersion");
                 assert!(*value, "must force isRowVersion -> true");
             }
-            _ => panic!("power-gesture-settings must use invoke_const_bool"),
+            _ => panic!("show-power-gesture must use invoke_const_bool"),
         }
     }
 
@@ -2430,17 +2431,17 @@ value = false
         assert_eq!(hits, 0, "a shared/deduped code item must not be rewritten");
     }
 
-    /// Apply the bundled google-lens-button dex ops to the real ZuiCamera
+    /// Apply the bundled show-google-lens dex ops to the real ZuiCamera
     /// dexes. Set `DYNOBOX_ZUICAMERA_DEX_DIR`; optionally
     /// `DYNOBOX_ZUICAMERA_DEX_OUT` to dump patched dexes for disassembly.
     /// The third op (`resource_dimen`) targets resources.arsc, not a dex, so
     /// it is a no-op here and covered by the arsc test below.
     #[test]
-    fn bundled_google_lens_button_lands_on_real_dex() {
+    fn bundled_show_google_lens_lands_on_real_dex() {
         let Ok(dir) = std::env::var("DYNOBOX_ZUICAMERA_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("google-lens-button.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("show-google-lens.dbp")).unwrap();
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
@@ -2461,15 +2462,15 @@ value = false
                 }
             }
         }
-        assert_eq!(landed, 2, "both google-lens-button dex ops should land");
+        assert_eq!(landed, 2, "both show-google-lens dex ops should land");
     }
 
-    /// Apply the google-lens-button `resource_dimen` op to a real ZuiCamera
+    /// Apply the show-google-lens `resource_dimen` op to a real ZuiCamera
     /// `resources.arsc` (STORED APK entry, extract it verbatim). Set
     /// `DYNOBOX_ZUICAMERA_ARSC`; optionally `DYNOBOX_ZUICAMERA_ARSC_OUT` to
     /// dump the patched arsc.
     #[test]
-    fn bundled_google_lens_dimen_lands_on_real_arsc() {
+    fn bundled_show_google_lens_dimen_lands_on_real_arsc() {
         let Ok(path) = std::env::var("DYNOBOX_ZUICAMERA_ARSC") else {
             return;
         };
@@ -2829,13 +2830,13 @@ value = false
         }
     }
 
-    /// Apply the circle-to-search dex ops to the real apks. Set
+    /// Apply the enable-circle-to-search dex ops to the real apks. Set
     /// `DYNOBOX_ZUISYSTEMUI_DEX_DIR` (AssistManager op) and/or
     /// `DYNOBOX_ZUISETTINGS_DEX_DIR` (isCircleToSearchEnable op); optionally the
     /// matching `*_OUT` dirs to dump patched dexes for disassembly.
     #[test]
-    fn bundled_circle_to_search_lands_on_real_dex() {
-        let doc = load_dbp(&patches_dir().join("circle-to-search.dbp")).unwrap();
+    fn bundled_enable_circle_to_search_lands_on_real_dex() {
+        let doc = load_dbp(&patches_dir().join("enable-circle-to-search.dbp")).unwrap();
         let sysui_op = doc
             .ops
             .iter()
@@ -2895,14 +2896,14 @@ value = false
         }
     }
 
-    /// Apply the bundled google-services op to the real ZuiSettings dexes.
+    /// Apply the bundled show-google-services op to the real ZuiSettings dexes.
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
     #[test]
-    fn bundled_google_services_lands_on_real_dex() {
+    fn bundled_show_google_services_lands_on_real_dex() {
         let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("google-services.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("show-google-services.dbp")).unwrap();
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         for name in [
@@ -2922,17 +2923,20 @@ value = false
                 }
             }
         }
-        assert_eq!(landed, 1, "google-services op should land exactly once");
+        assert_eq!(
+            landed, 1,
+            "show-google-services op should land exactly once"
+        );
     }
 
-    /// Apply the bundled clean-launcher ops to the real ZuiLauncher dexes.
+    /// Apply the bundled debloat-launcher ops to the real ZuiLauncher dexes.
     /// Set `DYNOBOX_ZUILAUNCHER_DEX_DIR`.
     #[test]
-    fn bundled_clean_launcher_lands_on_real_dex() {
+    fn bundled_debloat_launcher_lands_on_real_dex() {
         let Ok(dir) = std::env::var("DYNOBOX_ZUILAUNCHER_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("clean-launcher.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-launcher.dbp")).unwrap();
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
@@ -2945,17 +2949,17 @@ value = false
                 }
             }
         }
-        assert_eq!(landed, 3, "all three clean-launcher ops should land");
+        assert_eq!(landed, 3, "all three debloat-launcher ops should land");
     }
 
     /// Apply the bundled ZuiSettings ops to the real ZuiSettings dexes.
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
     #[test]
-    fn bundled_zuisettings_lands_on_real_dex() {
+    fn bundled_unlock_locale_lands_on_real_dex() {
         let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("zuisettings-locale.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("unlock-locale.dbp")).unwrap();
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         for name in [

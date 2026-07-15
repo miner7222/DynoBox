@@ -1,0 +1,18 @@
+# Keep PRC Wi-Fi on the US regulatory domain.
+
+name = "unlock-wifi"
+description = "Keep PRC Wi-Fi on a US regulatory domain by pinning the Wi-Fi country input."
+
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/build.prop"
+from = "ro.config.zui.education=true\n"
+to = "ro.product.countrycode=US\n##\n"
+
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/bin/init"
+from = "ro.product.countrycode"
+to = "ro.product.countrycodE"

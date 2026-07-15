@@ -1,0 +1,31 @@
+# Show the Google Lens camera button instead of ZUI AI Lens.
+
+name = "show-google-lens"
+description = "Show the Google Lens camera button (instead of ZUI AI Lens) on PRC ZuiCamera."
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiCamera/ZuiCamera.apk"
+scan_class = "Lcom/zui/camera/module/capture/CaptureModule;"
+scan_method = "getUISpec"
+target_class = "Lcom/zui/camera/developer/common/ApiHelper;"
+target_method = "isRow"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiCamera/ZuiCamera.apk"
+scan_class = "Lcom/zui/camera/module/wide/WideCaptureModule;"
+scan_method = "getUISpec"
+target_class = "Lcom/zui/camera/developer/common/ApiHelper;"
+target_method = "isRow"
+value = true
+
+[[op]]
+kind = "resource_dimen"
+partition = "system"
+file = "system/priv-app/ZuiCamera/ZuiCamera.apk"
+resource = "google_lens_button_padding"
+dp = 9

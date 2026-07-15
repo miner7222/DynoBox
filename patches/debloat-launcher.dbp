@@ -1,0 +1,28 @@
+# Use ROW launcher search behavior and hide first-run recommendations.
+
+name = "debloat-launcher"
+description = "Force ZuiLauncher home search + first-run recommendations to ROW."
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/android/launcher3/Utilities;"
+method = "isZuiRow"
+value = true
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/android/launcher3/icons/GraphicsUtils;"
+method = "isZuiRow"
+value = true
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/android/launcher3/config/FeatureFlags;"
+method = "isIsShowPrcGlobalSearch"
+value = false

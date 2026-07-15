@@ -5,9 +5,9 @@ edits applied to files *inside partition images* during resign.
 Pass one or more with the `--plus` resign option:
 
 ```sh
-dynobox resign  -i <in> -o <out> -k <key> --plus patches/clean-launcher.dbp
+dynobox resign  -i <in> -o <out> -k <key> --plus patches/debloat-launcher.dbp
 dynobox unpack  -i <in> --resign -k <key> --plus a.dbp --plus b.dbp
-dynobox apply   -i <in> resign  -k <key> --plus patches/zuisettings-locale.dbp  ota.zip
+dynobox apply   -i <in> resign  -k <key> --plus patches/unlock-locale.dbp  ota.zip
 ```
 
 Archive ops force a method, invocation result, or compiled resource value to a
@@ -28,7 +28,7 @@ the resign.
 ## Document format
 
 ```toml
-name = "clean-launcher"                 # required, short identifier
+name = "debloat-launcher"              # required, short identifier
 description = "…"                       # optional
 
 [[op]]
@@ -309,23 +309,23 @@ while still advancing the setup wizard.
 
 ## Bundled patches
 
-* **`clean-launcher.dbp`** — force ZuiLauncher to ROW behaviour (home slide-up
+* **`debloat-launcher.dbp`** — force ZuiLauncher to ROW behaviour (home slide-up
   global search → ROW branch; no first-run recommended widgets/apps). Forces
   `Utilities.isZuiRow()` + `GraphicsUtils.isZuiRow()` → `true` and
   `FeatureFlags.isIsShowPrcGlobalSearch()` → `false`.
-* **`zuisettings-locale.dbp`** — make the PRC ZuiSettings behave like a ROW
+* **`unlock-locale.dbp`** — make the PRC ZuiSettings behave like a ROW
   build (full language picker + previously-hidden Regional preferences
   category). Forces `LenovoUtils.isPrcVersion()` → `false` /
   `isRowVersion()` → `true` at the call sites inside the affected classes.
   Formerly fired automatically when `--fuck-lgsi` flipped `ZuiAntiCrossSell`
   `true→false`; now applied on demand.
-* **`wifi-unlock.dbp`** — keep TB322 PRC Wi-Fi on a US regulatory domain by
+* **`unlock-wifi.dbp`** — keep TB322 PRC Wi-Fi on a US regulatory domain by
   neutralizing Lenovo's pre-property-load assignment in
   `system.img:/system/bin/init`, replacing one duplicate
   `system.img:/system/build.prop` property with
   `ro.product.countrycode=US`. This avoids patching the compressed Mainline
   Wi-Fi APEX.
-* **`google-services.dbp`** — always show the ZuiSettings "Google services"
+* **`show-google-services.dbp`** — always show the ZuiSettings "Google services"
   menu. Forces
   `GoogleServicesPreferenceController.getAvailabilityStatus()` → `0`
   (`AVAILABLE`) so the entry appears regardless of the `cn.google.services`
@@ -368,7 +368,7 @@ while still advancing the setup wizard.
   > restore the old global `AppHelper.isRow()` force: `CompleteLandActivity.onCreate`
   > gates `setContentView` on `!isRow()`, so the global patch leaves `btn_next`
   > null and crashes.
-* **`google-lens-button.dbp`** — show the Google Lens camera button instead
+* **`show-google-lens.dbp`** — show the Google Lens camera button instead
   of ZUI AI Lens on a PRC ZuiCamera. `CaptureModule`/`WideCaptureModule`
   `getUISpec()` pick the lens button by `ApiHelper.isRow()`; forcing it →
   `true` only at those call sites turns the Google Lens button
@@ -437,7 +437,7 @@ while still advancing the setup wizard.
     `removePreference("app_recommendation")`), and a `method_nop` on
     `InstallInstallingExtra.getRecommendApp()` stops the fetch regardless of the
     setting.
-* **`circle-to-search.dbp`** — enable Google Circle to Search (long-press Home)
+* **`enable-circle-to-search.dbp`** — enable Google Circle to Search (long-press Home)
   on a PRC build by clearing its three region gates. Forces
   `XSystemUtil.isDeviceRow()` → `true` only inside SystemUI's `AssistManager`
   (so `startAssist` takes the `ContextualSearchManager` path), forces
@@ -447,7 +447,7 @@ while still advancing the setup wizard.
   `product.img:/etc/sysconfig/google.xml` (size-preserving, overwriting an
   obsolete TODO comment). Still requires the Google app's
   `ContextualSearchManager` service to actually run the search.
-* **`power-gesture-settings.dbp`** — show the "Press and hold power button"
+* **`show-power-gesture.dbp`** — show the "Press and hold power button"
   gesture setting (ZuiSettings → gestures) on PRC. `invoke_const_bool` forces
   `LenovoUtils.isRowVersion()` → `true` only inside `PowerMenuPreferenceController`
   so its `getAvailabilityStatus()` stops returning UNSUPPORTED (the other gate —
