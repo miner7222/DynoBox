@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 use crate::avb_descriptor::read_hashtree_params;
@@ -367,7 +369,10 @@ where
     S: EventSink,
     O: PipelineOps,
 {
-    assert_safe_to_wipe(&request.output, &[&request.input])?;
+    let protected = collect_secondary_protected_paths(None, request.resign.as_ref());
+    let mut protected_refs: Vec<&Path> = vec![&request.input];
+    protected_refs.extend(protected.iter().map(PathBuf::as_path));
+    assert_safe_to_wipe(&request.output, &protected_refs)?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Unpack,
         input: request.input.clone(),
@@ -442,7 +447,11 @@ where
     S: EventSink,
     O: PipelineOps,
 {
-    assert_safe_to_wipe(&request.output, &[&request.input])?;
+    let protected =
+        collect_secondary_protected_paths(Some(&request.ota_zips), request.resign.as_ref());
+    let mut protected_refs: Vec<&Path> = vec![&request.input];
+    protected_refs.extend(protected.iter().map(PathBuf::as_path));
+    assert_safe_to_wipe(&request.output, &protected_refs)?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Apply,
         input: request.input.clone(),
@@ -513,7 +522,10 @@ where
     S: EventSink,
     O: PipelineOps,
 {
-    assert_safe_to_wipe(&request.output, &[&request.input])?;
+    let protected = collect_secondary_protected_paths(None, Some(&request.config));
+    let mut protected_refs: Vec<&Path> = vec![&request.input];
+    protected_refs.extend(protected.iter().map(PathBuf::as_path));
+    assert_safe_to_wipe(&request.output, &protected_refs)?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Resign,
         input: request.input.clone(),
@@ -1196,6 +1208,16 @@ where
                         p_info.old_size,
                         &recon_src,
                     )?;
+                    // Split reconstruction materializes a logical image of
+                    // `old_size` with implicit zero padding for holes; validate
+                    // against the payload's old_partition_info before applying.
+                    validate_partition_image_digest(
+                        &recon_src,
+                        p_info.old_size,
+                        &p_info.old_hash,
+                        &format!("old partition `{}` (split source)", p_info.name),
+                        PartitionSizePolicy::AllowSourceContainer,
+                    )?;
                     let temp_new = working_dir.join(format!("{}_new.img", p_info.name));
                     apply_payload_with_event_progress(
                         events,
@@ -1205,6 +1227,13 @@ where
                         &recon_src,
                         &temp_new,
                         metadata.block_size,
+                    )?;
+                    validate_partition_image_digest(
+                        &temp_new,
+                        p_info.new_size,
+                        &p_info.new_hash,
+                        &format!("new partition `{}` (split reconstruction)", p_info.name),
+                        PartitionSizePolicy::Exact,
                     )?;
                     split_new_image_to_fragments(&temp_new, &split_fragments, out_dir)?;
                     let _ = std::fs::remove_file(&recon_src);
@@ -1293,6 +1322,22 @@ where
                 anyhow::bail!("Source image for {} ({}) not found.", p_info.name, filename);
             }
 
+            // Validate the base image against old_partition_info when present.
+            // Size/hash metadata may be partially populated: empty hash with
+            // old_size==0 is "absent"; old_size>0 is always enforced (source
+            // images may be shorter than the logical size, or longer containers
+            // with ignored tails such as Qualcomm MELF trailers). A non-empty
+            // hash with zero size is treated as malformed.
+            if src_path.exists() && (p_info.old_size > 0 || !p_info.old_hash.is_empty()) {
+                validate_partition_image_digest(
+                    &src_path,
+                    p_info.old_size,
+                    &p_info.old_hash,
+                    &format!("old partition `{}`", p_info.name),
+                    PartitionSizePolicy::AllowSourceContainer,
+                )?;
+            }
+
             let temp_new = working_dir.join(format!("{}_new.img", p_info.name));
             apply_payload_with_event_progress(
                 events,
@@ -1302,6 +1347,13 @@ where
                 &src_path,
                 &temp_new,
                 metadata.block_size,
+            )?;
+            validate_partition_image_digest(
+                &temp_new,
+                p_info.new_size,
+                &p_info.new_hash,
+                &format!("new partition `{}`", p_info.name),
+                PartitionSizePolicy::Exact,
             )?;
             move_file_across_drives(&temp_new, &out_path)?;
             trim_trailing_zero_padding(&out_path, input.join(&filename).as_path())?;
@@ -1610,9 +1662,24 @@ const ROLLBACK_TARGETS: &[&str] = &["boot.img", "vbmeta_system.img"];
 /// for `partition_name` (e.g. `vbmeta_system.img` for `system`). Returns the
 /// first match. Used to propagate a regenerated verity root digest into the
 /// signed vbmeta the bootloader actually checks.
-fn find_owning_vbmeta(out_dir: &Path, partition_name: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(out_dir).ok()?;
-    for entry in entries.flatten() {
+///
+/// I/O and descriptor-parse errors are propagated. True absence of an owning
+/// vbmeta (directory has no matching `vbmeta*.img`, or none carry the
+/// partition's Hashtree descriptor) is `Ok(None)`.
+fn find_owning_vbmeta(out_dir: &Path, partition_name: &str) -> anyhow::Result<Option<PathBuf>> {
+    let entries = std::fs::read_dir(out_dir).with_context(|| {
+        format!(
+            "failed to enumerate directory `{}` while looking for owning vbmeta of `{partition_name}`",
+            out_dir.display()
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read directory entry under `{}` while looking for owning vbmeta of `{partition_name}`",
+                out_dir.display()
+            )
+        })?;
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -1625,11 +1692,20 @@ fn find_owning_vbmeta(out_dir: &Path, partition_name: &str) -> Option<PathBuf> {
         if !(lower.starts_with("vbmeta") && lower.ends_with(".img")) {
             continue;
         }
-        if let Ok(Some(_)) = read_hashtree_params(&path, partition_name) {
-            return Some(path);
+        match read_hashtree_params(&path, partition_name) {
+            Ok(Some(_)) => return Ok(Some(path)),
+            Ok(None) => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "failed reading hashtree params for `{partition_name}` from {}",
+                        path.display()
+                    )
+                });
+            }
         }
     }
-    None
+    Ok(None)
 }
 
 /// Regenerate the dm-verity hash tree for one modified partition and propagate
@@ -1657,18 +1733,29 @@ where
         .and_then(|n| n.to_str())
         .unwrap_or(partition_name)
         .to_string();
-    let owning_vbmeta = find_owning_vbmeta(out_dir, partition_name);
+    let owning_vbmeta = find_owning_vbmeta(out_dir, partition_name)?;
     // Descriptor source: the partition's own footer, or (footerless layouts)
-    // the owning vbmeta.
+    // the owning vbmeta. Propagate parse/IO errors instead of swallowing them
+    // via `.ok()` so a corrupt vbmeta cannot silently skip verity regen.
     let params_source = match read_hashtree_params(image_path, partition_name)
-        .ok()
-        .flatten()
-    {
+        .with_context(|| {
+            format!(
+                "failed reading hashtree params for `{partition_name}` from {}",
+                image_path.display()
+            )
+        })? {
         Some(params) => Some((params, true)),
-        None => owning_vbmeta
-            .as_ref()
-            .and_then(|vb| read_hashtree_params(vb, partition_name).ok().flatten())
-            .map(|params| (params, false)),
+        None => match &owning_vbmeta {
+            Some(vb) => read_hashtree_params(vb, partition_name)
+                .with_context(|| {
+                    format!(
+                        "failed reading hashtree params for `{partition_name}` from owning vbmeta {}",
+                        vb.display()
+                    )
+                })?
+                .map(|params| (params, false)),
+            None => None,
+        },
     };
     let Some((params, from_footer)) = params_source else {
         return Ok(None);
@@ -3009,13 +3096,21 @@ fn collect_resignable_images(input: &Path) -> anyhow::Result<Vec<PathBuf>> {
     // an empty list. A typo'd `--input` path or permission denied
     // used to produce a green-light "Re-signed 0 images" run; the
     // stage would then proceed to write an empty output directory.
+    // Per-entry errors are also propagated (not flattened) so a
+    // mid-directory failure cannot silently drop images.
     let entries = std::fs::read_dir(input).with_context(|| {
         format!(
             "failed to enumerate resign input directory `{}`",
             input.display()
         )
     })?;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read directory entry under resign input `{}`",
+                input.display()
+            )
+        })?;
         let path = entry.path();
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("img") {
             continue;
@@ -3507,6 +3602,252 @@ fn move_file_across_drives(src: &Path, dst: &Path) -> anyhow::Result<()> {
         }
         Err(e) => Err(e.into()),
     }
+}
+
+/// SHA-256 digest length expected by ChromeOS/Android payload
+/// `PartitionInfo.hash` fields. Malformed digests of any other length
+/// are rejected rather than compared (a truncated hash would otherwise
+/// always mismatch, but the error would not identify the root cause).
+const PAYLOAD_SHA256_LEN: usize = 32;
+
+/// How a partition image's on-disk length relates to the payload
+/// `PartitionInfo.size` (logical size).
+///
+/// Payload digests always cover exactly `expected_size` bytes. The policy
+/// only governs whether a shorter/longer on-disk image is acceptable before
+/// that logical hash is computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PartitionSizePolicy {
+    /// New / reconstructed targets must be exactly `expected_size` bytes.
+    Exact,
+    /// Old / source images may legitimately differ from the logical size:
+    /// - shorter: missing tail is treated as implicit zeros when hashing
+    /// - longer: only the first `expected_size` bytes are hashed; any physical
+    ///   container tail past the logical size is ignored (e.g. Qualcomm MELF
+    ///   trailer). Tail contents are not inspected.
+    AllowSourceContainer,
+}
+
+/// Cap a remaining `u64` byte count to a buffer length without relying on
+/// truncating `as usize` casts. Safe on 32-bit and 64-bit targets because
+/// the result is always `<= buf_len`.
+fn chunk_len(remaining: u64, buf_len: usize) -> usize {
+    let cap = buf_len as u64;
+    let n = remaining.min(cap);
+    // `n <= cap == buf_len as u64`, and `buf_len` fits in `usize` by construction.
+    usize::try_from(n).unwrap_or(buf_len)
+}
+
+/// Stream SHA-256 over exactly `logical_size` bytes of `path`.
+///
+/// When the file is shorter than `logical_size` and
+/// [`PartitionSizePolicy::AllowSourceContainer`] is in effect, the missing
+/// tail is hashed as implicit zeros (reconstructed split sources / sparse
+/// bases). When the file is longer, only the first `logical_size` bytes are
+/// hashed — any physical container tail past the logical size is ignored by
+/// the digest.
+fn stream_sha256_logical(
+    path: &Path,
+    logical_size: u64,
+    size_policy: PartitionSizePolicy,
+) -> anyhow::Result<[u8; PAYLOAD_SHA256_LEN]> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("opening `{}` for SHA-256", path.display()))?;
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("reading size of `{}` for SHA-256", path.display()))?
+        .len();
+
+    if file_len < logical_size && size_policy == PartitionSizePolicy::Exact {
+        anyhow::bail!(
+            "`{}` is {} bytes but logical size is {} (exact size required)",
+            path.display(),
+            file_len,
+            logical_size
+        );
+    }
+
+    let mut hasher = Sha256::new();
+    let mut remaining = logical_size;
+    let mut buf = vec![0u8; 1024 * 1024];
+    let readable = std::cmp::min(file_len, logical_size);
+    let mut read_left = readable;
+    file.seek(SeekFrom::Start(0))
+        .with_context(|| format!("seeking `{}` for SHA-256", path.display()))?;
+    while read_left > 0 {
+        let chunk = chunk_len(read_left, buf.len());
+        file.read_exact(&mut buf[..chunk]).with_context(|| {
+            format!(
+                "reading `{}` for SHA-256 ({} bytes remaining of logical {})",
+                path.display(),
+                read_left,
+                logical_size
+            )
+        })?;
+        hasher.update(&buf[..chunk]);
+        read_left -= chunk as u64;
+        remaining -= chunk as u64;
+    }
+    // Implicit zero padding for the logical tail (AllowSourceContainer only;
+    // Exact already rejected shorter files above).
+    while remaining > 0 {
+        let chunk = chunk_len(remaining, buf.len());
+        buf[..chunk].fill(0);
+        hasher.update(&buf[..chunk]);
+        remaining -= chunk as u64;
+    }
+
+    let digest = hasher.finalize();
+    let mut out = [0u8; PAYLOAD_SHA256_LEN];
+    out.copy_from_slice(&digest);
+    Ok(out)
+}
+
+/// Enforce on-disk size against the payload logical size under `size_policy`.
+///
+/// Called whenever `expected_size > 0`, including size-only metadata (empty
+/// hash). Returns the observed file length for optional follow-on hashing.
+fn enforce_partition_size_policy(
+    path: &Path,
+    expected_size: u64,
+    label: &str,
+    size_policy: PartitionSizePolicy,
+) -> anyhow::Result<u64> {
+    let file_len = std::fs::metadata(path)
+        .with_context(|| format!("{label}: reading size of `{}`", path.display()))?
+        .len();
+    match size_policy {
+        PartitionSizePolicy::Exact => {
+            if file_len != expected_size {
+                anyhow::bail!(
+                    "{label}: image `{}` is {file_len} bytes, expected exact logical size {expected_size}",
+                    path.display()
+                );
+            }
+        }
+        PartitionSizePolicy::AllowSourceContainer => {
+            // Shorter sources are OK (hash path treats missing tail as zeros).
+            // Longer containers are OK regardless of tail contents; only the
+            // logical prefix is hashed when a digest is present.
+        }
+    }
+    Ok(file_len)
+}
+
+/// Validate a partition image against a payload `PartitionInfo` size/hash
+/// pair.
+///
+/// Semantics:
+/// - `expected_size == 0` and empty `expected_hash`: metadata is absent → no-op.
+/// - `expected_size > 0`: always enforce [`PartitionSizePolicy`], even when
+///   the hash is empty (size-only metadata).
+/// - Non-empty `expected_hash` with `expected_size == 0`: malformed metadata
+///   (a digest without a logical size is not meaningful for payload images).
+/// - Non-empty hashes must be exactly 32 bytes (SHA-256). When hashing, the
+///   digest always covers exactly `expected_size` bytes.
+///
+/// `label` is included in every error for diagnostics (e.g.
+/// `old partition \`system\``).
+fn validate_partition_image_digest(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: &[u8],
+    label: &str,
+    size_policy: PartitionSizePolicy,
+) -> anyhow::Result<()> {
+    if expected_hash.is_empty() && expected_size == 0 {
+        // Fully absent PartitionInfo metadata.
+        return Ok(());
+    }
+    if !expected_hash.is_empty() && expected_size == 0 {
+        anyhow::bail!(
+            "{label}: malformed PartitionInfo metadata (non-empty digest with logical size 0)"
+        );
+    }
+    if !expected_hash.is_empty() && expected_hash.len() != PAYLOAD_SHA256_LEN {
+        anyhow::bail!(
+            "{label}: malformed digest length {} (expected {PAYLOAD_SHA256_LEN} for SHA-256)",
+            expected_hash.len()
+        );
+    }
+    if !path.exists() {
+        anyhow::bail!(
+            "{label}: image `{}` is missing (cannot validate size={expected_size})",
+            path.display()
+        );
+    }
+
+    // Size is authoritative whenever declared, with or without a digest.
+    debug_assert!(expected_size > 0);
+    enforce_partition_size_policy(path, expected_size, label, size_policy)?;
+
+    if expected_hash.is_empty() {
+        // Size-only metadata: length policy already enforced.
+        return Ok(());
+    }
+
+    let actual = stream_sha256_logical(path, expected_size, size_policy).with_context(|| {
+        format!(
+            "{label}: streaming SHA-256 of `{}` (logical size {expected_size})",
+            path.display()
+        )
+    })?;
+    if actual.as_slice() != expected_hash {
+        anyhow::bail!(
+            "{label}: SHA-256 mismatch for `{}` (logical size {expected_size}): expected {}, got {}",
+            path.display(),
+            crate::avb_descriptor::hex_encode(expected_hash),
+            crate::avb_descriptor::hex_encode(&actual)
+        );
+    }
+    Ok(())
+}
+
+/// Collect caller-owned secondary inputs that must not be wiped by an
+/// `--output` that equals / contains / is nested under them. Covers OTA
+/// zips, an existing on-disk signing key path, LGSI config, debloat list,
+/// and `--plus` DBP paths. Built-in key specs (`testkey_rsa*`) are not
+/// filesystem paths and are ignored. Does not stage or delete any of
+/// these files — the guard only refuses destructive output overlap.
+fn collect_secondary_protected_paths(
+    ota_zips: Option<&[PathBuf]>,
+    resign: Option<&ResignConfig>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(zips) = ota_zips {
+        for zip in zips {
+            if !zip.as_os_str().is_empty() {
+                out.push(zip.clone());
+            }
+        }
+    }
+    if let Some(config) = resign {
+        // Key may be an embedded testkey name or a PEM path. Only protect
+        // paths that look like real filesystem locations (exist, or contain
+        // a separator / extension that is not a bare testkey token).
+        let key = config.key.as_str();
+        if !key.is_empty() {
+            let key_path = Path::new(key);
+            let looks_like_path = key_path.is_absolute()
+                || key.contains('/')
+                || key.contains('\\')
+                || key_path.extension().is_some()
+                || key_path.exists();
+            if looks_like_path {
+                out.push(key_path.to_path_buf());
+            }
+        }
+        if let Some(FuckLgsiMode::Config(path)) = config.fuck_lgsi.as_ref() {
+            out.push(path.clone());
+        }
+        if let Some(crate::debloat::DebloatMode::ListFile(path)) = config.debloat.as_ref() {
+            out.push(path.clone());
+        }
+        for plus in &config.plus {
+            out.push(plus.clone());
+        }
+    }
+    out
 }
 
 /// Compute the absolute, lexically-normalised form of `path` for
@@ -4194,6 +4535,363 @@ mod tests {
         assert!(
             assert_safe_to_wipe(&target, &[&protected]).is_err(),
             "case-differing path to the same dir must be refused"
+        );
+    }
+
+    #[test]
+    fn secondary_protected_paths_cover_ota_key_lgsi_debloat_and_plus() {
+        let temp = tempdir().unwrap();
+        let ota = temp.path().join("nested").join("ota.zip");
+        let key = temp.path().join("keys").join("custom.pem");
+        let lgsi = temp.path().join("cfg").join("lgsi.json");
+        let debloat = temp.path().join("lists").join("debloat.txt");
+        let plus = temp.path().join("patches").join("fix.dbp");
+        // Nested under a proposed output — the wipe guard must refuse.
+        let output = temp.path().join("nested");
+
+        let resign = ResignConfig {
+            key: key.display().to_string(),
+            algorithm: None,
+            force: false,
+            rollback_index: None,
+            boot_spl: None,
+            vendor_spl: None,
+            system_spl: None,
+            fuck_lgsi: Some(FuckLgsiMode::Config(lgsi.clone())),
+            debloat: Some(crate::debloat::DebloatMode::ListFile(debloat.clone())),
+            plus: vec![plus.clone()],
+        };
+        let secondary =
+            collect_secondary_protected_paths(Some(std::slice::from_ref(&ota)), Some(&resign));
+        assert!(secondary.iter().any(|p| p == &ota));
+        assert!(secondary.iter().any(|p| p == &key));
+        assert!(secondary.iter().any(|p| p == &lgsi));
+        assert!(secondary.iter().any(|p| p == &debloat));
+        assert!(secondary.iter().any(|p| p == &plus));
+
+        let mut refs: Vec<&Path> = vec![];
+        refs.extend(secondary.iter().map(PathBuf::as_path));
+        // Nested OTA under output must be refused.
+        let err = assert_safe_to_wipe(&output, &refs).unwrap_err().to_string();
+        assert!(
+            err.contains("lives inside") || err.contains("protected"),
+            "expected nested OTA refusal, got: {err}"
+        );
+        // Nested config under output likewise.
+        let nested_cfg_out = temp.path().join("cfg");
+        let err = assert_safe_to_wipe(&nested_cfg_out, &refs)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("lives inside") || err.contains("protected"),
+            "expected nested LGSI config refusal, got: {err}"
+        );
+        // Disjoint output is fine.
+        assert!(assert_safe_to_wipe(&temp.path().join("out"), &refs).is_ok());
+    }
+
+    #[test]
+    fn secondary_protected_paths_ignore_embedded_testkey_names() {
+        let resign = sample_resign_config();
+        let secondary = collect_secondary_protected_paths(None, Some(&resign));
+        assert!(
+            secondary.is_empty(),
+            "embedded testkey names must not be treated as filesystem paths: {secondary:?}"
+        );
+    }
+
+    #[test]
+    fn validate_partition_image_digest_accepts_match_and_shorter_source() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("part.img");
+        let data = b"hello-payload-partition";
+        fs::write(&path, data).unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let digest = hasher.finalize().to_vec();
+
+        validate_partition_image_digest(
+            &path,
+            data.len() as u64,
+            &digest,
+            "new partition `test`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap();
+
+        // Shorter on-disk image: hash logical size > file size with trailing zeros.
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hasher.update(&[0u8; 8]);
+        let padded = hasher.finalize().to_vec();
+        validate_partition_image_digest(
+            &path,
+            data.len() as u64 + 8,
+            &padded,
+            "old partition `test`",
+            PartitionSizePolicy::AllowSourceContainer,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_partition_image_digest_size_only_metadata() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("part.img");
+        fs::write(&path, b"abc").unwrap();
+
+        // Fully absent metadata (size 0 + empty hash) is a no-op.
+        validate_partition_image_digest(
+            &path,
+            0,
+            &[],
+            "old partition `x`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap();
+
+        // Size-only: empty hash but declared size must still be enforced.
+        validate_partition_image_digest(
+            &path,
+            3,
+            &[],
+            "new partition `x`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap();
+        let err = validate_partition_image_digest(
+            &path,
+            4,
+            &[],
+            "new partition `x`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("exact logical size"),
+            "expected exact size error for size-only metadata, got: {err}"
+        );
+
+        // Size-only with AllowSourceContainer accepts shorter sources.
+        validate_partition_image_digest(
+            &path,
+            8,
+            &[],
+            "old partition `x`",
+            PartitionSizePolicy::AllowSourceContainer,
+        )
+        .unwrap();
+
+        // Size-only longer container is accepted regardless of tail contents.
+        let mut longer = b"abc".to_vec();
+        longer.extend_from_slice(&[0u8; 4]);
+        longer.push(0x5a);
+        fs::write(&path, &longer).unwrap();
+        validate_partition_image_digest(
+            &path,
+            3,
+            &[],
+            "old partition `x`",
+            PartitionSizePolicy::AllowSourceContainer,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_partition_image_digest_longer_zero_tail_accepted() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("part.img");
+        let mut bytes = b"payload-data".to_vec();
+        let logical = bytes.len() as u64;
+        bytes.extend_from_slice(&[0u8; 16]); // physical zero padding past logical size
+        fs::write(&path, &bytes).unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes[..logical as usize]);
+        let digest = hasher.finalize().to_vec();
+
+        validate_partition_image_digest(
+            &path,
+            logical,
+            &digest,
+            "old partition `test`",
+            PartitionSizePolicy::AllowSourceContainer,
+        )
+        .unwrap();
+
+        // Size-only longer zero tail is also accepted.
+        validate_partition_image_digest(
+            &path,
+            logical,
+            &[],
+            "old partition `test`",
+            PartitionSizePolicy::AllowSourceContainer,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_partition_image_digest_longer_nonzero_tail_ignored() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("part.img");
+        let mut bytes = b"payload-data".to_vec();
+        let logical = bytes.len() as u64;
+        bytes.extend_from_slice(&[0u8; 8]);
+        bytes.push(0x5a); // non-zero container tail (e.g. Qualcomm MELF trailer)
+        fs::write(&path, &bytes).unwrap();
+
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes[..logical as usize]);
+        let digest = hasher.finalize().to_vec();
+
+        // Hash covers only the logical prefix; non-zero tail is ignored.
+        validate_partition_image_digest(
+            &path,
+            logical,
+            &digest,
+            "old partition `test`",
+            PartitionSizePolicy::AllowSourceContainer,
+        )
+        .unwrap();
+
+        // Size-only longer non-zero container tail is also accepted.
+        validate_partition_image_digest(
+            &path,
+            logical,
+            &[],
+            "old partition `test`",
+            PartitionSizePolicy::AllowSourceContainer,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_partition_image_digest_target_size_mismatch() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("part.img");
+        fs::write(&path, b"abcd").unwrap();
+
+        // Exact policy rejects both shorter and longer targets.
+        let err = validate_partition_image_digest(
+            &path,
+            8,
+            &[],
+            "new partition `x`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("exact logical size"),
+            "expected shorter exact mismatch, got: {err}"
+        );
+
+        let mut bytes = b"abcd".to_vec();
+        bytes.extend_from_slice(&[0u8; 4]);
+        fs::write(&path, &bytes).unwrap();
+        let err = validate_partition_image_digest(
+            &path,
+            4,
+            &[],
+            "new partition `x`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("exact logical size"),
+            "expected longer exact mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_partition_image_digest_rejects_mismatch_and_malformed() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("part.img");
+        fs::write(&path, b"abc").unwrap();
+
+        // Non-empty hash with zero logical size is malformed.
+        let err = validate_partition_image_digest(
+            &path,
+            0,
+            &[0u8; 32],
+            "old partition `x`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("malformed PartitionInfo metadata"),
+            "expected hash-without-size rejection, got: {err}"
+        );
+
+        // Malformed digest length.
+        let err = validate_partition_image_digest(
+            &path,
+            3,
+            &[0u8; 16],
+            "old partition `x`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("malformed digest length"),
+            "expected malformed digest error, got: {err}"
+        );
+
+        // Mismatch.
+        let err = validate_partition_image_digest(
+            &path,
+            3,
+            &[0u8; 32],
+            "new partition `x`",
+            PartitionSizePolicy::Exact,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("SHA-256 mismatch"),
+            "expected mismatch error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn find_owning_vbmeta_returns_none_when_absent() {
+        let temp = tempdir().unwrap();
+        // Empty dir → true absence.
+        let result = find_owning_vbmeta(temp.path(), "system").unwrap();
+        assert!(result.is_none());
+
+        // Non-vbmeta files only.
+        fs::write(temp.path().join("system.img"), b"not-vbmeta").unwrap();
+        let result = find_owning_vbmeta(temp.path(), "system").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_owning_vbmeta_propagates_missing_dir_error() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("does-not-exist");
+        let err = find_owning_vbmeta(&missing, "system")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("failed to enumerate") || err.contains("looking for owning vbmeta"),
+            "expected read_dir error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn collect_resignable_images_propagates_missing_dir() {
+        let temp = tempdir().unwrap();
+        let missing = temp.path().join("nope");
+        let err = collect_resignable_images(&missing).unwrap_err().to_string();
+        assert!(
+            err.contains("failed to enumerate resign input"),
+            "expected enumerate error, got: {err}"
         );
     }
 
