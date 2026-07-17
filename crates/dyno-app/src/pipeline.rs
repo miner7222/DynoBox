@@ -279,6 +279,8 @@ trait PipelineOps {
     ) -> anyhow::Result<()>;
 
     fn verify_stage(&self, output_dir: &Path, events: &mut dyn EventSink) -> anyhow::Result<()>;
+
+    fn finalize_report(&self, output_dir: &Path) -> anyhow::Result<()>;
 }
 
 struct RealPipelineOps;
@@ -362,6 +364,23 @@ impl PipelineOps for RealPipelineOps {
     fn verify_stage(&self, output_dir: &Path, events: &mut dyn EventSink) -> anyhow::Result<()> {
         run_verify_stage(output_dir, events)
     }
+
+    fn finalize_report(&self, output_dir: &Path) -> anyhow::Result<()> {
+        crate::report::finalize_verified_report(&output_dir.join("report.html"))?;
+        Ok(())
+    }
+}
+
+fn verify_and_finalize_output<O>(
+    ops: &O,
+    output_dir: &Path,
+    events: &mut dyn EventSink,
+) -> anyhow::Result<()>
+where
+    O: PipelineOps + ?Sized,
+{
+    ops.verify_stage(output_dir, events)?;
+    ops.finalize_report(output_dir)
 }
 
 fn run_unpack_with_ops<S, O>(request: &UnpackRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -385,7 +404,7 @@ where
 
     if request.resign.is_none() && !request.repack {
         ops.unpack_stage(input_dir, &request.output, events)?;
-        return ops.verify_stage(&request.output, events);
+        return verify_and_finalize_output(ops, &request.output, events);
     }
 
     let unpack_stage_dir = temp_root.path().join("unpack_stage");
@@ -437,9 +456,7 @@ where
         propagate_resign_artifacts(dir, &request.output, events);
     }
 
-    ops.verify_stage(&request.output, events)?;
-
-    Ok(())
+    verify_and_finalize_output(ops, &request.output, events)
 }
 
 fn run_apply_with_ops<S, O>(request: &ApplyRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -512,9 +529,7 @@ where
         propagate_resign_artifacts(dir, &request.output, events);
     }
 
-    ops.verify_stage(&request.output, events)?;
-
-    Ok(())
+    verify_and_finalize_output(ops, &request.output, events)
 }
 
 fn run_resign_with_ops<S, O>(request: &ResignRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -540,7 +555,7 @@ where
 
     if !request.repack {
         ops.resign_stage(input_dir, &request.output, &request.config, events)?;
-        return ops.verify_stage(&request.output, events);
+        return verify_and_finalize_output(ops, &request.output, events);
     }
 
     let resign_stage_dir = temp_root.path().join("resign_stage");
@@ -553,8 +568,7 @@ where
         events,
     )?;
     propagate_resign_artifacts(&resign_stage_dir, &request.output, events);
-    ops.verify_stage(&request.output, events)?;
-    Ok(())
+    verify_and_finalize_output(ops, &request.output, events)
 }
 
 /// Copy retained resign artifacts from a temporary resign stage to the final
@@ -648,7 +662,7 @@ where
     let input_dir = effective_input.as_deref().unwrap_or(decrypted_dir);
 
     ops.repack_stage(input_dir, &request.output, events)?;
-    ops.verify_stage(&request.output, events)
+    verify_and_finalize_output(ops, &request.output, events)
 }
 
 /// Check if the input directory has super chunks but no standalone dynamic
@@ -4126,6 +4140,11 @@ mod tests {
             assert!(output_dir.exists());
             Ok(())
         }
+
+        fn finalize_report(&self, _output_dir: &Path) -> anyhow::Result<()> {
+            self.record("finalize_report");
+            Ok(())
+        }
     }
 
     #[test]
@@ -4252,6 +4271,7 @@ mod tests {
                 "apply_preflight",
                 "apply_stage(force_unpack=false)",
                 "verify_stage",
+                "finalize_report",
             ]
         );
         assert!(output.exists());
@@ -4286,6 +4306,7 @@ mod tests {
                 "apply_stage(force_unpack=false)",
                 "resign_stage",
                 "verify_stage",
+                "finalize_report",
             ]
         );
         assert!(output.exists());
@@ -4320,6 +4341,7 @@ mod tests {
                 "apply_stage(force_unpack=false)",
                 "repack_pipeline",
                 "verify_stage",
+                "finalize_report",
             ]
         );
         assert!(output.exists());
@@ -4355,6 +4377,7 @@ mod tests {
                 "resign_stage",
                 "repack_pipeline",
                 "verify_stage",
+                "finalize_report",
             ]
         );
         assert!(output.exists());

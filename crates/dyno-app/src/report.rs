@@ -2,7 +2,9 @@
 //!
 //! `run_resign_stage` collects per-mutation before/after records into a
 //! [`PipelineReport`] and writes it to `<out>/report.html` after the
-//! resign loop finishes. The report is a self-contained, no-JS, no-CDN
+//! resign loop finishes. It remains marked as pending until the final
+//! pipeline verification succeeds. The report is a self-contained, no-JS,
+//! no-CDN
 //! HTML page summarising every state change the stage made: command
 //! line, timestamps, boot/vendor SPL bumps, rollback rewrites, LGSI
 //! feature toggles (applied + skipped), and any signing-key swap that
@@ -175,7 +177,8 @@ impl PipelineReport {
 
         out.push_str("<main>\n<header class='report-header'>\n");
         out.push_str("<div><p class='product'>DynoBox</p><h1>Pipeline report</h1></div>\n");
-        out.push_str("<p class='status'>Completed</p>\n</header>\n");
+        out.push_str(VERIFICATION_STATUS_PENDING);
+        out.push_str("\n</header>\n");
         out.push_str("<section class='run-summary' aria-label='Run summary'>\n");
         push_summary_item(
             &mut out,
@@ -236,6 +239,7 @@ const HTML_HEADER: &str = r#"<!DOCTYPE html>
     h2 { font-size: 1.05rem; line-height: 1.3; }
     h3 { margin: 20px 0 8px; font-size: 0.9rem; color: var(--muted); }
     .status { margin: 2px 0 0; padding: 4px 10px; color: var(--success); background: #e9f7ef; border-radius: 999px; font-size: 0.84rem; font-weight: 700; white-space: nowrap; }
+    .status.pending { color: var(--warning); background: #fff8e8; }
     .run-summary { display: grid; grid-template-columns: minmax(0, 1fr) 180px 190px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
     .summary-item { min-width: 0; padding: 14px 16px; border-left: 1px solid var(--line); }
     .summary-item:first-child { padding-left: 0; border-left: 0; }
@@ -270,6 +274,41 @@ const HTML_FOOTER: &str = r#"</body>
 
 const OUTPUT_DIR_MARKER_START: &str = "<span data-report-output>";
 const OUTPUT_DIR_MARKER_END: &str = "</span>";
+const VERIFICATION_STATUS_PENDING: &str =
+    "<p class='status pending' data-report-verification>Pending verification</p>";
+const VERIFICATION_STATUS_VERIFIED_PREFIX: &str =
+    "<p class='status' data-report-verification data-verified-at='";
+
+/// Mark an existing pipeline report as verified after every output mutation
+/// and the final AVB/XML/super verification have completed. Missing reports
+/// are expected for workflows which did not run a mutating resign stage.
+pub(crate) fn finalize_verified_report(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let html = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read pipeline report from {}", path.display()))?;
+    if html.contains(VERIFICATION_STATUS_VERIFIED_PREFIX) {
+        return Ok(true);
+    }
+    if !html.contains(VERIFICATION_STATUS_PENDING) {
+        anyhow::bail!(
+            "Pipeline report at {} has no recognized verification marker",
+            path.display()
+        );
+    }
+
+    let verified_at = now_iso8601();
+    let verified = format!(
+        "{VERIFICATION_STATUS_VERIFIED_PREFIX}{}'>Verified</p>",
+        esc(&verified_at)
+    );
+    let finalized = html.replacen(VERIFICATION_STATUS_PENDING, &verified, 1);
+    std::fs::write(path, finalized)
+        .with_context(|| format!("Failed to finalize pipeline report at {}", path.display()))?;
+    Ok(true)
+}
 
 /// Replace the staging output shown in a rendered report with the final
 /// pipeline output after repack has completed.
@@ -646,5 +685,30 @@ mod tests {
         let mut r2 = r.clone();
         r2.resigned_images.push("boot.img".to_string());
         assert!(r2.has_content());
+    }
+
+    #[test]
+    fn report_stays_pending_until_final_verification() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("report.html");
+        let report = PipelineReport {
+            finished_at: "2026-05-02T10:01:00Z".to_string(),
+            resigned_images: vec!["boot.img".to_string()],
+            ..Default::default()
+        };
+
+        report.write(&path).unwrap();
+        let pending = std::fs::read_to_string(&path).unwrap();
+        assert!(pending.contains("Pending verification"));
+        assert!(!pending.contains(">Verified</p>"));
+
+        assert!(finalize_verified_report(&path).unwrap());
+        let verified = std::fs::read_to_string(&path).unwrap();
+        assert!(verified.contains(">Verified</p>"));
+        assert!(verified.contains("data-verified-at='"));
+        assert!(!verified.contains("Pending verification"));
+
+        assert!(finalize_verified_report(&path).unwrap());
+        assert_eq!(verified, std::fs::read_to_string(&path).unwrap());
     }
 }
