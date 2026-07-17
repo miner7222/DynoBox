@@ -12,7 +12,7 @@ anyhow.workspace = true
 dynobox-cli.workspace = true
 eframe = { version = "0.34.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.34.2"
-egui_extras = { version = "0.34.2", features = ["datepicker"] }
+egui_extras = { version = "0.35.0", features = ["datepicker"] }
 # `egui_extras::DatePickerButton` switched from chrono to jiff in
 # 0.33+. Use the same crate directly for the SPL field state.
 jiff = { version = "0.2", default-features = false, features = ["std"] }
