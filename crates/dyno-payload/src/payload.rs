@@ -13,6 +13,15 @@ pub mod proto {
 
 pub const PAYLOAD_MAGIC: &[u8; 4] = b"CrAU";
 
+/// Defensive ceiling on the protobuf manifest buffer we will allocate.
+///
+/// Real Android OTA manifests are typically well under tens of MiB; 512 MiB
+/// leaves headroom for unusually large multi-partition deltas while still
+/// preventing a corrupted/hostile `manifest_size` field from driving an
+/// unbounded allocation even when the on-disk file is huge (sparse, or a
+/// truncated header followed by attacker-controlled padding).
+pub const MAX_MANIFEST_BYTES: u64 = 512 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct PayloadPartitionInfo {
     pub name: String,
@@ -123,9 +132,14 @@ pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
 
     // 5. Read Manifest
     // `manifest_size` is an attacker/corruption-controlled u64 from the
-    // header. Validate it against the actual file length before allocating
-    // so a malformed payload cannot trigger a multi-GB allocation or
-    // truncate on a 32-bit `usize`.
+    // header. Validate it against an explicit allocation ceiling *and* the
+    // actual file length before allocating so a malformed payload cannot
+    // trigger a multi-GB allocation or truncate on a 32-bit `usize`.
+    if manifest_size > MAX_MANIFEST_BYTES {
+        return Err(DynoError::Tool(format!(
+            "Payload manifest size {manifest_size} exceeds maximum allowed {MAX_MANIFEST_BYTES} bytes"
+        )));
+    }
     let file_len = file.metadata()?.len();
     let manifest_end = manifest_offset
         .checked_add(manifest_size)
@@ -197,7 +211,12 @@ pub fn inspect_payload(payload_path: &Path) -> Result<PayloadPreflightReport> {
 
     let metadata = parse_payload_metadata(payload_path)?;
     let mut payload_file = File::open(payload_path)?;
-    let mut manifest_buf = vec![0u8; metadata.manifest_size as usize];
+    // `parse_payload_metadata` already enforced the allocation ceiling and
+    // file-range checks; re-check the usize conversion so the second
+    // allocation path cannot silently truncate on 32-bit targets.
+    let manifest_size_usize = usize::try_from(metadata.manifest_size)
+        .map_err(|_| DynoError::Tool("Payload manifest size exceeds addressable memory".into()))?;
+    let mut manifest_buf = vec![0u8; manifest_size_usize];
     payload_file.seek(SeekFrom::Start(metadata.manifest_offset))?;
     payload_file.read_exact(&mut manifest_buf)?;
 
@@ -269,4 +288,85 @@ pub fn inspect_payload(payload_path: &Path) -> Result<PayloadPreflightReport> {
         operation_counts,
         unsupported_operations,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_MANIFEST_BYTES, PAYLOAD_MAGIC, parse_payload_metadata};
+    use std::fs;
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_payload_path(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "dynobox-payload-{}-{}-{}.bin",
+            label,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_v2_header(path: &std::path::Path, manifest_size: u64, body: &[u8]) {
+        let mut file = fs::File::create(path).unwrap();
+        file.write_all(PAYLOAD_MAGIC).unwrap();
+        file.write_all(&2u64.to_be_bytes()).unwrap(); // version
+        file.write_all(&manifest_size.to_be_bytes()).unwrap();
+        file.write_all(&0u32.to_be_bytes()).unwrap(); // metadata_signature_size
+        file.write_all(body).unwrap();
+    }
+
+    #[test]
+    fn rejects_manifest_size_above_allocation_cap() {
+        let path = temp_payload_path("manifest-cap");
+        // Claim a manifest larger than the defensive ceiling while keeping
+        // the on-disk body tiny so the failure must come from the cap, not
+        // the file-length check.
+        let claimed = MAX_MANIFEST_BYTES + 1;
+        write_v2_header(&path, claimed, b"x");
+
+        let err = parse_payload_metadata(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds maximum allowed"),
+            "expected allocation-cap error, got: {err}"
+        );
+        assert!(
+            err.contains(&MAX_MANIFEST_BYTES.to_string()),
+            "error should mention the cap value: {err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_manifest_size_past_file_length() {
+        let path = temp_payload_path("manifest-eof");
+        // Within the allocation cap but larger than the actual file body.
+        write_v2_header(&path, 64, b"short");
+
+        let err = parse_payload_metadata(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds file length"),
+            "expected file-length error, got: {err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn rejects_manifest_offset_size_overflow() {
+        let path = temp_payload_path("manifest-overflow");
+        // version >= 2 uses offset 24; u64::MAX + 24 overflows checked_add.
+        write_v2_header(&path, u64::MAX, &[]);
+
+        let err = parse_payload_metadata(&path).unwrap_err().to_string();
+        // Either the allocation cap (MAX is smaller) or the overflow path
+        // is acceptable; with MAX_MANIFEST_BYTES << u64::MAX the cap fires
+        // first and is still a clear rejection.
+        assert!(
+            err.contains("exceeds maximum allowed") || err.contains("overflow"),
+            "expected cap/overflow error, got: {err}"
+        );
+        let _ = fs::remove_file(path);
+    }
 }

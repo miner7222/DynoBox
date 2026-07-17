@@ -6,6 +6,69 @@ use crate::payload::proto::{Extent, InstallOperation, install_operation::Type};
 use crate::puffin::{PuffPatchKind, apply_puffpatch_bytes, inspect_puff_patch_type};
 use dynobox_core::error::{DynoError, Result};
 
+/// Hard cap on in-memory REPLACE_BZ / REPLACE_XZ decompression.
+///
+/// Destination extents are attacker-declared in the payload manifest. Exact
+/// length enforcement alone still lets a crafted manifest request an
+/// arbitrarily large allocation before any decompressed bytes arrive. 512 MiB
+/// matches the existing LZ4DIFF_BSDIFF fallback ceiling: large enough for
+/// legitimate single-op REPLACE payloads, small enough to reject pathological
+/// allocation attempts. Exact-size equality is still enforced under this cap.
+const MAX_REPLACE_DECOMPRESS_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Read from `reader` until EOF or `limit + 1` bytes, whichever comes first.
+/// Returning `limit + 1` lets the caller distinguish an exact-sized stream
+/// from an oversize one without relying on decompressor-specific length
+/// fields (bzip2 / xz streams do not always declare an uncompressed size).
+fn read_exactly_or_overflow(reader: &mut impl Read, limit: u64) -> Result<Vec<u8>> {
+    let limit_usize = usize::try_from(limit).map_err(|_| {
+        DynoError::Tool(format!(
+            "Decompression size limit {limit} exceeds addressable memory"
+        ))
+    })?;
+    // Cap the detection byte so `limit == usize::MAX` cannot overflow the
+    // allocation size; in that case any extra byte is already unaddressable.
+    let detect_cap = limit_usize.saturating_add(1);
+    let mut buf = Vec::new();
+    reader
+        .take(detect_cap as u64)
+        .read_to_end(&mut buf)
+        .map_err(|e| DynoError::Tool(format!("Decompression failed: {e}")))?;
+    if buf.len() > limit_usize {
+        return Err(DynoError::Tool(format!(
+            "Decompressed data exceeds destination extent size of {limit} bytes"
+        )));
+    }
+    Ok(buf)
+}
+
+/// Decompress a REPLACE_BZ / REPLACE_XZ style blob and require the result
+/// to match `expected_len` exactly. Oversized streams are rejected via the
+/// `limit + 1` probe; undersized streams fail the equality check so a
+/// truncated patch cannot leave destination extents partially zeroed.
+///
+/// `expected_len` is also bounded by [`MAX_REPLACE_DECOMPRESS_BYTES`] so a
+/// manifest cannot force an unbounded in-memory allocation.
+fn decompress_replace_to_exact_size(
+    mut reader: impl Read,
+    expected_len: u64,
+    op_name: &str,
+) -> Result<Vec<u8>> {
+    if expected_len > MAX_REPLACE_DECOMPRESS_BYTES {
+        return Err(DynoError::Tool(format!(
+            "{op_name} destination extents need {expected_len} bytes which exceeds the in-memory decompression cap of {MAX_REPLACE_DECOMPRESS_BYTES} bytes"
+        )));
+    }
+    let decompressed = read_exactly_or_overflow(&mut reader, expected_len)?;
+    if (decompressed.len() as u64) != expected_len {
+        return Err(DynoError::Tool(format!(
+            "{op_name} decompressed to {} bytes but destination extents need {expected_len} bytes",
+            decompressed.len()
+        )));
+    }
+    Ok(decompressed)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationSupportInfo {
     pub operation_name: String,
@@ -43,20 +106,30 @@ impl Patcher {
                 self.write_extents(target_file, &op.dst_extents, payload_data)?;
             }
             Type::ReplaceBz => {
-                let mut decompressor = bzip2::read::BzDecoder::new(payload_data);
-                let mut decompressed = Vec::new();
-                decompressor.read_to_end(&mut decompressed)?;
+                let expected = self.count_extents_size(&op.dst_extents)?;
+                let decompressed = decompress_replace_to_exact_size(
+                    bzip2::read::BzDecoder::new(payload_data),
+                    expected,
+                    "REPLACE_BZ",
+                )?;
                 self.write_extents(target_file, &op.dst_extents, &decompressed)?;
             }
             Type::ReplaceXz => {
-                let mut decompressor = liblzma::read::XzDecoder::new(payload_data);
-                let mut decompressed = Vec::new();
-                decompressor.read_to_end(&mut decompressed)?;
+                let expected = self.count_extents_size(&op.dst_extents)?;
+                let decompressed = decompress_replace_to_exact_size(
+                    liblzma::read::XzDecoder::new(payload_data),
+                    expected,
+                    "REPLACE_XZ",
+                )?;
                 self.write_extents(target_file, &op.dst_extents, &decompressed)?;
             }
             Type::Zero => {
-                let total_size = self.count_extents_size(&op.dst_extents);
-                let zeros = vec![0u8; std::cmp::min(total_size, 1024 * 1024) as usize];
+                let total_size = self.count_extents_size(&op.dst_extents)?;
+                let pattern_len =
+                    usize::try_from(std::cmp::min(total_size, 1024 * 1024)).map_err(|_| {
+                        DynoError::Tool("ZERO pattern length exceeds addressable memory".into())
+                    })?;
+                let zeros = vec![0u8; pattern_len];
                 self.write_extents_repeated(target_file, &op.dst_extents, &zeros, total_size)?;
             }
             Type::SourceCopy => {
@@ -133,10 +206,9 @@ impl Patcher {
         // surfaced to the caller. We now require `remaining >= size`
         // per extent and bail before any I/O so the caller can
         // treat the half-written file as a hard failure.
-        let total_required: u64 = extents
-            .iter()
-            .map(|e| e.num_blocks.unwrap_or(0) * self.block_size)
-            .sum();
+        let file_len = file.metadata()?.len();
+        self.validate_extents_within_file(extents, file_len, "destination")?;
+        let total_required = self.count_extents_size(extents)?;
         if (data.len() as u64) < total_required {
             return Err(DynoError::Tool(format!(
                 "REPLACE data is {} bytes but destination extents need {} bytes",
@@ -146,11 +218,23 @@ impl Patcher {
         }
         let mut data_offset = 0usize;
         for extent in extents {
-            let offset = extent.start_block.unwrap_or(0) * self.block_size;
-            let size = (extent.num_blocks.unwrap_or(0) * self.block_size) as usize;
+            let (offset, size) = self.extent_byte_range(extent)?;
+            let size_usize = usize::try_from(size).map_err(|_| {
+                DynoError::Tool(format!("Extent length {size} exceeds addressable memory"))
+            })?;
+            let end = data_offset.checked_add(size_usize).ok_or_else(|| {
+                DynoError::Tool("REPLACE data offset overflow while slicing blob".into())
+            })?;
+            if end > data.len() {
+                return Err(DynoError::Tool(format!(
+                    "REPLACE data is {} bytes but destination extents need {} bytes",
+                    data.len(),
+                    total_required
+                )));
+            }
             file.seek(SeekFrom::Start(offset))?;
-            file.write_all(&data[data_offset..data_offset + size])?;
-            data_offset += size;
+            file.write_all(&data[data_offset..end])?;
+            data_offset = end;
         }
         Ok(())
     }
@@ -162,15 +246,21 @@ impl Patcher {
         pattern: &[u8],
         mut total_to_write: u64,
     ) -> Result<()> {
+        let file_len = file.metadata()?.len();
+        self.validate_extents_within_file(extents, file_len, "destination")?;
         for extent in extents {
-            let offset = extent.start_block.unwrap_or(0) * self.block_size;
-            let mut extent_remaining = extent.num_blocks.unwrap_or(0) * self.block_size;
+            let (offset, mut extent_remaining) = self.extent_byte_range(extent)?;
 
             file.seek(SeekFrom::Start(offset))?;
             while extent_remaining > 0 && total_to_write > 0 {
                 let chunk = std::cmp::min(extent_remaining, pattern.len() as u64);
                 let chunk = std::cmp::min(chunk, total_to_write);
-                file.write_all(&pattern[..chunk as usize])?;
+                let chunk_usize = usize::try_from(chunk).map_err(|_| {
+                    DynoError::Tool(format!(
+                        "ZERO write chunk {chunk} exceeds addressable memory"
+                    ))
+                })?;
+                file.write_all(&pattern[..chunk_usize])?;
                 extent_remaining -= chunk;
                 total_to_write -= chunk;
             }
@@ -210,12 +300,16 @@ impl Patcher {
         dst_extents: &[Extent],
         buffer: &mut [u8],
     ) -> Result<()> {
+        let src_len = src.metadata()?.len();
+        let dst_len = dst.metadata()?.len();
+        self.validate_extents_within_file(src_extents, src_len, "source")?;
+        self.validate_extents_within_file(dst_extents, dst_len, "destination")?;
+
         let mut src_ext_idx = 0;
         let mut src_ext_offset = 0u64;
 
         for dst_ext in dst_extents {
-            let mut dst_offset = dst_ext.start_block.unwrap_or(0) * self.block_size;
-            let mut dst_remaining = dst_ext.num_blocks.unwrap_or(0) * self.block_size;
+            let (mut dst_offset, mut dst_remaining) = self.extent_byte_range(dst_ext)?;
 
             while dst_remaining > 0 {
                 if src_ext_idx >= src_extents.len() {
@@ -225,7 +319,7 @@ impl Patcher {
                 }
 
                 let src_ext = &src_extents[src_ext_idx];
-                let src_ext_size = src_ext.num_blocks.unwrap_or(0) * self.block_size;
+                let (src_start, src_ext_size) = self.extent_byte_range(src_ext)?;
                 // A zero-block src extent + remaining dst would
                 // spin forever — `to_copy == 0` never advances
                 // `dst_remaining`. Skip the empty extent (which
@@ -236,6 +330,11 @@ impl Patcher {
                     src_ext_offset = 0;
                     continue;
                 }
+                if src_ext_offset > src_ext_size {
+                    return Err(DynoError::Tool(
+                        "SOURCE_COPY source extent offset past extent end".into(),
+                    ));
+                }
                 let src_available = src_ext_size - src_ext_offset;
 
                 let to_copy = std::cmp::min(dst_remaining, src_available);
@@ -245,16 +344,24 @@ impl Patcher {
                         "SOURCE_COPY made no progress; refusing to loop indefinitely".into(),
                     ));
                 }
+                let to_copy_usize = usize::try_from(to_copy).map_err(|_| {
+                    DynoError::Tool(format!(
+                        "SOURCE_COPY chunk {to_copy} exceeds addressable memory"
+                    ))
+                })?;
+                let src_pos = src_start.checked_add(src_ext_offset).ok_or_else(|| {
+                    DynoError::Tool("SOURCE_COPY source seek offset overflow".into())
+                })?;
 
-                src.seek(SeekFrom::Start(
-                    src_ext.start_block.unwrap_or(0) * self.block_size + src_ext_offset,
-                ))?;
-                src.read_exact(&mut buffer[..to_copy as usize])?;
+                src.seek(SeekFrom::Start(src_pos))?;
+                src.read_exact(&mut buffer[..to_copy_usize])?;
 
                 dst.seek(SeekFrom::Start(dst_offset))?;
-                dst.write_all(&buffer[..to_copy as usize])?;
+                dst.write_all(&buffer[..to_copy_usize])?;
 
-                dst_offset += to_copy;
+                dst_offset = dst_offset.checked_add(to_copy).ok_or_else(|| {
+                    DynoError::Tool("SOURCE_COPY destination offset overflow".into())
+                })?;
                 dst_remaining -= to_copy;
                 src_ext_offset += to_copy;
 
@@ -268,16 +375,33 @@ impl Patcher {
     }
 
     fn read_extents_to_vec(&self, file: &mut File, extents: &[Extent]) -> Result<Vec<u8>> {
-        let total_size = self.count_extents_size(extents);
-        let mut data = vec![0u8; total_size as usize];
-        let mut offset = 0;
+        let file_len = file.metadata()?.len();
+        self.validate_extents_within_file(extents, file_len, "source")?;
+        let total_size = self.count_extents_size(extents)?;
+        let total_usize = usize::try_from(total_size).map_err(|_| {
+            DynoError::Tool(format!(
+                "Extent total size {total_size} exceeds addressable memory"
+            ))
+        })?;
+        let mut data = vec![0u8; total_usize];
+        let mut offset = 0usize;
 
         for extent in extents {
-            let start = extent.start_block.unwrap_or(0) * self.block_size;
-            let size = extent.num_blocks.unwrap_or(0) * self.block_size;
+            let (start, size) = self.extent_byte_range(extent)?;
+            let size_usize = usize::try_from(size).map_err(|_| {
+                DynoError::Tool(format!("Extent length {size} exceeds addressable memory"))
+            })?;
+            let end = offset.checked_add(size_usize).ok_or_else(|| {
+                DynoError::Tool("Extent buffer offset overflow while reading".into())
+            })?;
+            if end > data.len() {
+                return Err(DynoError::Tool(
+                    "Extent buffer shorter than declared extent total".into(),
+                ));
+            }
             file.seek(SeekFrom::Start(start))?;
-            file.read_exact(&mut data[offset..offset + size as usize])?;
-            offset += size as usize;
+            file.read_exact(&mut data[offset..end])?;
+            offset = end;
         }
         Ok(data)
     }
@@ -296,8 +420,8 @@ impl Patcher {
         bsdiff_android::patch_bsdf2(&src_data, patch_data, &mut patched_data)
             .map_err(|e| DynoError::Tool(format!("BSDF2 patch failed: {}", e)))?;
 
-        let expected_size = self.count_extents_size(dst_extents);
-        if patched_data.len() != expected_size as usize {
+        let expected_size = self.count_extents_size(dst_extents)?;
+        if (patched_data.len() as u64) != expected_size {
             return Err(DynoError::Tool(format!(
                 "Patched data size mismatch: expected {} bytes, got {} bytes",
                 expected_size,
@@ -320,8 +444,8 @@ impl Patcher {
         let src_data = self.read_extents_to_vec(src, src_extents)?;
         let patched_data = apply_puffpatch_bytes(&src_data, patch_data)?;
 
-        let expected_size = self.count_extents_size(dst_extents);
-        if patched_data.len() != expected_size as usize {
+        let expected_size = self.count_extents_size(dst_extents)?;
+        if (patched_data.len() as u64) != expected_size {
             return Err(DynoError::Tool(format!(
                 "PUFFDIFF patched data size mismatch: expected {} bytes, got {} bytes",
                 expected_size,
@@ -333,11 +457,75 @@ impl Patcher {
         Ok(())
     }
 
-    fn count_extents_size(&self, extents: &[Extent]) -> u64 {
-        extents
-            .iter()
-            .map(|e| e.num_blocks.unwrap_or(0) * self.block_size)
-            .sum()
+    /// Convert an extent's `(start_block, num_blocks)` into a byte
+    /// `(offset, length)` pair using checked arithmetic. Manifest-controlled
+    /// values can overflow `u64` when multiplied by `block_size` or when
+    /// forming the exclusive end (`offset + length`); reject those instead
+    /// of wrapping into a short seek/write.
+    fn extent_byte_range(&self, extent: &Extent) -> Result<(u64, u64)> {
+        let start_block = extent.start_block.unwrap_or(0);
+        let num_blocks = extent.num_blocks.unwrap_or(0);
+        let offset = start_block.checked_mul(self.block_size).ok_or_else(|| {
+            DynoError::Tool(format!(
+                "Extent start overflow: start_block {start_block} * block_size {}",
+                self.block_size
+            ))
+        })?;
+        let length = num_blocks.checked_mul(self.block_size).ok_or_else(|| {
+            DynoError::Tool(format!(
+                "Extent length overflow: num_blocks {num_blocks} * block_size {}",
+                self.block_size
+            ))
+        })?;
+        // Force the exclusive end through checked arithmetic even when the
+        // caller only needs `(offset, length)`. A wrapped end would let
+        // later bound checks accept extents that actually extend past
+        // `u64::MAX`.
+        let _end = offset.checked_add(length).ok_or_else(|| {
+            DynoError::Tool(format!(
+                "Extent end overflow: offset {offset} + length {length}"
+            ))
+        })?;
+        Ok((offset, length))
+    }
+
+    /// Ensure every extent's exclusive end (`offset + length`) stays inside
+    /// `file_len`. Sparse / non-contiguous extents are legal so long as each
+    /// individual range is fully inside the pre-sized file; only past-EOF
+    /// and arithmetic overflow are rejected.
+    fn validate_extents_within_file(
+        &self,
+        extents: &[Extent],
+        file_len: u64,
+        role: &str,
+    ) -> Result<()> {
+        for extent in extents {
+            let (offset, length) = self.extent_byte_range(extent)?;
+            let end = offset.checked_add(length).ok_or_else(|| {
+                DynoError::Tool(format!(
+                    "{role} extent end overflow: offset {offset} + length {length}"
+                ))
+            })?;
+            if end > file_len {
+                return Err(DynoError::Tool(format!(
+                    "{role} extent {offset}..{end} exceeds file length {file_len}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn count_extents_size(&self, extents: &[Extent]) -> Result<u64> {
+        let mut total = 0u64;
+        for extent in extents {
+            let (_, length) = self.extent_byte_range(extent)?;
+            total = total.checked_add(length).ok_or_else(|| {
+                DynoError::Tool(format!(
+                    "Extent total size overflow while summing {length} into {total}"
+                ))
+            })?;
+        }
+        Ok(total)
     }
 }
 
@@ -478,7 +666,9 @@ pub fn apply_partition_payload_with_progress(
 
     let data_offset = metadata.data_offset();
 
-    let mut manifest_buf = vec![0u8; metadata.manifest_size as usize];
+    let manifest_size_usize = usize::try_from(metadata.manifest_size)
+        .map_err(|_| DynoError::Tool("Payload manifest size exceeds addressable memory".into()))?;
+    let mut manifest_buf = vec![0u8; manifest_size_usize];
     payload_file.seek(SeekFrom::Start(metadata.manifest_offset))?;
     payload_file.read_exact(&mut manifest_buf)?;
 
@@ -845,15 +1035,25 @@ fn pad_to_block_multiple(buf: &mut Vec<u8>, block_size: usize) {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::io::Write;
+    use std::io::{Cursor, Write};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use prost::Message;
 
-    use super::{hash_data_blocks, inspect_operation_support, pad_to_block_multiple};
-    use crate::payload::proto::InstallOperation;
+    use super::{
+        MAX_REPLACE_DECOMPRESS_BYTES, Patcher, decompress_replace_to_exact_size, hash_data_blocks,
+        inspect_operation_support, pad_to_block_multiple, read_exactly_or_overflow,
+    };
     use crate::payload::proto::install_operation::Type;
+    use crate::payload::proto::{Extent, InstallOperation};
     use crate::puffin::proto::{PatchHeader, StreamInfo, patch_header::PatchType};
+
+    fn extent(start_block: u64, num_blocks: u64) -> Extent {
+        Extent {
+            start_block: Some(start_block),
+            num_blocks: Some(num_blocks),
+        }
+    }
 
     #[test]
     fn reports_standalone_zucchini_as_unsupported() {
@@ -947,5 +1147,312 @@ mod tests {
         patch.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         patch.extend_from_slice(&encoded);
         patch
+    }
+
+    #[test]
+    fn read_exactly_or_overflow_accepts_exact_limit() {
+        let mut src = Cursor::new(vec![1u8, 2, 3, 4]);
+        let out = read_exactly_or_overflow(&mut src, 4).unwrap();
+        assert_eq!(out, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn read_exactly_or_overflow_rejects_oversize_stream() {
+        let mut src = Cursor::new(vec![0u8; 16]);
+        let err = read_exactly_or_overflow(&mut src, 8)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("exceeds destination extent size"),
+            "expected oversize error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn decompress_replace_rejects_undersized_stream() {
+        let err = decompress_replace_to_exact_size(Cursor::new(vec![1u8, 2, 3]), 8, "REPLACE_XZ")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("destination extents need 8 bytes"),
+            "expected undersize error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn count_extents_size_overflow_is_rejected() {
+        let patcher = Patcher::new(4096);
+        // num_blocks large enough that num_blocks * block_size overflows u64.
+        let extents = [extent(0, u64::MAX / 2)];
+        let err = patcher
+            .count_extents_size(&extents)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("overflow"),
+            "expected extent overflow error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn count_extents_size_sum_overflow_is_rejected() {
+        let patcher = Patcher::new(1);
+        // Two extents whose lengths sum past u64::MAX.
+        let extents = [extent(0, u64::MAX), extent(0, 1)];
+        let err = patcher
+            .count_extents_size(&extents)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("overflow"),
+            "expected extent-sum overflow error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn replace_bz_rejects_oversize_decompression() {
+        // Compress more plaintext than the destination extents declare.
+        let plaintext = vec![0xABu8; 8192];
+        let mut compressed = Vec::new();
+        {
+            let mut encoder =
+                bzip2::write::BzEncoder::new(&mut compressed, bzip2::Compression::default());
+            encoder.write_all(&plaintext).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let patcher = Patcher::new(4096);
+        let op = InstallOperation {
+            r#type: Type::ReplaceBz as i32,
+            // Destination claims only one block (4096 bytes) while the
+            // stream expands to 8192.
+            dst_extents: vec![extent(0, 1)],
+            ..Default::default()
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "dynobox-replace-bz-oversize-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut target = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        target.set_len(4096).unwrap();
+
+        let err = patcher
+            .apply_operation(&op, &compressed, None, &mut target)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("exceeds destination extent size")
+                || err.contains("destination extents need"),
+            "expected oversize REPLACE_BZ error, got: {err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn replace_bz_accepts_exact_size_decompression() {
+        let plaintext = vec![0xCDu8; 4096];
+        let mut compressed = Vec::new();
+        {
+            let mut encoder =
+                bzip2::write::BzEncoder::new(&mut compressed, bzip2::Compression::default());
+            encoder.write_all(&plaintext).unwrap();
+            encoder.finish().unwrap();
+        }
+
+        let patcher = Patcher::new(4096);
+        let op = InstallOperation {
+            r#type: Type::ReplaceBz as i32,
+            dst_extents: vec![extent(0, 1)],
+            ..Default::default()
+        };
+
+        let path = std::env::temp_dir().join(format!(
+            "dynobox-replace-bz-exact-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut target = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        target.set_len(4096).unwrap();
+
+        patcher
+            .apply_operation(&op, &compressed, None, &mut target)
+            .unwrap();
+
+        use std::io::{Read, Seek, SeekFrom};
+        target.seek(SeekFrom::Start(0)).unwrap();
+        let mut got = vec![0u8; 4096];
+        target.read_exact(&mut got).unwrap();
+        assert_eq!(got, plaintext);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn extent_byte_range_end_overflow_is_rejected() {
+        let patcher = Patcher::new(1);
+        // offset + length overflows u64 even though each mul succeeds.
+        let err = patcher
+            .extent_byte_range(&extent(u64::MAX - 1, 2))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("end overflow"),
+            "expected extent end overflow error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn destination_extent_past_file_end_is_rejected() {
+        let patcher = Patcher::new(4096);
+        let path = std::env::temp_dir().join(format!(
+            "dynobox-dst-oob-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut target = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // Pre-sized to one block; destination claims two blocks.
+        target.set_len(4096).unwrap();
+
+        let data = vec![0xEFu8; 8192];
+        let err = patcher
+            .write_extents(&mut target, &[extent(0, 2)], &data)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("exceeds file length"),
+            "expected destination OOB error, got: {err}"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn source_extent_past_file_end_is_rejected() {
+        let patcher = Patcher::new(4096);
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let src_path = std::env::temp_dir().join(format!(
+            "dynobox-src-oob-{}-{}.img",
+            std::process::id(),
+            stamp
+        ));
+        let dst_path = std::env::temp_dir().join(format!(
+            "dynobox-src-oob-dst-{}-{}.img",
+            std::process::id(),
+            stamp
+        ));
+
+        let mut src = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&src_path)
+            .unwrap();
+        // Source is only one block; SOURCE_COPY claims two.
+        src.set_len(4096).unwrap();
+
+        let mut dst = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&dst_path)
+            .unwrap();
+        dst.set_len(8192).unwrap();
+
+        let op = InstallOperation {
+            r#type: Type::SourceCopy as i32,
+            src_extents: vec![extent(0, 2)],
+            dst_extents: vec![extent(0, 2)],
+            ..Default::default()
+        };
+        let err = patcher
+            .apply_operation(&op, &[], Some(&mut src), &mut dst)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("exceeds file length"),
+            "expected source OOB error, got: {err}"
+        );
+        let _ = fs::remove_file(src_path);
+        let _ = fs::remove_file(dst_path);
+    }
+
+    #[test]
+    fn sparse_destination_extents_within_file_are_accepted() {
+        let patcher = Patcher::new(4096);
+        let path = std::env::temp_dir().join(format!(
+            "dynobox-sparse-dst-{}-{}.img",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut target = fs::OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // Three blocks; write non-contiguous first and third.
+        target.set_len(3 * 4096).unwrap();
+
+        let data = vec![0xAAu8; 2 * 4096];
+        patcher
+            .write_extents(&mut target, &[extent(0, 1), extent(2, 1)], &data)
+            .unwrap();
+
+        use std::io::{Read, Seek, SeekFrom};
+        let mut got = vec![0u8; 3 * 4096];
+        target.seek(SeekFrom::Start(0)).unwrap();
+        target.read_exact(&mut got).unwrap();
+        assert_eq!(&got[..4096], &data[..4096]);
+        assert_eq!(&got[4096..8192], &[0u8; 4096]);
+        assert_eq!(&got[8192..], &data[4096..]);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn replace_decompress_cap_rejects_oversized_destination() {
+        let over_cap = MAX_REPLACE_DECOMPRESS_BYTES + 1;
+        let err = decompress_replace_to_exact_size(Cursor::new(vec![]), over_cap, "REPLACE_BZ")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("decompression cap"),
+            "expected decompress-cap error, got: {err}"
+        );
+        // Cap is checked before any allocation / stream read; exact-size
+        // enforcement remains for values under the cap (covered elsewhere).
+        assert!(
+            err.contains(&over_cap.to_string()),
+            "error should report requested size, got: {err}"
+        );
     }
 }

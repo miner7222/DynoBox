@@ -165,7 +165,17 @@ impl XmlCatalog {
                         let mut size_in_kb = None;
                         let mut sector_size_bytes = None;
 
-                        for attr in e.attributes().flatten() {
+                        // Do not flatten attribute errors: a malformed key/value
+                        // (unterminated quote, duplicate key with checks on, etc.)
+                        // must fail the parse with context rather than silently
+                        // dropping the bad attribute and continuing.
+                        for attr_result in e.attributes() {
+                            let attr = attr_result.map_err(|err| {
+                                DynoError::XmlParse(format!(
+                                    "Malformed attribute in <program> of {file_name} at position {}: {err}",
+                                    reader.buffer_position()
+                                ))
+                            })?;
                             let key = attr.key.as_ref();
                             let value = String::from_utf8_lossy(&attr.value).to_string();
 
@@ -288,5 +298,56 @@ impl XmlCatalog {
         }
 
         groups
+    }
+}
+
+#[cfg(test)]
+mod attr_error_tests {
+    use super::XmlCatalog;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn malformed_attribute_is_propagated() {
+        // Unterminated attribute value: quick-xml reports AttrError which
+        // must surface as XmlParse instead of being flattened away.
+        let xml_content = r#"<?xml version="1.0" ?>
+        <data>
+            <program label="broken filename="system.img" />
+        </data>"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(xml_content.as_bytes()).unwrap();
+
+        let err = XmlCatalog::from_paths(&[temp_file.path()]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Malformed attribute")
+                || msg.contains("XML parsing error")
+                || msg.contains("Error parsing XML"),
+            "expected attribute/XML parse error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn duplicate_attribute_is_propagated() {
+        // quick-xml's default attribute iterator checks for duplicate keys.
+        let xml_content = r#"<?xml version="1.0" ?>
+        <data>
+            <program label="system_a" label="system_b" filename="system.img" />
+        </data>"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(xml_content.as_bytes()).unwrap();
+
+        let err = XmlCatalog::from_paths(&[temp_file.path()]).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Malformed attribute")
+                || msg.contains("XML parsing error")
+                || msg.contains("duplicat")
+                || msg.contains("Error parsing XML"),
+            "expected duplicate-attribute error, got: {msg}"
+        );
     }
 }
