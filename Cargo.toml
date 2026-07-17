@@ -82,3 +82,11 @@ type_complexity = "allow"
 unnecessary_cast = "allow"
 absurd_extreme_comparisons = "allow"
 regex_creation_in_loops = "allow"
+
+# Release tuning for the dual-mode CLI/GUI binary. `panic` stays at the
+# default "unwind" on purpose so a failed task can unwind instead of
+# aborting the whole process (no `panic = "abort"`).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

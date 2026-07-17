@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DynoBox.app Info.plist template. `make-app.sh` substitutes __SHORT_VERSION__
+  with the workspace version from Cargo.toml at bundle time.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>DynoBox</string>
+    <key>CFBundleDisplayName</key>
+    <string>DynoBox</string>
+    <key>CFBundleIdentifier</key>
+    <string>io.github.miner7222.DynoBox</string>
+    <key>CFBundleExecutable</key>
+    <string>dynobox</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>__SHORT_VERSION__</string>
+    <key>CFBundleVersion</key>
+    <string>__SHORT_VERSION__</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
+    <key>NSHumanReadableCopyright</key>
+    <string>Licensed under Apache-2.0</string>
+</dict>
+</plist>

@@ -1,0 +1,60 @@
+# cargo-deny configuration. Run locally with `cargo deny check`; CI gates on it.
+# DynoBox itself is Apache-2.0.
+# License allow-list is tightened to identifiers actually present in the current
+# dependency graph (see `cargo deny list`). Dual-licensed crates only need one
+# allowed option; unused allowances are dropped to keep the gate honest.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # `rsa` Marvin timing side-channel (no fixed release yet). DynoBox does AVB /
+    # key work locally on the user's own machine; the attack needs an attacker
+    # observing many timed signing operations, which this offline desktop flow
+    # does not expose. Revisit when a fixed `rsa` ships.
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack: no upstream fix; DynoBox signs offline on the operator machine" },
+    # `quick-xml` <0.41 DoS/quadratic-parse advisories. Direct `dynobox-xml`
+    # dependency is on the fixed 0.41 line. The residual vulnerable line is
+    # ONLY quick-xml 0.39.x via `wayland-scanner` (Linux Wayland-protocol
+    # codegen at BUILD time) through winit/eframe. That codegen only reads
+    # fixed, trusted protocol XML and never sees untrusted input. Ignore
+    # narrowly for the build-time path; not a blanket vulnerability waiver.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic duplicate-attr check — residual build-time wayland-scanner only" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace alloc DoS — residual build-time wayland-scanner only" },
+]
+
+[bans]
+# The GUI/platform dependency graph intentionally carries many duplicate
+# transitive versions; keep this gate focused on advisories/licenses/sources.
+multiple-versions = "allow"
+# Workspace path deps and the git deps legitimately carry no version constraint.
+wildcards = "allow"
+
+[licenses]
+version = 2
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unlicense",
+    "bzip2-1.0.6",
+    # Bundled default fonts via egui/epaint (`epaint_default_fonts`).
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/miner7222/avbtool-rs",
+]

@@ -82,8 +82,27 @@ crates/
 ```powershell
 cargo fmt
 cargo build -p dynobox-gui   # dual-mode binary; release artifact gets renamed to `dynobox[.exe]`
-cargo test --workspace
+cargo test --workspace --locked
+cargo deny check             # advisory / license / source policy (deny.toml)
 ```
+
+### Install from a release
+
+GitHub Releases (tag `v*`) publish self-contained archives after fmt, clippy
+(`-D warnings`), workspace tests, and `cargo deny` all pass. Each archive
+includes `README.md`, `LICENSE`, and a matching `.sha256` checksum file:
+
+| Platform | Artifact |
+| --- | --- |
+| Windows x86_64 / arm64 | `DynoBox-windows_<arch>-vX.Y.Z.zip` → `dynobox.exe` (+ `README.md`, `LICENSE`) |
+| Linux x86_64 / arm64 | `DynoBox-linux_<arch>-vX.Y.Z.tar.gz` → `dynobox` (mode preserved; + `README.md`, `LICENSE`) |
+| macOS universal | `DynoBox-macos_universal-vX.Y.Z.zip` → `DynoBox.app` (`Contents/MacOS/dynobox`; `README.md` + `LICENSE` in `Contents/Resources/`) |
+
+On macOS, open the app once via right-click → Open (or clear quarantine with
+`xattr -dr com.apple.quarantine DynoBox.app`) if Gatekeeper blocks an ad-hoc
+signed download. Extract yields a single `DynoBox.app`; docs live inside the
+bundle under `Contents/Resources/` so drag-to-Applications stays clean. Local
+packaging helper: `misc/macos/make-app.sh`.
 
 ## Current Limits
 
