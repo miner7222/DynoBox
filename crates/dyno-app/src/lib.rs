@@ -8,6 +8,7 @@ pub mod ext4_helpers;
 pub mod ext4_reader;
 pub mod fuck_lgsi;
 pub mod integrity;
+pub mod integrity_signature;
 pub mod pipeline;
 pub mod report;
 mod spl;
@@ -24,12 +25,19 @@ pub use integrity::{
     build_output_manifest, dynobox_generator_version, read_output_manifest, serialize_manifest,
     verify_output_manifest, write_output_manifest, write_output_manifest_for_dir,
 };
+pub use integrity_signature::{
+    ManifestSignatureEnvelope, ManifestSignatureVerification, SIGNATURE_ALGORITHM,
+    SIGNATURE_SCHEMA, SIGNATURE_VERSION, SignatureTrustStatus, generate_integrity_keypair,
+    integrity_signing_key_id, serialize_signature_envelope, sign_output_manifest,
+    verify_output_manifest_signature,
+};
 pub use pipeline::{
     ApplyRequest, RepackRequest, ResignConfig, ResignRequest, UnpackRequest,
     default_output_name_for_apply, default_output_name_for_resign, default_output_name_for_unpack,
     run_apply, run_repack, run_resign, run_unpack,
 };
 pub use verify::{
-    SuperLayoutSummary, VerificationFailure, VerificationFailureKind, VerificationReport,
-    ensure_verification_clean, render_verification_report, run_verify_stage, verify_input,
+    SuperLayoutSummary, VerificationFailure, VerificationFailureKind, VerificationOptions,
+    VerificationReport, ensure_verification_clean, render_verification_report, run_verify_stage,
+    verify_input, verify_input_with_options,
 };

@@ -59,6 +59,7 @@ struct DynoGui {
 
     input: Option<PathBuf>,
     output: Option<PathBuf>,
+    integrity_key: Option<PathBuf>,
     ota_zips: Vec<PathBuf>,
 
     // pipeline-stage toggles (apply / unpack only)
@@ -98,6 +99,7 @@ impl Default for DynoGui {
             mode: Mode::Apply,
             input: None,
             output: None,
+            integrity_key: None,
             ota_zips: Vec::new(),
             // `resign` toggle is opt-in for Apply / Unpack / Repack;
             // Resign mode itself ignores this flag and always runs
@@ -197,6 +199,10 @@ impl DynoGui {
         }
         if let Some(p) = &self.output {
             a.push("--output".into());
+            a.push(p.display().to_string());
+        }
+        if let Some(p) = &self.integrity_key {
+            a.push("--integrity-key".into());
             a.push(p.display().to_string());
         }
     }
@@ -340,6 +346,7 @@ impl eframe::App for DynoGui {
 
                     self.io_picker(ui, "Input", true);
                     self.io_picker(ui, "Output", false);
+                    self.integrity_key_picker(ui);
 
                     ui.separator();
 
@@ -395,6 +402,35 @@ impl DynoGui {
                 .unwrap_or_else(|| "—".to_string());
             drag_scroll_path(ui, &text, if is_input { "io-input" } else { "io-output" });
         });
+    }
+
+    fn integrity_key_picker(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Manifest signing key:");
+            if ui.button("📁").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PEM private key", &["pem"])
+                    .pick_file()
+            {
+                self.integrity_key = Some(path);
+            }
+            if self.integrity_key.is_some() && ui.small_button("✖").clicked() {
+                self.integrity_key = None;
+            }
+        });
+        if let Some(path) = &self.integrity_key {
+            drag_scroll_path(
+                ui,
+                &path.display().to_string(),
+                "integrity-signing-key-path",
+            );
+        } else {
+            ui.label(
+                egui::RichText::new("Optional — unsigned SHA-256 manifest is always generated")
+                    .weak()
+                    .small(),
+            );
+        }
     }
 
     fn apply_section(&mut self, ui: &mut egui::Ui) {
@@ -977,5 +1013,34 @@ fn hide_owned_console() {
                 ShowWindow(hwnd, SW_HIDE);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repack_args_include_optional_manifest_signing_key() {
+        let gui = DynoGui {
+            mode: Mode::Repack,
+            input: Some(PathBuf::from("input")),
+            output: Some(PathBuf::from("output")),
+            integrity_key: Some(PathBuf::from("integrity.pem")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            gui.build_args(),
+            vec![
+                "repack",
+                "--input",
+                "input",
+                "--output",
+                "output",
+                "--integrity-key",
+                "integrity.pem",
+            ]
+        );
     }
 }

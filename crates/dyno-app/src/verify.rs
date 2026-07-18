@@ -7,6 +7,9 @@ use serde::Serialize;
 use crate::integrity::{
     MANIFEST_FILE_NAME, ManifestIssue, ManifestVerificationReport, verify_output_manifest,
 };
+use crate::integrity_signature::{
+    ManifestSignatureVerification, SignatureTrustStatus, verify_output_manifest_signature,
+};
 
 use crate::events::{EventSink, MessageLevel, ProgressEvent, StageKind};
 
@@ -14,6 +17,7 @@ use crate::events::{EventSink, MessageLevel, ProgressEvent, StageKind};
 pub enum VerificationFailureKind {
     Input,
     Integrity,
+    Signature,
     Avb,
     Xml,
     Super,
@@ -37,6 +41,7 @@ pub struct SuperLayoutSummary {
 pub struct VerificationReport {
     pub input: PathBuf,
     pub artifact_integrity: Option<ManifestVerificationReport>,
+    pub manifest_signature: Option<ManifestSignatureVerification>,
     pub image_file_count: usize,
     pub avb_image_count: usize,
     pub rawprogram_xml_count: usize,
@@ -51,9 +56,22 @@ impl VerificationReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct VerificationOptions {
+    pub trusted_integrity_keys: Vec<PathBuf>,
+}
+
 pub fn verify_input(input: &Path) -> anyhow::Result<VerificationReport> {
+    verify_input_with_options(input, &VerificationOptions::default())
+}
+
+pub fn verify_input_with_options(
+    input: &Path,
+    options: &VerificationOptions,
+) -> anyhow::Result<VerificationReport> {
     let mut report = verify_input_semantic(input)?;
     attach_output_manifest_verification(input, &mut report);
+    attach_manifest_signature_verification(input, options, &mut report);
     Ok(report)
 }
 
@@ -61,6 +79,7 @@ fn verify_input_semantic(input: &Path) -> anyhow::Result<VerificationReport> {
     let mut report = VerificationReport {
         input: input.to_path_buf(),
         artifact_integrity: None,
+        manifest_signature: None,
         image_file_count: count_image_files(input)?,
         avb_image_count: 0,
         rawprogram_xml_count: count_rawprogram_xml_files(input)?,
@@ -286,6 +305,52 @@ fn manifest_issue_details(input: &Path, issue: &ManifestIssue) -> (PathBuf, Stri
     }
 }
 
+fn attach_manifest_signature_verification(
+    input: &Path,
+    options: &VerificationOptions,
+    report: &mut VerificationReport,
+) {
+    if !input.is_dir() {
+        return;
+    }
+
+    let verification =
+        match verify_output_manifest_signature(input, &options.trusted_integrity_keys) {
+            Ok(verification) => verification,
+            Err(error) => ManifestSignatureVerification {
+                signature_path: input.join(crate::integrity::MANIFEST_SIGNATURE_FILE_NAME),
+                status: SignatureTrustStatus::Invalid,
+                key_id: None,
+                issue: Some(error.to_string()),
+            },
+        };
+
+    let trust_required = !options.trusted_integrity_keys.is_empty();
+    let failure_message = match verification.status {
+        SignatureTrustStatus::Invalid => verification.issue.clone(),
+        SignatureTrustStatus::Unsigned if trust_required => {
+            Some("trusted integrity key supplied, but the manifest is unsigned".to_string())
+        }
+        SignatureTrustStatus::ValidUntrusted if trust_required => Some(format!(
+            "manifest signature is valid but does not match a trusted key{}",
+            verification
+                .key_id
+                .as_deref()
+                .map(|key_id| format!(": {key_id}"))
+                .unwrap_or_default()
+        )),
+        _ => None,
+    };
+    if let Some(message) = failure_message {
+        report.failures.push(VerificationFailure {
+            kind: VerificationFailureKind::Signature,
+            path: Some(verification.signature_path.clone()),
+            message,
+        });
+    }
+    report.manifest_signature = Some(verification);
+}
+
 pub fn render_verification_report(report: &VerificationReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Verification target:    {}", report.input.display());
@@ -306,6 +371,31 @@ pub fn render_verification_report(report: &VerificationReport) -> String {
             );
         }
         None => out.push_str("Artifact integrity:     NOT CHECKED (no manifest)\n"),
+    }
+    match &report.manifest_signature {
+        Some(signature) => match signature.status {
+            SignatureTrustStatus::Unsigned => {
+                out.push_str("Manifest signature:    UNSIGNED\n");
+            }
+            SignatureTrustStatus::ValidUntrusted => {
+                let _ = writeln!(
+                    out,
+                    "Manifest signature:    VALID, signer not trusted ({})",
+                    signature.key_id.as_deref().unwrap_or("unknown key")
+                );
+            }
+            SignatureTrustStatus::ValidTrusted => {
+                let _ = writeln!(
+                    out,
+                    "Manifest signature:    VALID, trusted signer ({})",
+                    signature.key_id.as_deref().unwrap_or("unknown key")
+                );
+            }
+            SignatureTrustStatus::Invalid => {
+                out.push_str("Manifest signature:    INVALID\n");
+            }
+        },
+        None => out.push_str("Manifest signature:    NOT CHECKED\n"),
     }
     let _ = writeln!(out, "Image files scanned:    {}", report.image_file_count);
     let _ = writeln!(out, "AVB images detected:    {}", report.avb_image_count);
@@ -788,10 +878,13 @@ mod tests {
     use tempfile::{NamedTempFile, tempdir};
 
     use crate::integrity::write_output_manifest_for_dir;
+    use crate::integrity_signature::{
+        SignatureTrustStatus, generate_integrity_keypair, sign_output_manifest,
+    };
 
     use super::{
-        VerificationFailureKind, expected_chain_partitions_from_info, render_verification_report,
-        verify_input,
+        VerificationFailureKind, VerificationOptions, expected_chain_partitions_from_info,
+        render_verification_report, verify_input, verify_input_with_options,
     };
 
     #[test]
@@ -836,6 +929,56 @@ mod tests {
                 .any(|failure| failure.kind == VerificationFailureKind::Integrity)
         );
         assert!(render_verification_report(&tampered).contains("Artifact integrity:     FAILED"));
+    }
+
+    #[test]
+    fn verify_manifest_signature_distinguishes_validity_and_trust() {
+        let output = tempdir().unwrap();
+        fs::write(output.path().join("dummy.img"), b"not-avb").unwrap();
+        write_output_manifest_for_dir(output.path(), "2026-07-18T00:00:00Z", true).unwrap();
+        let keys = tempdir().unwrap();
+        let private_key = keys.path().join("integrity.pem");
+        let public_key = keys.path().join("integrity.pub.pem");
+        generate_integrity_keypair(&private_key, &public_key).unwrap();
+        sign_output_manifest(output.path(), &private_key).unwrap();
+
+        let untrusted = verify_input(output.path()).unwrap();
+        assert!(untrusted.is_clean(), "{:?}", untrusted.failures);
+        assert_eq!(
+            untrusted.manifest_signature.as_ref().unwrap().status,
+            SignatureTrustStatus::ValidUntrusted
+        );
+
+        let trusted = verify_input_with_options(
+            output.path(),
+            &VerificationOptions {
+                trusted_integrity_keys: vec![public_key],
+            },
+        )
+        .unwrap();
+        assert!(trusted.is_clean(), "{:?}", trusted.failures);
+        assert_eq!(
+            trusted.manifest_signature.as_ref().unwrap().status,
+            SignatureTrustStatus::ValidTrusted
+        );
+
+        let wrong_private = keys.path().join("wrong.pem");
+        let wrong_public = keys.path().join("wrong.pub.pem");
+        generate_integrity_keypair(&wrong_private, &wrong_public).unwrap();
+        let wrong_trust = verify_input_with_options(
+            output.path(),
+            &VerificationOptions {
+                trusted_integrity_keys: vec![wrong_public],
+            },
+        )
+        .unwrap();
+        assert!(!wrong_trust.is_clean());
+        assert!(
+            wrong_trust
+                .failures
+                .iter()
+                .any(|failure| failure.kind == VerificationFailureKind::Signature)
+        );
     }
 
     #[test]

@@ -16,6 +16,9 @@ dynobox-super.workspace = true
 dynobox-xml.workspace = true
 memchr.workspace = true
 sha2.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
+pkcs8.workspace = true
 tempfile.workspace = true
 serde.workspace = true
 serde_json = { workspace = true, features = ["preserve_order"] }

@@ -160,6 +160,31 @@ pub fn verify_output_manifest(output_dir: &Path) -> Result<ManifestVerificationR
     let manifest_path = output_dir.join(MANIFEST_FILE_NAME);
     let mut issues = Vec::new();
 
+    match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.file_type().is_file() => {
+            issues.push(ManifestIssue::Malformed {
+                message: format!(
+                    "manifest must be a regular file, not a symlink or special file: {}",
+                    manifest_path.display()
+                ),
+            });
+            return Ok(ManifestVerificationReport {
+                manifest_path,
+                issues,
+            });
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Failed to inspect output manifest at {}",
+                    manifest_path.display()
+                )
+            });
+        }
+    }
+
     let manifest = match fs::read(&manifest_path) {
         Ok(bytes) => match parse_manifest_bytes(&bytes) {
             Ok(manifest) => manifest,

@@ -4,14 +4,15 @@ use dynobox_app::events::ProgressUnit;
 use dynobox_app::fuck_lgsi::FuckLgsiMode;
 use dynobox_app::{
     ApplyRequest, CommandKind, MessageLevel, ProgressEvent, RepackRequest, ResignConfig,
-    ResignRequest, StageKind, UnpackRequest, default_output_name_for_apply,
-    default_output_name_for_resign, default_output_name_for_unpack, render_verification_report,
-    run_apply, run_repack, run_resign, run_unpack, verify_input,
+    ResignRequest, StageKind, UnpackRequest, VerificationOptions, default_output_name_for_apply,
+    default_output_name_for_resign, default_output_name_for_unpack, generate_integrity_keypair,
+    render_verification_report, run_apply, run_repack, run_resign, run_unpack,
+    verify_input_with_options,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{Level, info, warn};
 use tracing_subscriber::FmtSubscriber;
@@ -54,6 +55,10 @@ enum Commands {
         /// Output directory for extracted or final pipeline output
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Optional Ed25519 PKCS#8 private key used to sign the final SHA-256 manifest
+        #[arg(long, value_name = "PRIVATE_KEY_PEM")]
+        integrity_key: Option<PathBuf>,
 
         /// Re-sign AVB images after unpack
         #[arg(long)]
@@ -130,6 +135,10 @@ enum Commands {
         /// Output directory for patched images (defaults to output_apply)
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Optional Ed25519 PKCS#8 private key used to sign the final SHA-256 manifest
+        #[arg(long, value_name = "PRIVATE_KEY_PEM")]
+        integrity_key: Option<PathBuf>,
 
         /// Force pre-unpack of dynamic partitions from super before applying OTA
         #[arg(long)]
@@ -233,6 +242,10 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
+        /// Optional Ed25519 PKCS#8 private key used to sign the final SHA-256 manifest
+        #[arg(long, value_name = "PRIVATE_KEY_PEM")]
+        integrity_key: Option<PathBuf>,
+
         /// Path to the RSA key file or name of embedded key (testkey_rsa2048, testkey_rsa4096)
         #[arg(short, long)]
         key: String,
@@ -319,6 +332,10 @@ enum Commands {
         /// Output directory for repacked super chunks (defaults to output_repack)
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Optional Ed25519 PKCS#8 private key used to sign the final SHA-256 manifest
+        #[arg(long, value_name = "PRIVATE_KEY_PEM")]
+        integrity_key: Option<PathBuf>,
     },
     /// Scan AVB info from one image or all images under a directory
     Info {
@@ -347,6 +364,21 @@ enum Commands {
         /// Optional output report path
         #[arg(short, long)]
         output: Option<PathBuf>,
+
+        /// Externally pinned Ed25519 SPKI public key trusted for the manifest signature.
+        /// Repeat to trust multiple signers.
+        #[arg(long, value_name = "PUBLIC_KEY_PEM")]
+        trusted_integrity_key: Vec<PathBuf>,
+    },
+    /// Generate a dedicated Ed25519 manifest-signing keypair
+    IntegrityKeygen {
+        /// Destination for the PKCS#8 private key PEM (must not already exist)
+        #[arg(long, value_name = "PRIVATE_KEY_PEM")]
+        private_key: PathBuf,
+
+        /// Destination for the SPKI public key PEM (defaults beside the private key)
+        #[arg(long, value_name = "PUBLIC_KEY_PEM")]
+        public_key: Option<PathBuf>,
     },
 }
 
@@ -454,6 +486,10 @@ fn resolve_info_output_path(output: Option<PathBuf>, format: ReportFormat) -> Op
 
 fn resolve_verify_output_path(output: Option<PathBuf>, format: ReportFormat) -> Option<PathBuf> {
     resolve_report_output_path(output, format, "verify_report.txt", "verify_report.json")
+}
+
+fn default_public_key_path(private_key: &Path) -> PathBuf {
+    private_key.with_extension("pub.pem")
 }
 
 fn resolve_report_output_path(
@@ -779,6 +815,7 @@ where
         Commands::Unpack {
             input,
             output,
+            integrity_key,
             resign,
             repack,
             key,
@@ -801,6 +838,7 @@ where
             let request = UnpackRequest {
                 input,
                 output: out_dir,
+                integrity_key,
                 resign: make_resign_config(
                     key,
                     algorithm,
@@ -824,6 +862,7 @@ where
         Commands::Apply {
             input,
             output,
+            integrity_key,
             mut unpack,
             mut resign,
             mut repack,
@@ -871,6 +910,7 @@ where
             let request = ApplyRequest {
                 input,
                 output: out_dir,
+                integrity_key,
                 ota_zips: real_zips,
                 force_unpack: unpack,
                 resign: make_resign_config(
@@ -896,6 +936,7 @@ where
         Commands::Resign {
             input,
             output,
+            integrity_key,
             key,
             algorithm,
             force,
@@ -913,6 +954,7 @@ where
             let request = ResignRequest {
                 input,
                 output: out_dir,
+                integrity_key,
                 config: ResignConfig {
                     key,
                     algorithm,
@@ -932,11 +974,16 @@ where
                 ProgressFormat::Jsonl => run_resign(&request, &mut jsonl_sink),
             }
         }
-        Commands::Repack { input, output } => {
+        Commands::Repack {
+            input,
+            output,
+            integrity_key,
+        } => {
             let out_dir = resolve_output_dir(output, "output_repack");
             let request = RepackRequest {
                 input,
                 output: out_dir,
+                integrity_key,
             };
             match cli.progress_format {
                 ProgressFormat::Text => run_repack(&request, &mut text_sink),
@@ -979,12 +1026,18 @@ where
             input,
             format,
             output,
+            trusted_integrity_key,
         } => {
             if cli.progress_format == ProgressFormat::Text {
                 info!("verify: {}", input.display());
             }
 
-            let report = verify_input(&input)?;
+            let report = verify_input_with_options(
+                &input,
+                &VerificationOptions {
+                    trusted_integrity_keys: trusted_integrity_key,
+                },
+            )?;
             let rendered = match format {
                 ReportFormat::Text => render_verification_report(&report),
                 ReportFormat::Json => serde_json::to_string_pretty(&report)?,
@@ -1006,13 +1059,76 @@ where
 
             dynobox_app::ensure_verification_clean(&report)
         }
+        Commands::IntegrityKeygen {
+            private_key,
+            public_key,
+        } => {
+            let public_key = public_key.unwrap_or_else(|| default_public_key_path(&private_key));
+            let key_id = generate_integrity_keypair(&private_key, &public_key)?;
+            println!("Generated Ed25519 integrity key: {key_id}");
+            println!("Private key: {}", private_key.display());
+            println!("Public key:  {}", public_key.display());
+            Ok(())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ApplyResignOptions, parse_apply_positional_args, validate_apply_resign_options};
+    use clap::Parser as _;
+
+    use super::{
+        ApplyResignOptions, Cli, Commands, default_public_key_path, parse_apply_positional_args,
+        validate_apply_resign_options,
+    };
     use std::path::PathBuf;
+
+    #[test]
+    fn cli_parses_manifest_signing_and_trusted_key_options() {
+        let repack = Cli::try_parse_from([
+            "dynobox",
+            "repack",
+            "--input",
+            "input",
+            "--integrity-key",
+            "signing.pem",
+        ])
+        .unwrap();
+        assert!(matches!(
+            repack.command,
+            Commands::Repack {
+                integrity_key: Some(path),
+                ..
+            } if path.as_path() == std::path::Path::new("signing.pem")
+        ));
+
+        let verify = Cli::try_parse_from([
+            "dynobox",
+            "verify",
+            "--input",
+            "output",
+            "--trusted-integrity-key",
+            "one.pub.pem",
+            "--trusted-integrity-key",
+            "two.pub.pem",
+        ])
+        .unwrap();
+        assert!(matches!(
+            verify.command,
+            Commands::Verify {
+                trusted_integrity_key,
+                ..
+            } if trusted_integrity_key.len() == 2
+        ));
+    }
+
+    #[test]
+    fn default_public_key_path_uses_pub_pem_extension() {
+        assert_eq!(
+            default_public_key_path(PathBuf::from("keys/integrity.pem").as_path()),
+            PathBuf::from("keys/integrity.pub.pem")
+        );
+    }
 
     #[test]
     fn parse_apply_positional_args_accepts_bare_pipeline_keywords() {

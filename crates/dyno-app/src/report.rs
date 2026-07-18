@@ -280,7 +280,7 @@ const VERIFICATION_STATUS_VERIFIED_PREFIX: &str =
     "<p class='status' data-report-verification data-verified-at='";
 const OUTPUT_INTEGRITY_SECTION: &str = r#"<section id='output-integrity' data-integrity-schema='dynobox.output_manifest' data-hash-algorithm='sha-256'>
 <div class='section-heading'><h2>Output integrity</h2></div>
-<p class='section-note'>A successful pipeline seals every final output file, including this report, in <code>dynobox-manifest.json</code>. Run <code>dynobox verify --input &lt;output&gt;</code> to detect modified, missing, or unexpected artifacts.</p>
+<p class='section-note'>A successful pipeline seals every final output file, including this report, in <code>dynobox-manifest.json</code>. When a dedicated integrity key is configured, <code>dynobox-manifest.sig</code> authenticates those exact manifest bytes. Run <code>dynobox verify --input &lt;output&gt;</code> to detect modified, missing, or unexpected artifacts.</p>
 </section>
 "#;
 

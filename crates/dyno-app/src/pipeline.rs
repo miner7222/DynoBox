@@ -102,6 +102,7 @@ pub struct ResignConfig {
 pub struct UnpackRequest {
     pub input: PathBuf,
     pub output: PathBuf,
+    pub integrity_key: Option<PathBuf>,
     pub resign: Option<ResignConfig>,
     pub repack: bool,
     pub complete: bool,
@@ -111,6 +112,7 @@ pub struct UnpackRequest {
 pub struct ApplyRequest {
     pub input: PathBuf,
     pub output: PathBuf,
+    pub integrity_key: Option<PathBuf>,
     pub ota_zips: Vec<PathBuf>,
     pub force_unpack: bool,
     pub resign: Option<ResignConfig>,
@@ -122,6 +124,7 @@ pub struct ApplyRequest {
 pub struct ResignRequest {
     pub input: PathBuf,
     pub output: PathBuf,
+    pub integrity_key: Option<PathBuf>,
     pub config: ResignConfig,
     pub repack: bool,
 }
@@ -130,6 +133,7 @@ pub struct ResignRequest {
 pub struct RepackRequest {
     pub input: PathBuf,
     pub output: PathBuf,
+    pub integrity_key: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -282,7 +286,12 @@ trait PipelineOps {
 
     fn finalize_report(&self, output_dir: &Path) -> anyhow::Result<()>;
 
-    fn seal_output(&self, output_dir: &Path, events: &mut dyn EventSink) -> anyhow::Result<()>;
+    fn seal_output(
+        &self,
+        output_dir: &Path,
+        integrity_key: Option<&Path>,
+        events: &mut dyn EventSink,
+    ) -> anyhow::Result<()>;
 }
 
 struct RealPipelineOps;
@@ -372,7 +381,12 @@ impl PipelineOps for RealPipelineOps {
         Ok(())
     }
 
-    fn seal_output(&self, output_dir: &Path, events: &mut dyn EventSink) -> anyhow::Result<()> {
+    fn seal_output(
+        &self,
+        output_dir: &Path,
+        integrity_key: Option<&Path>,
+        events: &mut dyn EventSink,
+    ) -> anyhow::Result<()> {
         message(
             events,
             MessageLevel::Info,
@@ -391,6 +405,14 @@ impl PipelineOps for RealPipelineOps {
                 manifest.artifacts.len()
             ),
         );
+        if let Some(private_key) = integrity_key {
+            let key_id = crate::integrity_signature::sign_output_manifest(output_dir, private_key)?;
+            message(
+                events,
+                MessageLevel::Info,
+                format!("Signed dynobox-manifest.json with Ed25519 key {key_id}."),
+            );
+        }
         Ok(())
     }
 }
@@ -398,6 +420,7 @@ impl PipelineOps for RealPipelineOps {
 fn verify_and_finalize_output<O>(
     ops: &O,
     output_dir: &Path,
+    integrity_key: Option<&Path>,
     events: &mut dyn EventSink,
 ) -> anyhow::Result<()>
 where
@@ -405,7 +428,7 @@ where
 {
     ops.verify_stage(output_dir, events)?;
     ops.finalize_report(output_dir)?;
-    ops.seal_output(output_dir, events)
+    ops.seal_output(output_dir, integrity_key, events)
 }
 
 fn run_unpack_with_ops<S, O>(request: &UnpackRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -414,8 +437,11 @@ where
     O: PipelineOps,
 {
     let protected = collect_secondary_protected_paths(None, request.resign.as_ref());
+    validate_integrity_signing_key(request.integrity_key.as_deref())?;
+    assert_integrity_key_outside_input(request.integrity_key.as_deref(), &request.input)?;
     let mut protected_refs: Vec<&Path> = vec![&request.input];
     protected_refs.extend(protected.iter().map(PathBuf::as_path));
+    protected_refs.extend(request.integrity_key.as_deref());
     assert_safe_to_wipe(&request.output, &protected_refs)?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Unpack,
@@ -429,7 +455,12 @@ where
 
     if request.resign.is_none() && !request.repack {
         ops.unpack_stage(input_dir, &request.output, events)?;
-        return verify_and_finalize_output(ops, &request.output, events);
+        return verify_and_finalize_output(
+            ops,
+            &request.output,
+            request.integrity_key.as_deref(),
+            events,
+        );
     }
 
     let unpack_stage_dir = temp_root.path().join("unpack_stage");
@@ -481,7 +512,12 @@ where
         propagate_resign_artifacts(dir, &request.output, events);
     }
 
-    verify_and_finalize_output(ops, &request.output, events)
+    verify_and_finalize_output(
+        ops,
+        &request.output,
+        request.integrity_key.as_deref(),
+        events,
+    )
 }
 
 fn run_apply_with_ops<S, O>(request: &ApplyRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -491,8 +527,11 @@ where
 {
     let protected =
         collect_secondary_protected_paths(Some(&request.ota_zips), request.resign.as_ref());
+    validate_integrity_signing_key(request.integrity_key.as_deref())?;
+    assert_integrity_key_outside_input(request.integrity_key.as_deref(), &request.input)?;
     let mut protected_refs: Vec<&Path> = vec![&request.input];
     protected_refs.extend(protected.iter().map(PathBuf::as_path));
+    protected_refs.extend(request.integrity_key.as_deref());
     assert_safe_to_wipe(&request.output, &protected_refs)?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Apply,
@@ -554,7 +593,12 @@ where
         propagate_resign_artifacts(dir, &request.output, events);
     }
 
-    verify_and_finalize_output(ops, &request.output, events)
+    verify_and_finalize_output(
+        ops,
+        &request.output,
+        request.integrity_key.as_deref(),
+        events,
+    )
 }
 
 fn run_resign_with_ops<S, O>(request: &ResignRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -563,8 +607,11 @@ where
     O: PipelineOps,
 {
     let protected = collect_secondary_protected_paths(None, Some(&request.config));
+    validate_integrity_signing_key(request.integrity_key.as_deref())?;
+    assert_integrity_key_outside_input(request.integrity_key.as_deref(), &request.input)?;
     let mut protected_refs: Vec<&Path> = vec![&request.input];
     protected_refs.extend(protected.iter().map(PathBuf::as_path));
+    protected_refs.extend(request.integrity_key.as_deref());
     assert_safe_to_wipe(&request.output, &protected_refs)?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Resign,
@@ -580,7 +627,12 @@ where
 
     if !request.repack {
         ops.resign_stage(input_dir, &request.output, &request.config, events)?;
-        return verify_and_finalize_output(ops, &request.output, events);
+        return verify_and_finalize_output(
+            ops,
+            &request.output,
+            request.integrity_key.as_deref(),
+            events,
+        );
     }
 
     let resign_stage_dir = temp_root.path().join("resign_stage");
@@ -593,7 +645,12 @@ where
         events,
     )?;
     propagate_resign_artifacts(&resign_stage_dir, &request.output, events);
-    verify_and_finalize_output(ops, &request.output, events)
+    verify_and_finalize_output(
+        ops,
+        &request.output,
+        request.integrity_key.as_deref(),
+        events,
+    )
 }
 
 /// Copy retained resign artifacts from a temporary resign stage to the final
@@ -673,7 +730,11 @@ where
     S: EventSink,
     O: PipelineOps,
 {
-    assert_safe_to_wipe(&request.output, &[&request.input])?;
+    validate_integrity_signing_key(request.integrity_key.as_deref())?;
+    assert_integrity_key_outside_input(request.integrity_key.as_deref(), &request.input)?;
+    let mut protected_refs: Vec<&Path> = vec![&request.input];
+    protected_refs.extend(request.integrity_key.as_deref());
+    assert_safe_to_wipe(&request.output, &protected_refs)?;
     events.emit(ProgressEvent::CommandStarted {
         command: CommandKind::Repack,
         input: request.input.clone(),
@@ -687,7 +748,12 @@ where
     let input_dir = effective_input.as_deref().unwrap_or(decrypted_dir);
 
     ops.repack_stage(input_dir, &request.output, events)?;
-    verify_and_finalize_output(ops, &request.output, events)
+    verify_and_finalize_output(
+        ops,
+        &request.output,
+        request.integrity_key.as_deref(),
+        events,
+    )
 }
 
 /// Check if the input directory has super chunks but no standalone dynamic
@@ -3986,6 +4052,37 @@ fn assert_safe_to_wipe(target: &Path, protected: &[&Path]) -> anyhow::Result<()>
     Ok(())
 }
 
+fn assert_integrity_key_outside_input(
+    integrity_key: Option<&Path>,
+    input: &Path,
+) -> anyhow::Result<()> {
+    let Some(integrity_key) = integrity_key else {
+        return Ok(());
+    };
+    let key = normalise_for_compare(integrity_key);
+    let input = normalise_for_compare(input);
+    if path_starts_with(&key, &input) {
+        anyhow::bail!(
+            "integrity private key `{}` must live outside firmware input `{}` so it cannot be copied into the output",
+            key.display(),
+            input.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_integrity_signing_key(integrity_key: Option<&Path>) -> anyhow::Result<()> {
+    if let Some(integrity_key) = integrity_key {
+        crate::integrity_signature::integrity_signing_key_id(integrity_key).with_context(|| {
+            format!(
+                "invalid manifest-signing private key at {}",
+                integrity_key.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
 fn recreate_dir(dir: &Path) -> anyhow::Result<PathBuf> {
     if dir.exists() {
         std::fs::remove_dir_all(dir)?;
@@ -4174,6 +4271,7 @@ mod tests {
         fn seal_output(
             &self,
             _output_dir: &Path,
+            _integrity_key: Option<&Path>,
             _events: &mut dyn EventSink,
         ) -> anyhow::Result<()> {
             self.record("seal_output");
@@ -4188,7 +4286,9 @@ mod tests {
         fs::write(temp.path().join("report.html"), b"<html>verified</html>").unwrap();
         let mut sink = NoopEventSink;
 
-        RealPipelineOps.seal_output(temp.path(), &mut sink).unwrap();
+        RealPipelineOps
+            .seal_output(temp.path(), None, &mut sink)
+            .unwrap();
 
         let manifest = crate::integrity::read_output_manifest(temp.path()).unwrap();
         assert_eq!(
@@ -4204,6 +4304,28 @@ mod tests {
                 .unwrap()
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn real_pipeline_seal_signs_manifest_when_key_is_configured() {
+        let output = tempdir().unwrap();
+        fs::write(output.path().join("boot.img"), b"boot").unwrap();
+        let keys = tempdir().unwrap();
+        let private_key = keys.path().join("integrity.pem");
+        let public_key = keys.path().join("integrity.pub.pem");
+        crate::integrity_signature::generate_integrity_keypair(&private_key, &public_key).unwrap();
+        let mut sink = NoopEventSink;
+
+        RealPipelineOps
+            .seal_output(output.path(), Some(&private_key), &mut sink)
+            .unwrap();
+
+        let signature = crate::integrity_signature::verify_output_manifest_signature(
+            output.path(),
+            &[public_key],
+        )
+        .unwrap();
+        assert!(signature.is_trusted(), "{signature:?}");
     }
 
     #[test]
@@ -4313,6 +4435,7 @@ mod tests {
         let request = ApplyRequest {
             input: input.clone(),
             output: output.clone(),
+            integrity_key: None,
             ota_zips: vec![temp.path().join("ota1.zip")],
             force_unpack: false,
             resign: None,
@@ -4348,6 +4471,7 @@ mod tests {
         let request = ApplyRequest {
             input: input.clone(),
             output: output.clone(),
+            integrity_key: None,
             ota_zips: vec![temp.path().join("ota1.zip")],
             force_unpack: false,
             resign: Some(sample_resign_config()),
@@ -4384,6 +4508,7 @@ mod tests {
         let request = ApplyRequest {
             input: input.clone(),
             output: output.clone(),
+            integrity_key: None,
             ota_zips: vec![temp.path().join("ota1.zip")],
             force_unpack: false,
             resign: None,
@@ -4420,6 +4545,7 @@ mod tests {
         let request = ApplyRequest {
             input: input.clone(),
             output: output.clone(),
+            integrity_key: None,
             ota_zips: vec![temp.path().join("ota1.zip"), temp.path().join("ota2.zip")],
             force_unpack: true,
             resign: Some(sample_resign_config()),
@@ -4458,6 +4584,7 @@ mod tests {
         let request = UnpackRequest {
             input: input.clone(),
             output: output.clone(),
+            integrity_key: None,
             resign: None,
             repack: true,
             complete: false,
@@ -4604,6 +4731,35 @@ mod tests {
         assert!(assert_safe_to_wipe(&base, &[&input]).is_err());
         // disjoint sibling is allowed
         assert!(assert_safe_to_wipe(&base.join("output"), &[&input]).is_ok());
+    }
+
+    #[test]
+    fn integrity_private_key_must_not_live_inside_firmware_input() {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("input");
+        fs::create_dir_all(&input).unwrap();
+        let key = input.join("integrity.pem");
+
+        let error = assert_integrity_key_outside_input(Some(&key), &input).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be copied into the output")
+        );
+        assert_integrity_key_outside_input(Some(&temp.path().join("keys/key.pem")), &input)
+            .unwrap();
+    }
+
+    #[test]
+    fn integrity_private_key_is_parsed_before_pipeline_mutation() {
+        let temp = tempdir().unwrap();
+        assert!(validate_integrity_signing_key(None).is_ok());
+        assert!(validate_integrity_signing_key(Some(&temp.path().join("missing.pem"))).is_err());
+
+        let private_key = temp.path().join("integrity.pem");
+        let public_key = temp.path().join("integrity.pub.pem");
+        crate::integrity_signature::generate_integrity_keypair(&private_key, &public_key).unwrap();
+        validate_integrity_signing_key(Some(&private_key)).unwrap();
     }
 
     #[cfg(windows)]

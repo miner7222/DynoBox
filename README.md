@@ -17,12 +17,13 @@ Pure Rust firmware and OTA toolkit extracted from LTBox.
 ## Current Commands
 
 ```powershell
-dynobox unpack --input <firmware_dir> [--output <dir>]
-dynobox apply --input <firmware_dir> [--output <dir>] <ota1.zip> ...
-dynobox resign --input <image_dir> [--output <dir>] --key <key> [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--system-spl <YYYY-MM-DD>] [--fuck-lgsi [<JSON_PATH>]]
-dynobox repack --input <image_dir> [--output <dir>]
+dynobox unpack --input <firmware_dir> [--output <dir>] [--integrity-key <private.pem>]
+dynobox apply --input <firmware_dir> [--output <dir>] [--integrity-key <private.pem>] <ota1.zip> ...
+dynobox resign --input <image_dir> [--output <dir>] --key <key> [--integrity-key <private.pem>] [--force] [--rollback <unix_ts>] [--boot-spl <YYYY-MM-DD>] [--vendor-spl <YYYY-MM-DD>] [--system-spl <YYYY-MM-DD>] [--fuck-lgsi [<JSON_PATH>]]
+dynobox repack --input <image_dir> [--output <dir>] [--integrity-key <private.pem>]
 dynobox info --input <image_or_dir> [--format text|json] [--output <report.txt>]
-dynobox verify --input <image_or_dir> [--format text|json] [--output <report.txt>]
+dynobox verify --input <image_or_dir> [--trusted-integrity-key <public.pem>] [--format text|json] [--output <report.txt>]
+dynobox integrity-keygen --private-key <private.pem> [--public-key <public.pem>]
 ```
 
 Pipeline stage keywords (`unpack`, `resign`, `repack`) can be written as bare words or with `--` prefix. Both forms work.
@@ -63,8 +64,9 @@ dynobox apply `
 - Intermediate stage folders are temporary and auto-cleaned. Final output directory follows last stage unless `--output` is set.
 - `apply` runs a preflight scan before patching and a postflight verification pass after output is written.
 - After final AVB/XML/super verification, every successful output pipeline writes `dynobox-manifest.json` with the size and SHA-256 of every final artifact, including `report.html` when present.
+- `--integrity-key` adds a detached `dynobox-manifest.sig` Ed25519 signature. Use a dedicated manifest-signing key rather than the Android AVB key; publish or pin the generated public key separately from the firmware output.
 - All pipeline commands support `--progress-format text|jsonl` for machine-readable progress.
-- `verify` checks the manifest automatically when present, reports modified/missing/unexpected files separately from firmware semantic checks, and exits non-zero when failures are found. Older outputs without a manifest remain supported and are marked `NOT CHECKED` for artifact integrity.
+- `verify` checks the manifest automatically when present, reports modified/missing/unexpected files separately from firmware semantic checks, and distinguishes unsigned, valid-untrusted, and trusted signatures. Supplying `--trusted-integrity-key` makes an unsigned or differently signed manifest a verification failure. Older outputs without a manifest remain supported and are marked `NOT CHECKED` for artifact integrity.
 
 ## Workspace Layout
 
