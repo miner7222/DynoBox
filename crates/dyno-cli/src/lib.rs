@@ -663,10 +663,9 @@ fn unit_label(unit: ProgressUnit) -> &'static str {
 
 /// Build a text-mode sink that wraps `log_event` with an indicatif progress
 /// surface. Slow operations during `unpack`/`apply`/`resign` (super partition
-/// extraction, OTA payload apply on multi-GB partitions, dm-verity hash tree
-/// regeneration during `--vendor-spl`) emit no log lines while they run, so
-/// the gap between two `ItemStarted` events can stretch for tens of seconds
-/// and look frozen on the terminal.
+/// extraction, OTA payload apply and digest verification on multi-GB
+/// partitions, dm-verity hash tree regeneration during `--vendor-spl`) can
+/// otherwise leave long gaps between log lines and look frozen on the terminal.
 ///
 /// Behavior:
 ///   * `StageStarted` / `ItemStarted` → finish any active bar, log the line,

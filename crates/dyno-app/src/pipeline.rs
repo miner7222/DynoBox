@@ -1316,7 +1316,13 @@ where
                     // Split reconstruction materializes a logical image of
                     // `old_size` with implicit zero padding for holes; validate
                     // against the payload's old_partition_info before applying.
-                    validate_partition_image_digest(
+                    validate_partition_image_digest_with_event_progress(
+                        events,
+                        OtaDigestProgress {
+                            current: partition_index + 1,
+                            total: metadata.partitions.len(),
+                            item: &format!("{}: verify OTA source digest", p_info.name),
+                        },
                         &recon_src,
                         p_info.old_size,
                         &p_info.old_hash,
@@ -1333,7 +1339,13 @@ where
                         &temp_new,
                         metadata.block_size,
                     )?;
-                    validate_partition_image_digest(
+                    validate_partition_image_digest_with_event_progress(
+                        events,
+                        OtaDigestProgress {
+                            current: partition_index + 1,
+                            total: metadata.partitions.len(),
+                            item: &format!("{}: verify OTA target digest", p_info.name),
+                        },
                         &temp_new,
                         p_info.new_size,
                         &p_info.new_hash,
@@ -1434,7 +1446,13 @@ where
             // with ignored tails such as Qualcomm MELF trailers). A non-empty
             // hash with zero size is treated as malformed.
             if src_path.exists() && (p_info.old_size > 0 || !p_info.old_hash.is_empty()) {
-                validate_partition_image_digest(
+                validate_partition_image_digest_with_event_progress(
+                    events,
+                    OtaDigestProgress {
+                        current: partition_index + 1,
+                        total: metadata.partitions.len(),
+                        item: &format!("{}: verify OTA source digest", p_info.name),
+                    },
                     &src_path,
                     p_info.old_size,
                     &p_info.old_hash,
@@ -1453,7 +1471,13 @@ where
                 &temp_new,
                 metadata.block_size,
             )?;
-            validate_partition_image_digest(
+            validate_partition_image_digest_with_event_progress(
+                events,
+                OtaDigestProgress {
+                    current: partition_index + 1,
+                    total: metadata.partitions.len(),
+                    item: &format!("{}: verify OTA target digest", p_info.name),
+                },
                 &temp_new,
                 p_info.new_size,
                 &p_info.new_hash,
@@ -3755,6 +3779,7 @@ fn stream_sha256_logical(
     path: &Path,
     logical_size: u64,
     size_policy: PartitionSizePolicy,
+    mut progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> anyhow::Result<[u8; PAYLOAD_SHA256_LEN]> {
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("opening `{}` for SHA-256", path.display()))?;
@@ -3777,6 +3802,10 @@ fn stream_sha256_logical(
     let mut buf = vec![0u8; 1024 * 1024];
     let readable = std::cmp::min(file_len, logical_size);
     let mut read_left = readable;
+    let mut done = 0u64;
+    if let Some(callback) = progress.as_deref_mut() {
+        callback(0, logical_size);
+    }
     file.seek(SeekFrom::Start(0))
         .with_context(|| format!("seeking `{}` for SHA-256", path.display()))?;
     while read_left > 0 {
@@ -3792,6 +3821,10 @@ fn stream_sha256_logical(
         hasher.update(&buf[..chunk]);
         read_left -= chunk as u64;
         remaining -= chunk as u64;
+        done += chunk as u64;
+        if let Some(callback) = progress.as_deref_mut() {
+            callback(done, logical_size);
+        }
     }
     // Implicit zero padding for the logical tail (AllowSourceContainer only;
     // Exact already rejected shorter files above).
@@ -3800,6 +3833,10 @@ fn stream_sha256_logical(
         buf[..chunk].fill(0);
         hasher.update(&buf[..chunk]);
         remaining -= chunk as u64;
+        done += chunk as u64;
+        if let Some(callback) = progress.as_deref_mut() {
+            callback(done, logical_size);
+        }
     }
 
     let digest = hasher.finalize();
@@ -3853,12 +3890,31 @@ fn enforce_partition_size_policy(
 ///
 /// `label` is included in every error for diagnostics (e.g.
 /// `old partition \`system\``).
+#[cfg(test)]
 fn validate_partition_image_digest(
     path: &Path,
     expected_size: u64,
     expected_hash: &[u8],
     label: &str,
     size_policy: PartitionSizePolicy,
+) -> anyhow::Result<()> {
+    validate_partition_image_digest_inner(
+        path,
+        expected_size,
+        expected_hash,
+        label,
+        size_policy,
+        None,
+    )
+}
+
+fn validate_partition_image_digest_inner(
+    path: &Path,
+    expected_size: u64,
+    expected_hash: &[u8],
+    label: &str,
+    size_policy: PartitionSizePolicy,
+    progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> anyhow::Result<()> {
     if expected_hash.is_empty() && expected_size == 0 {
         // Fully absent PartitionInfo metadata.
@@ -3891,12 +3947,13 @@ fn validate_partition_image_digest(
         return Ok(());
     }
 
-    let actual = stream_sha256_logical(path, expected_size, size_policy).with_context(|| {
-        format!(
-            "{label}: streaming SHA-256 of `{}` (logical size {expected_size})",
-            path.display()
-        )
-    })?;
+    let actual =
+        stream_sha256_logical(path, expected_size, size_policy, progress).with_context(|| {
+            format!(
+                "{label}: streaming SHA-256 of `{}` (logical size {expected_size})",
+                path.display()
+            )
+        })?;
     if actual.as_slice() != expected_hash {
         anyhow::bail!(
             "{label}: SHA-256 mismatch for `{}` (logical size {expected_size}): expected {}, got {}",
@@ -3906,6 +3963,72 @@ fn validate_partition_image_digest(
         );
     }
     Ok(())
+}
+
+/// Validate one OTA partition digest with its own visible, determinate item.
+///
+/// Payload application reports 100% before the mandatory post-apply SHA-256
+/// scan begins. Emitting a different item here makes renderers retire the
+/// completed apply bar immediately and show the verification work separately.
+#[derive(Debug, Clone, Copy)]
+struct OtaDigestProgress<'a> {
+    current: usize,
+    total: usize,
+    item: &'a str,
+}
+
+fn validate_partition_image_digest_with_event_progress<S>(
+    events: &mut S,
+    progress: OtaDigestProgress<'_>,
+    path: &Path,
+    expected_size: u64,
+    expected_hash: &[u8],
+    label: &str,
+    size_policy: PartitionSizePolicy,
+) -> anyhow::Result<()>
+where
+    S: EventSink + ?Sized,
+{
+    let item = progress.item.to_string();
+    let mut started = false;
+    let mut last_emitted_pct: Option<u64> = None;
+    let mut callback = |done: u64, progress_total: u64| {
+        if !started {
+            started = true;
+            events.emit(ProgressEvent::ItemStarted {
+                stage: StageKind::Apply,
+                current: progress.current,
+                total: progress.total,
+                item: item.clone(),
+            });
+        }
+        let pct = if progress_total == 0 {
+            100
+        } else {
+            done.saturating_mul(100) / progress_total
+        };
+        let final_tick = progress_total > 0 && done == progress_total;
+        if last_emitted_pct == Some(pct) && !final_tick {
+            return;
+        }
+        last_emitted_pct = Some(pct);
+        events.emit(ProgressEvent::ItemProgress {
+            stage: StageKind::Apply,
+            item: item.clone(),
+            done,
+            total: progress_total,
+            unit: ProgressUnit::Bytes,
+        });
+    };
+
+    validate_partition_image_digest_inner(
+        path,
+        expected_size,
+        expected_hash,
+        label,
+        size_policy,
+        Some(&mut callback),
+    )
 }
 
 /// Collect caller-owned secondary inputs that must not be wiped by an
@@ -4839,6 +4962,75 @@ mod tests {
         assert!(
             secondary.is_empty(),
             "embedded testkey names must not be treated as filesystem paths: {secondary:?}"
+        );
+    }
+
+    #[test]
+    fn ota_digest_validation_starts_distinct_progress_after_apply_reaches_total() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("system.img");
+        let data = vec![0x5au8; 2 * 1024 * 1024 + 17];
+        fs::write(&path, &data).unwrap();
+        let digest = Sha256::digest(&data).to_vec();
+        let logical_size = data.len() as u64;
+        let verify_item = "system: verify OTA target digest";
+        let mut events = vec![ProgressEvent::ItemProgress {
+            stage: StageKind::Apply,
+            item: "system".to_string(),
+            done: logical_size,
+            total: logical_size,
+            unit: ProgressUnit::Bytes,
+        }];
+
+        {
+            let mut sink = |event| events.push(event);
+            validate_partition_image_digest_with_event_progress(
+                &mut sink,
+                OtaDigestProgress {
+                    current: 2,
+                    total: 5,
+                    item: verify_item,
+                },
+                &path,
+                logical_size,
+                &digest,
+                "new partition `system`",
+                PartitionSizePolicy::Exact,
+            )
+            .unwrap();
+        }
+
+        assert!(matches!(
+            &events[1],
+            ProgressEvent::ItemStarted {
+                stage: StageKind::Apply,
+                current: 2,
+                total: 5,
+                item,
+            } if item == verify_item
+        ));
+        let verification_ticks = events[2..]
+            .iter()
+            .filter_map(|event| match event {
+                ProgressEvent::ItemProgress {
+                    stage: StageKind::Apply,
+                    item,
+                    done,
+                    total,
+                    unit: ProgressUnit::Bytes,
+                } if item == verify_item => Some((*done, *total)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(verification_ticks.first(), Some(&(0, logical_size)));
+        assert_eq!(
+            verification_ticks.last(),
+            Some(&(logical_size, logical_size))
+        );
+        assert!(
+            verification_ticks
+                .windows(2)
+                .all(|pair| pair[0].0 <= pair[1].0)
         );
     }
 

@@ -58,9 +58,9 @@ pub enum ProgressEvent {
     },
     /// Granular progress within the most recently started item. `done` and
     /// `total` are in the same `unit`. Emitted incrementally during long
-    /// running stages (OTA payload apply, dm-verity hash tree regen, FEC
-    /// regen) so the CLI can render a real progress bar instead of an
-    /// undifferentiated spinner.
+    /// running stages (OTA payload apply and digest verification, dm-verity
+    /// hash tree regen, FEC regen) so the CLI can render a real progress bar
+    /// instead of an undifferentiated spinner.
     ItemProgress {
         stage: StageKind,
         item: String,
