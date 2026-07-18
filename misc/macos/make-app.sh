@@ -70,20 +70,15 @@ ARCHS="$(lipo -archs "$APP/Contents/MacOS/$BIN_NAME")"
 # Normalize whitespace for a stable compare.
 ARCHS_NORM="$(printf '%s\n' "$ARCHS" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')"
 EXPECTED_ARCHS="arm64 x86_64"
-# Accept either order from lipo.
-case " $ARCHS_NORM " in
-    *" arm64 "*" x86_64 "*|*" x86_64 "*" arm64 "*) ;;
+# Accept exactly the two required slices in either order. Quoted exact patterns
+# avoid the mixed wildcard/quote expression that rejected `x86_64 arm64`.
+case "$ARCHS_NORM" in
+    "arm64 x86_64"|"x86_64 arm64") ;;
     *)
         echo "ERROR: expected universal arches '${EXPECTED_ARCHS}', got '${ARCHS_NORM}'" >&2
         exit 1
         ;;
 esac
-# Ensure no unexpected third arch sneaks in.
-ARCH_COUNT="$(printf '%s\n' "$ARCHS_NORM" | wc -w | tr -d ' ')"
-if [ "$ARCH_COUNT" != "2" ]; then
-    echo "ERROR: expected exactly 2 arches, got ${ARCH_COUNT} ('${ARCHS_NORM}')" >&2
-    exit 1
-fi
 echo "Universal arches OK: ${ARCHS_NORM}"
 
 # 3. Info.plist (substitute the version).
