@@ -94,7 +94,7 @@ jobs:
           tool: cargo-deny
 
       - name: Cache cargo-deny advisory DB
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/advisory-dbs
           key: cargo-deny-advisory-db-${{ runner.os }}-v1
