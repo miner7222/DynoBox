@@ -22,6 +22,8 @@ pub const MANIFEST_FILE_NAME: &str = "dynobox-manifest.json";
 pub const MANIFEST_SIGNATURE_FILE_NAME: &str = "dynobox-manifest.sig";
 /// Pipeline HTML report; always included when present as a regular file.
 pub const REPORT_FILE_NAME: &str = "report.html";
+/// Root artifact intentionally omitted when the output passed through resign.
+pub const RESIGN_EXCLUDED_ROOT_ARTIFACT: &str = "abl.elf";
 
 /// Value of the `schema` field for this format.
 pub const MANIFEST_SCHEMA: &str = "dynobox.output_manifest";
@@ -42,8 +44,21 @@ pub struct OutputManifest {
     pub generated_at: String,
     /// Whether semantic (AVB/XML/super) verification succeeded for this output.
     pub semantic_verification: bool,
+    /// Whether the producing pipeline ran a resign stage. Resign outputs omit
+    /// the root `abl.elf` from their artifact inventory by policy.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resign_performed: bool,
     /// Sorted recursive regular-file inventory.
     pub artifacts: Vec<ManifestArtifact>,
+}
+
+/// Policy captured in a generated output manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct OutputManifestOptions {
+    /// Whether semantic AVB/XML/super verification succeeded.
+    pub semantic_verification: bool,
+    /// Whether resign ran, enabling the root `abl.elf` exclusion.
+    pub resign_performed: bool,
 }
 
 /// One inventoried regular file.
@@ -113,13 +128,30 @@ pub fn build_output_manifest(
     generated_at: impl Into<String>,
     semantic_verification: bool,
 ) -> Result<OutputManifest> {
-    let artifacts = collect_artifacts(output_dir)?;
+    build_output_manifest_with_options(
+        output_dir,
+        generated_at,
+        OutputManifestOptions {
+            semantic_verification,
+            resign_performed: false,
+        },
+    )
+}
+
+/// Scan `output_dir` using explicit pipeline policy and build a manifest.
+pub fn build_output_manifest_with_options(
+    output_dir: &Path,
+    generated_at: impl Into<String>,
+    options: OutputManifestOptions,
+) -> Result<OutputManifest> {
+    let artifacts = collect_artifacts(output_dir, options.resign_performed)?;
     Ok(OutputManifest {
         schema: MANIFEST_SCHEMA.to_string(),
         version: MANIFEST_VERSION,
         generator: dynobox_generator_version(),
         generated_at: generated_at.into(),
-        semantic_verification,
+        semantic_verification: options.semantic_verification,
+        resign_performed: options.resign_performed,
         artifacts,
     })
 }
@@ -141,6 +173,17 @@ pub fn write_output_manifest_for_dir(
     semantic_verification: bool,
 ) -> Result<OutputManifest> {
     let manifest = build_output_manifest(output_dir, generated_at, semantic_verification)?;
+    write_output_manifest(output_dir, &manifest)?;
+    Ok(manifest)
+}
+
+/// Build and atomically write a manifest using explicit pipeline policy.
+pub fn write_output_manifest_for_dir_with_options(
+    output_dir: &Path,
+    generated_at: impl Into<String>,
+    options: OutputManifestOptions,
+) -> Result<OutputManifest> {
+    let manifest = build_output_manifest_with_options(output_dir, generated_at, options)?;
     write_output_manifest(output_dir, &manifest)?;
     Ok(manifest)
 }
@@ -222,7 +265,7 @@ pub fn verify_output_manifest(output_dir: &Path) -> Result<ManifestVerificationR
 
     // `parse_manifest_bytes` already rejects duplicate / unsorted / CI-colliding
     // artifact arrays, so BTreeMap keying here is safe for verification.
-    let actual = collect_artifacts(output_dir)?
+    let actual = collect_artifacts(output_dir, manifest.resign_performed)?
         .into_iter()
         .map(|artifact| (artifact.path.clone(), artifact))
         .collect::<BTreeMap<_, _>>();
@@ -297,6 +340,12 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<OutputManifest> {
     let mut seen_ci: HashMap<String, String> = HashMap::new();
     for artifact in &manifest.artifacts {
         validate_relative_slash_path(&artifact.path)?;
+        if manifest.resign_performed && artifact.path == RESIGN_EXCLUDED_ROOT_ARTIFACT {
+            bail!(
+                "resign manifest must not inventory excluded root artifact '{}'",
+                RESIGN_EXCLUDED_ROOT_ARTIFACT
+            );
+        }
         if !is_lowercase_hex_sha256(&artifact.sha256) {
             bail!(
                 "artifact '{}' has invalid sha256 digest '{}'",
@@ -336,7 +385,7 @@ fn parse_manifest_bytes(bytes: &[u8]) -> Result<OutputManifest> {
     Ok(manifest)
 }
 
-fn collect_artifacts(output_dir: &Path) -> Result<Vec<ManifestArtifact>> {
+fn collect_artifacts(output_dir: &Path, resign_performed: bool) -> Result<Vec<ManifestArtifact>> {
     if !output_dir.is_dir() {
         bail!(
             "output directory does not exist or is not a directory: {}",
@@ -347,7 +396,14 @@ fn collect_artifacts(output_dir: &Path) -> Result<Vec<ManifestArtifact>> {
     let mut artifacts = Vec::new();
     // Lowercase path -> first-seen original path, for case-insensitive collisions.
     let mut seen_ci: HashMap<String, String> = HashMap::new();
-    walk_collect(output_dir, output_dir, true, &mut artifacts, &mut seen_ci)?;
+    walk_collect(
+        output_dir,
+        output_dir,
+        true,
+        resign_performed,
+        &mut artifacts,
+        &mut seen_ci,
+    )?;
     artifacts.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(artifacts)
 }
@@ -356,6 +412,7 @@ fn walk_collect(
     root: &Path,
     dir: &Path,
     is_root: bool,
+    resign_performed: bool,
     artifacts: &mut Vec<ManifestArtifact>,
     seen_ci: &mut HashMap<String, String>,
 ) -> Result<()> {
@@ -389,8 +446,15 @@ fn walk_collect(
                 path.display()
             );
         }
+        if is_root
+            && resign_performed
+            && file_type.is_file()
+            && name == RESIGN_EXCLUDED_ROOT_ARTIFACT
+        {
+            continue;
+        }
         if file_type.is_dir() {
-            walk_collect(root, &path, false, artifacts, seen_ci)?;
+            walk_collect(root, &path, false, resign_performed, artifacts, seen_ci)?;
             continue;
         }
         if !file_type.is_file() {
@@ -440,6 +504,10 @@ fn is_atomic_temp_for(name: &str, final_name: &str) -> bool {
     let prefix = format!(".{final_name}.");
     // Require a non-empty random middle segment: `.{name}.<id>.tmp`.
     name.starts_with(&prefix) && name.ends_with(".tmp") && name.len() > prefix.len() + ".tmp".len()
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn relative_slash_path(root: &Path, full: &Path) -> Result<String> {
@@ -692,6 +760,79 @@ mod tests {
         assert!(paths.contains(&REPORT_FILE_NAME));
         assert!(paths.contains(&"boot.img"));
         assert!(!paths.contains(&MANIFEST_FILE_NAME));
+    }
+
+    #[test]
+    fn resign_policy_excludes_only_root_abl_and_remains_verifiable() {
+        let dir = tempfile::tempdir().unwrap();
+        write_file(&dir.path().join(RESIGN_EXCLUDED_ROOT_ARTIFACT), b"root-abl");
+        write_file(
+            &dir.path()
+                .join("nested")
+                .join(RESIGN_EXCLUDED_ROOT_ARTIFACT),
+            b"nested-abl",
+        );
+        write_file(&dir.path().join("boot.img"), b"boot");
+
+        let ordinary = build_output_manifest(dir.path(), "2026-07-18T01:30:00Z", true).unwrap();
+        assert!(!ordinary.resign_performed);
+        assert!(
+            ordinary
+                .artifacts
+                .iter()
+                .any(|artifact| artifact.path == RESIGN_EXCLUDED_ROOT_ARTIFACT)
+        );
+        assert!(
+            !String::from_utf8(serialize_manifest(&ordinary).unwrap())
+                .unwrap()
+                .contains("resign_performed")
+        );
+
+        let resigned = write_output_manifest_for_dir_with_options(
+            dir.path(),
+            "2026-07-18T01:31:00Z",
+            OutputManifestOptions {
+                semantic_verification: true,
+                resign_performed: true,
+            },
+        )
+        .unwrap();
+        assert!(resigned.resign_performed);
+        assert_eq!(
+            resigned
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["boot.img", "nested/abl.elf"]
+        );
+        assert!(
+            String::from_utf8(serialize_manifest(&resigned).unwrap())
+                .unwrap()
+                .contains("\"resign_performed\": true")
+        );
+        assert!(
+            verify_output_manifest(dir.path()).unwrap().is_ok(),
+            "root abl.elf must be ignored by the matching resign policy"
+        );
+
+        write_file(
+            &dir.path().join(RESIGN_EXCLUDED_ROOT_ARTIFACT),
+            b"changed-root-abl",
+        );
+        assert!(verify_output_manifest(dir.path()).unwrap().is_ok());
+
+        write_file(
+            &dir.path()
+                .join("nested")
+                .join(RESIGN_EXCLUDED_ROOT_ARTIFACT),
+            b"NESTED-ABL",
+        );
+        let nested_tamper = verify_output_manifest(dir.path()).unwrap();
+        assert!(nested_tamper.issues.iter().any(|issue| matches!(
+            issue,
+            ManifestIssue::DigestMismatch { path, .. } if path == "nested/abl.elf"
+        )));
     }
 
     #[test]

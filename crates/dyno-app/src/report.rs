@@ -283,7 +283,7 @@ fn output_integrity_section() -> String {
     format!(
         r#"<section id='output-integrity' data-integrity-schema='dynobox.output_manifest' data-hash-algorithm='sha-256' data-generator='{generator}'>
 <div class='section-heading'><h2>Output integrity</h2></div>
-<p class='section-note'>Produced by <code>DynoBox {generator}</code>. A successful pipeline seals every final output file, including this report, in <code>dynobox-manifest.json</code>. When a dedicated integrity key is configured, <code>dynobox-manifest.sig</code> authenticates those exact manifest bytes. Run <code>dynobox verify --input &lt;output&gt;</code> to detect modified, missing, or unexpected artifacts.</p>
+<p class='section-note'>Produced by <code>DynoBox {generator}</code>. A successful pipeline seals every tracked final output file, including this report, in <code>dynobox-manifest.json</code>. When the pipeline includes resign, the root <code>abl.elf</code> is intentionally excluded and the manifest records that policy. When a dedicated integrity key is configured, <code>dynobox-manifest.sig</code> authenticates those exact manifest bytes. Run <code>dynobox verify --input &lt;output&gt;</code> to detect modified, missing, or unexpected artifacts.</p>
 </section>
 "#
     )

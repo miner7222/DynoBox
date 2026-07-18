@@ -289,6 +289,7 @@ trait PipelineOps {
     fn seal_output(
         &self,
         output_dir: &Path,
+        resign_performed: bool,
         integrity_key: Option<&Path>,
         events: &mut dyn EventSink,
     ) -> anyhow::Result<()>;
@@ -384,6 +385,7 @@ impl PipelineOps for RealPipelineOps {
     fn seal_output(
         &self,
         output_dir: &Path,
+        resign_performed: bool,
         integrity_key: Option<&Path>,
         events: &mut dyn EventSink,
     ) -> anyhow::Result<()> {
@@ -392,11 +394,26 @@ impl PipelineOps for RealPipelineOps {
             MessageLevel::Info,
             "Hashing final output for dynobox-manifest.json...".to_string(),
         );
-        let manifest = crate::integrity::write_output_manifest_for_dir(
+        let manifest = crate::integrity::write_output_manifest_for_dir_with_options(
             output_dir,
             crate::report::now_iso8601(),
-            true,
+            crate::integrity::OutputManifestOptions {
+                semantic_verification: true,
+                resign_performed,
+            },
         )?;
+        if resign_performed
+            && output_dir
+                .join(crate::integrity::RESIGN_EXCLUDED_ROOT_ARTIFACT)
+                .is_file()
+        {
+            message(
+                events,
+                MessageLevel::Info,
+                "Excluded root abl.elf from dynobox-manifest.json because the pipeline included resign."
+                    .to_string(),
+            );
+        }
         message(
             events,
             MessageLevel::Info,
@@ -420,6 +437,7 @@ impl PipelineOps for RealPipelineOps {
 fn verify_and_finalize_output<O>(
     ops: &O,
     output_dir: &Path,
+    resign_performed: bool,
     integrity_key: Option<&Path>,
     events: &mut dyn EventSink,
 ) -> anyhow::Result<()>
@@ -428,7 +446,7 @@ where
 {
     ops.verify_stage(output_dir, events)?;
     ops.finalize_report(output_dir)?;
-    ops.seal_output(output_dir, integrity_key, events)
+    ops.seal_output(output_dir, resign_performed, integrity_key, events)
 }
 
 fn run_unpack_with_ops<S, O>(request: &UnpackRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -458,6 +476,7 @@ where
         return verify_and_finalize_output(
             ops,
             &request.output,
+            request.resign.is_some(),
             request.integrity_key.as_deref(),
             events,
         );
@@ -515,6 +534,7 @@ where
     verify_and_finalize_output(
         ops,
         &request.output,
+        request.resign.is_some(),
         request.integrity_key.as_deref(),
         events,
     )
@@ -596,6 +616,7 @@ where
     verify_and_finalize_output(
         ops,
         &request.output,
+        request.resign.is_some(),
         request.integrity_key.as_deref(),
         events,
     )
@@ -630,6 +651,7 @@ where
         return verify_and_finalize_output(
             ops,
             &request.output,
+            true,
             request.integrity_key.as_deref(),
             events,
         );
@@ -648,6 +670,7 @@ where
     verify_and_finalize_output(
         ops,
         &request.output,
+        true,
         request.integrity_key.as_deref(),
         events,
     )
@@ -751,6 +774,7 @@ where
     verify_and_finalize_output(
         ops,
         &request.output,
+        false,
         request.integrity_key.as_deref(),
         events,
     )
@@ -4263,6 +4287,7 @@ mod tests {
         calls: RefCell<Vec<String>>,
         repack_base_inputs: RefCell<Vec<PathBuf>>,
         repack_base_has_rawprogram_xml: RefCell<Vec<bool>>,
+        seal_resign_flags: RefCell<Vec<bool>>,
     }
 
     impl TestPipelineOps {
@@ -4280,6 +4305,10 @@ mod tests {
 
         fn repack_base_has_rawprogram_xml(&self) -> Vec<bool> {
             self.repack_base_has_rawprogram_xml.borrow().clone()
+        }
+
+        fn seal_resign_flags(&self) -> Vec<bool> {
+            self.seal_resign_flags.borrow().clone()
         }
     }
 
@@ -4394,10 +4423,12 @@ mod tests {
         fn seal_output(
             &self,
             _output_dir: &Path,
+            resign_performed: bool,
             _integrity_key: Option<&Path>,
             _events: &mut dyn EventSink,
         ) -> anyhow::Result<()> {
             self.record("seal_output");
+            self.seal_resign_flags.borrow_mut().push(resign_performed);
             Ok(())
         }
     }
@@ -4410,7 +4441,7 @@ mod tests {
         let mut sink = NoopEventSink;
 
         RealPipelineOps
-            .seal_output(temp.path(), None, &mut sink)
+            .seal_output(temp.path(), false, None, &mut sink)
             .unwrap();
 
         let manifest = crate::integrity::read_output_manifest(temp.path()).unwrap();
@@ -4430,6 +4461,42 @@ mod tests {
     }
 
     #[test]
+    fn real_pipeline_resign_seal_excludes_root_abl() {
+        let output = tempdir().unwrap();
+        fs::write(output.path().join("boot.img"), b"boot").unwrap();
+        fs::write(
+            output
+                .path()
+                .join(crate::integrity::RESIGN_EXCLUDED_ROOT_ARTIFACT),
+            b"abl",
+        )
+        .unwrap();
+        fs::create_dir_all(output.path().join("nested")).unwrap();
+        fs::write(output.path().join("nested").join("abl.elf"), b"nested").unwrap();
+        let mut sink = NoopEventSink;
+
+        RealPipelineOps
+            .seal_output(output.path(), true, None, &mut sink)
+            .unwrap();
+
+        let manifest = crate::integrity::read_output_manifest(output.path()).unwrap();
+        assert!(manifest.resign_performed);
+        assert_eq!(
+            manifest
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["boot.img", "nested/abl.elf"]
+        );
+        assert!(
+            crate::integrity::verify_output_manifest(output.path())
+                .unwrap()
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn real_pipeline_seal_signs_manifest_when_key_is_configured() {
         let output = tempdir().unwrap();
         fs::write(output.path().join("boot.img"), b"boot").unwrap();
@@ -4440,7 +4507,7 @@ mod tests {
         let mut sink = NoopEventSink;
 
         RealPipelineOps
-            .seal_output(output.path(), Some(&private_key), &mut sink)
+            .seal_output(output.path(), false, Some(&private_key), &mut sink)
             .unwrap();
 
         let signature = crate::integrity_signature::verify_output_manifest_signature(
@@ -4581,6 +4648,7 @@ mod tests {
             ]
         );
         assert!(output.exists());
+        assert_eq!(ops.seal_resign_flags(), vec![false]);
         assert_no_stage_dirs(temp.path());
     }
 
@@ -4618,6 +4686,7 @@ mod tests {
             ]
         );
         assert!(output.exists());
+        assert_eq!(ops.seal_resign_flags(), vec![true]);
         assert_no_stage_dirs(temp.path());
     }
 
@@ -4655,6 +4724,7 @@ mod tests {
             ]
         );
         assert!(output.exists());
+        assert_eq!(ops.seal_resign_flags(), vec![false]);
         assert_no_stage_dirs(temp.path());
     }
 
@@ -4693,6 +4763,7 @@ mod tests {
             ]
         );
         assert!(output.exists());
+        assert_eq!(ops.seal_resign_flags(), vec![true]);
         assert_no_stage_dirs(temp.path());
     }
 

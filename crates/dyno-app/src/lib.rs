@@ -21,9 +21,11 @@ pub mod verify;
 pub use events::{CommandKind, EventSink, MessageLevel, NoopEventSink, ProgressEvent, StageKind};
 pub use integrity::{
     MANIFEST_FILE_NAME, MANIFEST_SCHEMA, MANIFEST_SIGNATURE_FILE_NAME, MANIFEST_VERSION,
-    ManifestArtifact, ManifestIssue, ManifestVerificationReport, OutputManifest, REPORT_FILE_NAME,
-    build_output_manifest, dynobox_generator_version, read_output_manifest, serialize_manifest,
-    verify_output_manifest, write_output_manifest, write_output_manifest_for_dir,
+    ManifestArtifact, ManifestIssue, ManifestVerificationReport, OutputManifest,
+    OutputManifestOptions, REPORT_FILE_NAME, RESIGN_EXCLUDED_ROOT_ARTIFACT, build_output_manifest,
+    build_output_manifest_with_options, dynobox_generator_version, read_output_manifest,
+    serialize_manifest, verify_output_manifest, write_output_manifest,
+    write_output_manifest_for_dir, write_output_manifest_for_dir_with_options,
 };
 pub use integrity_signature::{
     ManifestSignatureEnvelope, ManifestSignatureVerification, SIGNATURE_ALGORITHM,
