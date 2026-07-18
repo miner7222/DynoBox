@@ -9,6 +9,7 @@ Pure Rust firmware and OTA toolkit extracted from LTBox.
 - re-sign AVB images with test keys
 - repack dynamic partitions back into split `super_*.img`
 - scan AVB metadata from one image or a whole directory
+- seal final outputs with a deterministic per-file SHA-256 manifest
 - bump boot, vendor & system security patch level
 - modify AVB rollback_index to bypass rollback protection
 - toggle any LGSI feature flag at its registration site
@@ -61,8 +62,9 @@ dynobox apply `
 - `--complete` copies all remaining input files to the output so it mirrors the original firmware structure.
 - Intermediate stage folders are temporary and auto-cleaned. Final output directory follows last stage unless `--output` is set.
 - `apply` runs a preflight scan before patching and a postflight verification pass after output is written.
+- After final AVB/XML/super verification, every successful output pipeline writes `dynobox-manifest.json` with the size and SHA-256 of every final artifact, including `report.html` when present.
 - All pipeline commands support `--progress-format text|jsonl` for machine-readable progress.
-- `verify` runs same verification engine directly and exits non-zero when failures are found.
+- `verify` checks the manifest automatically when present, reports modified/missing/unexpected files separately from firmware semantic checks, and exits non-zero when failures are found. Older outputs without a manifest remain supported and are marked `NOT CHECKED` for artifact integrity.
 
 ## Workspace Layout
 

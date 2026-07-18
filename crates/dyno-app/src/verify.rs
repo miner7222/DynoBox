@@ -4,11 +4,16 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::integrity::{
+    MANIFEST_FILE_NAME, ManifestIssue, ManifestVerificationReport, verify_output_manifest,
+};
+
 use crate::events::{EventSink, MessageLevel, ProgressEvent, StageKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum VerificationFailureKind {
     Input,
+    Integrity,
     Avb,
     Xml,
     Super,
@@ -31,6 +36,7 @@ pub struct SuperLayoutSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct VerificationReport {
     pub input: PathBuf,
+    pub artifact_integrity: Option<ManifestVerificationReport>,
     pub image_file_count: usize,
     pub avb_image_count: usize,
     pub rawprogram_xml_count: usize,
@@ -46,8 +52,15 @@ impl VerificationReport {
 }
 
 pub fn verify_input(input: &Path) -> anyhow::Result<VerificationReport> {
+    let mut report = verify_input_semantic(input)?;
+    attach_output_manifest_verification(input, &mut report);
+    Ok(report)
+}
+
+fn verify_input_semantic(input: &Path) -> anyhow::Result<VerificationReport> {
     let mut report = VerificationReport {
         input: input.to_path_buf(),
+        artifact_integrity: None,
         image_file_count: count_image_files(input)?,
         avb_image_count: 0,
         rawprogram_xml_count: count_rawprogram_xml_files(input)?,
@@ -219,6 +232,60 @@ pub fn verify_input(input: &Path) -> anyhow::Result<VerificationReport> {
     Ok(report)
 }
 
+fn attach_output_manifest_verification(input: &Path, report: &mut VerificationReport) {
+    if !input.is_dir() || !input.join(MANIFEST_FILE_NAME).is_file() {
+        return;
+    }
+
+    let integrity =
+        verify_output_manifest(input).unwrap_or_else(|error| ManifestVerificationReport {
+            manifest_path: input.join(MANIFEST_FILE_NAME),
+            issues: vec![ManifestIssue::Malformed {
+                message: error.to_string(),
+            }],
+        });
+
+    for issue in &integrity.issues {
+        let (path, message) = manifest_issue_details(input, issue);
+        report.failures.push(VerificationFailure {
+            kind: VerificationFailureKind::Integrity,
+            path: Some(path),
+            message,
+        });
+    }
+    report.artifact_integrity = Some(integrity);
+}
+
+fn manifest_issue_details(input: &Path, issue: &ManifestIssue) -> (PathBuf, String) {
+    match issue {
+        ManifestIssue::Missing { path } => (
+            input.join(path),
+            format!("artifact listed in manifest is missing: {path}"),
+        ),
+        ManifestIssue::Unexpected { path } => (
+            input.join(path),
+            format!("unexpected artifact is not listed in manifest: {path}"),
+        ),
+        ManifestIssue::SizeMismatch {
+            path,
+            expected,
+            actual,
+        } => (
+            input.join(path),
+            format!("artifact size mismatch: expected {expected} bytes, found {actual} bytes"),
+        ),
+        ManifestIssue::DigestMismatch {
+            path,
+            expected,
+            actual,
+        } => (
+            input.join(path),
+            format!("artifact SHA-256 mismatch: expected {expected}, found {actual}"),
+        ),
+        ManifestIssue::Malformed { message } => (input.join(MANIFEST_FILE_NAME), message.clone()),
+    }
+}
+
 pub fn render_verification_report(report: &VerificationReport) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "Verification target:    {}", report.input.display());
@@ -227,6 +294,19 @@ pub fn render_verification_report(report: &VerificationReport) -> String {
         "Status:                 {}",
         if report.is_clean() { "OK" } else { "FAILED" }
     );
+    match &report.artifact_integrity {
+        Some(integrity) if integrity.is_ok() => {
+            out.push_str("Artifact integrity:     OK (SHA-256 manifest)\n");
+        }
+        Some(integrity) => {
+            let _ = writeln!(
+                out,
+                "Artifact integrity:     FAILED ({} issue(s))",
+                integrity.issues.len()
+            );
+        }
+        None => out.push_str("Artifact integrity:     NOT CHECKED (no manifest)\n"),
+    }
     let _ = writeln!(out, "Image files scanned:    {}", report.image_file_count);
     let _ = writeln!(out, "AVB images detected:    {}", report.avb_image_count);
     let _ = writeln!(
@@ -335,7 +415,7 @@ where
         stage: StageKind::Verify,
     });
 
-    let report = verify_input(input)?;
+    let report = verify_input_semantic(input)?;
     emit_verification_messages(&report, events);
     ensure_verification_clean(&report)?;
 
@@ -707,6 +787,8 @@ mod tests {
 
     use tempfile::{NamedTempFile, tempdir};
 
+    use crate::integrity::write_output_manifest_for_dir;
+
     use super::{
         VerificationFailureKind, expected_chain_partitions_from_info, render_verification_report,
         verify_input,
@@ -723,6 +805,37 @@ mod tests {
         assert_eq!(report.image_file_count, 1);
         assert_eq!(report.avb_image_count, 0);
         assert!(report.super_layout.is_none());
+        assert!(report.artifact_integrity.is_none());
+        assert!(render_verification_report(&report).contains("NOT CHECKED (no manifest)"));
+    }
+
+    #[test]
+    fn verify_manifest_accepts_clean_output_and_detects_tampering() {
+        let temp = tempdir().unwrap();
+        let image = temp.path().join("dummy.img");
+        fs::write(&image, b"not-avb").unwrap();
+        write_output_manifest_for_dir(temp.path(), "2026-07-18T00:00:00Z", true).unwrap();
+
+        let clean = verify_input(temp.path()).unwrap();
+        assert!(clean.is_clean(), "{:?}", clean.failures);
+        assert!(
+            clean
+                .artifact_integrity
+                .as_ref()
+                .is_some_and(|integrity| integrity.is_ok())
+        );
+        assert!(render_verification_report(&clean).contains("Artifact integrity:     OK"));
+
+        fs::write(&image, b"tampered").unwrap();
+        let tampered = verify_input(temp.path()).unwrap();
+        assert!(!tampered.is_clean());
+        assert!(
+            tampered
+                .failures
+                .iter()
+                .any(|failure| failure.kind == VerificationFailureKind::Integrity)
+        );
+        assert!(render_verification_report(&tampered).contains("Artifact integrity:     FAILED"));
     }
 
     #[test]

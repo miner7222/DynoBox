@@ -7,6 +7,7 @@ pub mod events;
 pub mod ext4_helpers;
 pub mod ext4_reader;
 pub mod fuck_lgsi;
+pub mod integrity;
 pub mod pipeline;
 pub mod report;
 mod spl;
@@ -17,6 +18,12 @@ pub mod vendor_spl;
 pub mod verify;
 
 pub use events::{CommandKind, EventSink, MessageLevel, NoopEventSink, ProgressEvent, StageKind};
+pub use integrity::{
+    MANIFEST_FILE_NAME, MANIFEST_SCHEMA, MANIFEST_SIGNATURE_FILE_NAME, MANIFEST_VERSION,
+    ManifestArtifact, ManifestIssue, ManifestVerificationReport, OutputManifest, REPORT_FILE_NAME,
+    build_output_manifest, dynobox_generator_version, read_output_manifest, serialize_manifest,
+    verify_output_manifest, write_output_manifest, write_output_manifest_for_dir,
+};
 pub use pipeline::{
     ApplyRequest, RepackRequest, ResignConfig, ResignRequest, UnpackRequest,
     default_output_name_for_apply, default_output_name_for_resign, default_output_name_for_unpack,

@@ -278,6 +278,11 @@ const VERIFICATION_STATUS_PENDING: &str =
     "<p class='status pending' data-report-verification>Pending verification</p>";
 const VERIFICATION_STATUS_VERIFIED_PREFIX: &str =
     "<p class='status' data-report-verification data-verified-at='";
+const OUTPUT_INTEGRITY_SECTION: &str = r#"<section id='output-integrity' data-integrity-schema='dynobox.output_manifest' data-hash-algorithm='sha-256'>
+<div class='section-heading'><h2>Output integrity</h2></div>
+<p class='section-note'>A successful pipeline seals every final output file, including this report, in <code>dynobox-manifest.json</code>. Run <code>dynobox verify --input &lt;output&gt;</code> to detect modified, missing, or unexpected artifacts.</p>
+</section>
+"#;
 
 /// Mark an existing pipeline report as verified after every output mutation
 /// and the final AVB/XML/super verification have completed. Missing reports
@@ -305,6 +310,7 @@ pub(crate) fn finalize_verified_report(path: &Path) -> Result<bool> {
         esc(&verified_at)
     );
     let finalized = html.replacen(VERIFICATION_STATUS_PENDING, &verified, 1);
+    let finalized = finalized.replacen("</main>", &format!("{OUTPUT_INTEGRITY_SECTION}</main>"), 1);
     std::fs::write(path, finalized)
         .with_context(|| format!("Failed to finalize pipeline report at {}", path.display()))?;
     Ok(true)
@@ -552,7 +558,7 @@ fn esc(input: &str) -> String {
 /// Best-effort ISO-8601 UTC timestamp without depending on `chrono` /
 /// `time`. Falls back to a Unix epoch seconds string if SystemTime
 /// dips below UNIX_EPOCH (e.g. clock-skewed embedded test rigs).
-fn now_iso8601() -> String {
+pub(crate) fn now_iso8601() -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -707,6 +713,8 @@ mod tests {
         assert!(verified.contains(">Verified</p>"));
         assert!(verified.contains("data-verified-at='"));
         assert!(!verified.contains("Pending verification"));
+        assert!(verified.contains("id='output-integrity'"));
+        assert!(verified.contains("dynobox-manifest.json"));
 
         assert!(finalize_verified_report(&path).unwrap());
         assert_eq!(verified, std::fs::read_to_string(&path).unwrap());

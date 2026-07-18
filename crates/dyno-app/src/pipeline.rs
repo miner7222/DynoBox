@@ -281,6 +281,8 @@ trait PipelineOps {
     fn verify_stage(&self, output_dir: &Path, events: &mut dyn EventSink) -> anyhow::Result<()>;
 
     fn finalize_report(&self, output_dir: &Path) -> anyhow::Result<()>;
+
+    fn seal_output(&self, output_dir: &Path, events: &mut dyn EventSink) -> anyhow::Result<()>;
 }
 
 struct RealPipelineOps;
@@ -369,6 +371,28 @@ impl PipelineOps for RealPipelineOps {
         crate::report::finalize_verified_report(&output_dir.join("report.html"))?;
         Ok(())
     }
+
+    fn seal_output(&self, output_dir: &Path, events: &mut dyn EventSink) -> anyhow::Result<()> {
+        message(
+            events,
+            MessageLevel::Info,
+            "Hashing final output for dynobox-manifest.json...".to_string(),
+        );
+        let manifest = crate::integrity::write_output_manifest_for_dir(
+            output_dir,
+            crate::report::now_iso8601(),
+            true,
+        )?;
+        message(
+            events,
+            MessageLevel::Info,
+            format!(
+                "Wrote dynobox-manifest.json with {} SHA-256 artifact digest(s).",
+                manifest.artifacts.len()
+            ),
+        );
+        Ok(())
+    }
 }
 
 fn verify_and_finalize_output<O>(
@@ -380,7 +404,8 @@ where
     O: PipelineOps + ?Sized,
 {
     ops.verify_stage(output_dir, events)?;
-    ops.finalize_report(output_dir)
+    ops.finalize_report(output_dir)?;
+    ops.seal_output(output_dir, events)
 }
 
 fn run_unpack_with_ops<S, O>(request: &UnpackRequest, events: &mut S, ops: &O) -> anyhow::Result<()>
@@ -4145,6 +4170,40 @@ mod tests {
             self.record("finalize_report");
             Ok(())
         }
+
+        fn seal_output(
+            &self,
+            _output_dir: &Path,
+            _events: &mut dyn EventSink,
+        ) -> anyhow::Result<()> {
+            self.record("seal_output");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn real_pipeline_seal_hashes_report_and_final_artifacts() {
+        let temp = tempdir().unwrap();
+        fs::write(temp.path().join("boot.img"), b"boot").unwrap();
+        fs::write(temp.path().join("report.html"), b"<html>verified</html>").unwrap();
+        let mut sink = NoopEventSink;
+
+        RealPipelineOps.seal_output(temp.path(), &mut sink).unwrap();
+
+        let manifest = crate::integrity::read_output_manifest(temp.path()).unwrap();
+        assert_eq!(
+            manifest
+                .artifacts
+                .iter()
+                .map(|artifact| artifact.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["boot.img", "report.html"]
+        );
+        assert!(
+            crate::integrity::verify_output_manifest(temp.path())
+                .unwrap()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -4272,6 +4331,7 @@ mod tests {
                 "apply_stage(force_unpack=false)",
                 "verify_stage",
                 "finalize_report",
+                "seal_output",
             ]
         );
         assert!(output.exists());
@@ -4307,6 +4367,7 @@ mod tests {
                 "resign_stage",
                 "verify_stage",
                 "finalize_report",
+                "seal_output",
             ]
         );
         assert!(output.exists());
@@ -4342,6 +4403,7 @@ mod tests {
                 "repack_pipeline",
                 "verify_stage",
                 "finalize_report",
+                "seal_output",
             ]
         );
         assert!(output.exists());
@@ -4378,6 +4440,7 @@ mod tests {
                 "repack_pipeline",
                 "verify_stage",
                 "finalize_report",
+                "seal_output",
             ]
         );
         assert!(output.exists());
