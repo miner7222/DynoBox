@@ -1,12 +1,11 @@
-//! Deterministic SHA-256 output manifest (phase 1).
+//! Deterministic SHA-256 output manifests.
 //!
 //! After a pipeline finishes writing an output directory, DynoBox records every
 //! regular artifact as a sorted, relative-path inventory with size and SHA-256.
 //! The manifest itself is written atomically as pretty-printed JSON with a
 //! trailing newline so two runs over identical bytes produce identical files.
 //!
-//! Phase 1 covers generation and exact-set verification only. Signature support
-//! (`dynobox-manifest.sig`) is reserved by name for a later phase.
+//! Detached Ed25519 authentication lives in [`crate::integrity_signature`].
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
@@ -19,7 +18,7 @@ use sha2::{Digest, Sha256};
 
 /// Manifest file written into the output directory root.
 pub const MANIFEST_FILE_NAME: &str = "dynobox-manifest.json";
-/// Reserved signature file name (phase 2+; excluded from the inventory).
+/// Detached signature file name; excluded from the inventory it authenticates.
 pub const MANIFEST_SIGNATURE_FILE_NAME: &str = "dynobox-manifest.sig";
 /// Pipeline HTML report; always included when present as a regular file.
 pub const REPORT_FILE_NAME: &str = "report.html";
@@ -37,7 +36,7 @@ const HASH_BUFFER_SIZE: usize = 1024 * 1024;
 pub struct OutputManifest {
     pub schema: String,
     pub version: u32,
-    /// DynoBox package version that produced the manifest.
+    /// DynoBox package version and, when built from Git, exact source revision.
     pub generator: String,
     /// Caller-supplied ISO-8601 generation timestamp.
     pub generated_at: String,
@@ -95,9 +94,13 @@ impl ManifestVerificationReport {
     }
 }
 
-/// DynoBox version string used for the `generator` field.
+/// DynoBox build identity used for the manifest `generator` field and report.
 pub fn dynobox_generator_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    let version = env!("CARGO_PKG_VERSION");
+    match option_env!("DYNOBOX_GIT_REVISION").filter(|revision| !revision.is_empty()) {
+        Some(revision) => format!("{version}+git.{revision}"),
+        None => version.to_string(),
+    }
 }
 
 /// Scan `output_dir`, hash every included regular file, and build a manifest.

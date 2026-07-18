@@ -13,6 +13,17 @@
 #                          lets the binary launch, and a downloader just clears
 #                          the Gatekeeper quarantine once (right-click → Open,
 #                          or `xattr -dr com.apple.quarantine DynoBox.app`).
+#
+# Structural audits (always):
+#   - lipo: universal binary must contain exactly arm64 + x86_64
+#   - otool -L: every linked dylib must be on the system allow-list below
+#   - codesign --verify --strict after signing
+#
+# Runtime smoke (CI workflow, not this script):
+#   - Unpacks the shipped zip and runs Contents/MacOS/dynobox --version on the
+#     native host arch only. The x86_64 slice is NOT executed under Rosetta —
+#     Rosetta may be absent on Apple Silicon CI images. Arch membership is the
+#     structural guarantee for the Intel half of the universal binary.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,6 +65,27 @@ lipo -create "${slices[@]}" -output "$APP/Contents/MacOS/$BIN_NAME"
 chmod +x "$APP/Contents/MacOS/$BIN_NAME"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# 2b. Universal arch membership (structural — does not execute either slice).
+ARCHS="$(lipo -archs "$APP/Contents/MacOS/$BIN_NAME")"
+# Normalize whitespace for a stable compare.
+ARCHS_NORM="$(printf '%s\n' "$ARCHS" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')"
+EXPECTED_ARCHS="arm64 x86_64"
+# Accept either order from lipo.
+case " $ARCHS_NORM " in
+    *" arm64 "*" x86_64 "*|*" x86_64 "*" arm64 "*) ;;
+    *)
+        echo "ERROR: expected universal arches '${EXPECTED_ARCHS}', got '${ARCHS_NORM}'" >&2
+        exit 1
+        ;;
+esac
+# Ensure no unexpected third arch sneaks in.
+ARCH_COUNT="$(printf '%s\n' "$ARCHS_NORM" | wc -w | tr -d ' ')"
+if [ "$ARCH_COUNT" != "2" ]; then
+    echo "ERROR: expected exactly 2 arches, got ${ARCH_COUNT} ('${ARCHS_NORM}')" >&2
+    exit 1
+fi
+echo "Universal arches OK: ${ARCHS_NORM}"
+
 # 3. Info.plist (substitute the version).
 sed "s/__SHORT_VERSION__/$VERSION/g" "$HERE/Info.plist" > "$APP/Contents/Info.plist"
 
@@ -66,7 +98,50 @@ sed "s/__SHORT_VERSION__/$VERSION/g" "$HERE/Info.plist" > "$APP/Contents/Info.pl
 cp "$REPO/README.md" "$APP/Contents/Resources/README.md"
 cp "$REPO/LICENSE"   "$APP/Contents/Resources/LICENSE"
 
-# 5. Sign. Developer ID + hardened runtime when an identity is provided,
+# 5. otool -L allow-list audit (DynoBox-specific), per architecture.
+#    DynoBox is an egui/eframe (glow) + rfd app — no libusb, no Homebrew xz.
+#    Every load command must resolve to a system path. Reject Homebrew,
+#    @rpath, @loader_path, @executable_path, and any other non-system dylib.
+#    Allow-list prefixes (system frameworks + system libs only):
+#      /System/Library/Frameworks/
+#      /System/Library/PrivateFrameworks/
+#      /usr/lib/
+#      /Library/Apple/  (rare Apple-shipped libs)
+#    Audit both arm64 and x86_64 slices of the universal binary. The identity
+#    line (…/dynobox:) is skipped by only scanning dependency lines.
+BIN_PATH="$APP/Contents/MacOS/$BIN_NAME"
+audit_otool_arch() {
+    local arch="$1"
+    local otool_out dep bad
+    echo "otool -arch ${arch} -L allow-list audit for ${BIN_PATH}"
+    otool_out="$(otool -arch "$arch" -L "$BIN_PATH")"
+    printf '%s\n' "$otool_out"
+    bad=""
+    while IFS= read -r dep; do
+        [ -n "$dep" ] || continue
+        case "$dep" in
+            /System/Library/Frameworks/*) continue ;;
+            /System/Library/PrivateFrameworks/*) continue ;;
+            /usr/lib/*) continue ;;
+            /Library/Apple/*) continue ;;
+            *)
+                bad="${bad}${dep}"$'\n'
+                ;;
+        esac
+    done < <(printf '%s\n' "$otool_out" | tail -n +2 | awk '{print $1}')
+    if [ -n "$bad" ]; then
+        echo "ERROR: ${arch} slice links non-system / non-allow-listed dylibs:" >&2
+        printf '%s' "$bad" >&2
+        echo "Allowed prefixes: /System/Library/Frameworks/, /System/Library/PrivateFrameworks/, /usr/lib/, /Library/Apple/" >&2
+        echo "Rejected patterns include Homebrew (/opt/homebrew, /usr/local), @rpath, @loader_path, @executable_path." >&2
+        return 1
+    fi
+    echo "otool -arch ${arch} -L allow-list OK"
+}
+audit_otool_arch arm64
+audit_otool_arch x86_64
+
+# 6. Sign. Developer ID + hardened runtime when an identity is provided,
 #    else ad-hoc — arm64 requires at least an ad-hoc signature to run.
 #    Sign AFTER copying resources so the sealed tree includes them.
 ENTITLEMENTS="$HERE/DynoBox.entitlements"
@@ -78,7 +153,7 @@ else
 fi
 codesign --verify --strict --verbose=2 "$APP"
 
-# 6. Package as .zip for the Release. Prefer ditto (preserves resource forks /
+# 7. Package as .zip for the Release. Prefer ditto (preserves resource forks /
 #    extended attrs on macOS); fall back to zip -ry. Zip root is DynoBox.app.
 rm -f "$ZIP"
 if command -v ditto >/dev/null 2>&1; then
@@ -93,3 +168,5 @@ fi
 echo "Built $APP [$(lipo -archs "$APP/Contents/MacOS/$BIN_NAME")]"
 echo "Packaged $ZIP  (version $VERSION)"
 echo "Docs: $APP/Contents/Resources/{README.md,LICENSE}"
+echo "Audited: universal arches + otool -L system allow-list + codesign --verify"
+echo "Not executed here: x86_64 under Rosetta (structural arch check only; CI runs --version on the native host slice)."

@@ -278,11 +278,16 @@ const VERIFICATION_STATUS_PENDING: &str =
     "<p class='status pending' data-report-verification>Pending verification</p>";
 const VERIFICATION_STATUS_VERIFIED_PREFIX: &str =
     "<p class='status' data-report-verification data-verified-at='";
-const OUTPUT_INTEGRITY_SECTION: &str = r#"<section id='output-integrity' data-integrity-schema='dynobox.output_manifest' data-hash-algorithm='sha-256'>
+fn output_integrity_section() -> String {
+    let generator = esc(&crate::integrity::dynobox_generator_version());
+    format!(
+        r#"<section id='output-integrity' data-integrity-schema='dynobox.output_manifest' data-hash-algorithm='sha-256' data-generator='{generator}'>
 <div class='section-heading'><h2>Output integrity</h2></div>
-<p class='section-note'>A successful pipeline seals every final output file, including this report, in <code>dynobox-manifest.json</code>. When a dedicated integrity key is configured, <code>dynobox-manifest.sig</code> authenticates those exact manifest bytes. Run <code>dynobox verify --input &lt;output&gt;</code> to detect modified, missing, or unexpected artifacts.</p>
+<p class='section-note'>Produced by <code>DynoBox {generator}</code>. A successful pipeline seals every final output file, including this report, in <code>dynobox-manifest.json</code>. When a dedicated integrity key is configured, <code>dynobox-manifest.sig</code> authenticates those exact manifest bytes. Run <code>dynobox verify --input &lt;output&gt;</code> to detect modified, missing, or unexpected artifacts.</p>
 </section>
-"#;
+"#
+    )
+}
 
 /// Mark an existing pipeline report as verified after every output mutation
 /// and the final AVB/XML/super verification have completed. Missing reports
@@ -310,7 +315,11 @@ pub(crate) fn finalize_verified_report(path: &Path) -> Result<bool> {
         esc(&verified_at)
     );
     let finalized = html.replacen(VERIFICATION_STATUS_PENDING, &verified, 1);
-    let finalized = finalized.replacen("</main>", &format!("{OUTPUT_INTEGRITY_SECTION}</main>"), 1);
+    let finalized = finalized.replacen(
+        "</main>",
+        &format!("{}</main>", output_integrity_section()),
+        1,
+    );
     std::fs::write(path, finalized)
         .with_context(|| format!("Failed to finalize pipeline report at {}", path.display()))?;
     Ok(true)
@@ -715,6 +724,9 @@ mod tests {
         assert!(!verified.contains("Pending verification"));
         assert!(verified.contains("id='output-integrity'"));
         assert!(verified.contains("dynobox-manifest.json"));
+        let generator = crate::integrity::dynobox_generator_version();
+        assert!(verified.contains(&format!("data-generator='{generator}'")));
+        assert!(verified.contains(&format!("DynoBox {generator}")));
 
         assert!(finalize_verified_report(&path).unwrap());
         assert_eq!(verified, std::fs::read_to_string(&path).unwrap());

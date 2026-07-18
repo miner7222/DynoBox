@@ -63,7 +63,7 @@ dynobox apply `
 - `--complete` copies all remaining input files to the output so it mirrors the original firmware structure.
 - Intermediate stage folders are temporary and auto-cleaned. Final output directory follows last stage unless `--output` is set.
 - `apply` runs a preflight scan before patching and a postflight verification pass after output is written.
-- After final AVB/XML/super verification, every successful output pipeline writes `dynobox-manifest.json` with the size and SHA-256 of every final artifact, including `report.html` when present.
+- After final AVB/XML/super verification, every successful output pipeline writes `dynobox-manifest.json` with the size and SHA-256 of every final artifact, including `report.html` when present. Builds made from a Git checkout record the exact source revision (and a `dirty` marker for uncommitted sources) in both the manifest and report.
 - `--integrity-key` adds a detached `dynobox-manifest.sig` Ed25519 signature. Use a dedicated manifest-signing key rather than the Android AVB key; publish or pin the generated public key separately from the firmware output.
 - All pipeline commands support `--progress-format text|jsonl` for machine-readable progress.
 - `verify` checks the manifest automatically when present, reports modified/missing/unexpected files separately from firmware semantic checks, and distinguishes unsigned, valid-untrusted, and trusted signatures. Supplying `--trusted-integrity-key` makes an unsigned or differently signed manifest a verification failure. Older outputs without a manifest remain supported and are marked `NOT CHECKED` for artifact integrity.
@@ -92,15 +92,25 @@ cargo deny check             # advisory / license / source policy (deny.toml)
 
 ### Install from a release
 
-GitHub Releases (tag `v*`) publish self-contained archives after fmt, clippy
-(`-D warnings`), workspace tests, and `cargo deny` all pass. Each archive
-includes `README.md`, `LICENSE`, and a matching `.sha256` checksum file:
+GitHub Releases (tag `v*`) publish self-contained archives after the tag is
+matched to the Cargo workspace version and fmt, clippy (`-D warnings`),
+workspace tests, and `cargo deny` all pass. Each packaged binary is unpacked
+and smoke-tested on its native runner before upload. A manual
+`workflow_dispatch` performs the same packaging checks without creating a
+release. Each archive includes `README.md`, `LICENSE`, and a matching `.sha256`
+checksum file:
 
 | Platform | Artifact |
 | --- | --- |
 | Windows x86_64 / arm64 | `DynoBox-windows_<arch>-vX.Y.Z.zip` → `dynobox.exe` (+ `README.md`, `LICENSE`) |
 | Linux x86_64 / arm64 | `DynoBox-linux_<arch>-vX.Y.Z.tar.gz` → `dynobox` (mode preserved; + `README.md`, `LICENSE`) |
 | macOS universal | `DynoBox-macos_universal-vX.Y.Z.zip` → `DynoBox.app` (`Contents/MacOS/dynobox`; `README.md` + `LICENSE` in `Contents/Resources/`) |
+
+Tag releases also include a combined `SHA256SUMS` file and GitHub build
+provenance covering all five platform archives. Check the downloaded files
+with `sha256sum --check SHA256SUMS`; when the GitHub CLI is available, verify
+provenance with
+`gh attestation verify <archive> --repo miner7222/DynoBox`.
 
 On macOS, open the app once via right-click → Open (or clear quarantine with
 `xattr -dr com.apple.quarantine DynoBox.app`) if Gatekeeper blocks an ad-hoc

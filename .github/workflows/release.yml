@@ -1,11 +1,15 @@
 name: Release
 
+# Tag pushes (`v*`) run the full pipeline and publish a draft GitHub Release.
+# `workflow_dispatch` builds and uploads the same platform archives (packaging
+# dry-run) but skips the publish job — no GitHub Release is created.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
-# Least privilege at the top level; only the publish job needs write.
+# Least privilege at the top level; only the tag-only publish job elevates.
 permissions:
   contents: read
 
@@ -15,6 +19,37 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  # On `v*` tags, refuse to build if the tag (minus leading `v`) does not equal
+  # the workspace package version in Cargo.toml. Non-tag dispatch runs only
+  # report the workspace version and continue.
+  validate-version:
+    name: validate version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Match tag to Cargo.toml version
+        run: |
+          set -euo pipefail
+          version="$(sed -n -E 's/^version = "([^"]+)".*/\1/p' Cargo.toml | head -1)"
+          if [[ -z "${version}" ]]; then
+            echo "could not read version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "workspace version: ${version}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [[ "${tag}" != "${version}" ]]; then
+              echo "ERROR: tag '${GITHUB_REF_NAME}' does not match Cargo.toml version '${version}' (expected 'v${version}')" >&2
+              exit 1
+            fi
+            echo "tag ${GITHUB_REF_NAME} matches Cargo.toml version ${version}"
+          else
+            echo "non-tag run (ref=${GITHUB_REF_NAME}); skipping tag/version equality check"
+          fi
+
   fmt-clippy:
     name: fmt + clippy
     runs-on: ubuntu-latest
@@ -117,7 +152,7 @@ jobs:
 
   build-windows:
     name: build windows_${{ matrix.arch }}
-    needs: [test]
+    needs: [test, validate-version]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -140,6 +175,20 @@ jobs:
         with:
           key: release-win-${{ matrix.arch }}
 
+      - name: Resolve release tag or commit
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${GITHUB_SHA:0:7}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          version="$(sed -n -E 's/^version = "([^"]+)".*/\1/p' Cargo.toml | head -1)"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
       - name: Build release binary
         # Single dual-mode binary: `dynobox-gui` runs the egui front-end
         # with no args and dispatches into `dynobox_cli::cli_main` when
@@ -152,7 +201,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $tag = $env:GITHUB_REF_NAME
+          $tag = "${{ steps.meta.outputs.tag }}"
           $stageBasename = "DynoBox-windows_${{ matrix.arch }}-$tag"
           $stageDir = "stage/$stageBasename"
           New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
@@ -168,10 +217,30 @@ jobs:
           Set-Content -NoNewline -Path "$zipName.sha256" -Value "$hash  $zipName`n"
           "zip=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Smoke-test packaged binary --version
+        # Unpack the exact archive we are about to ship and run the renamed
+        # dual-mode binary on this native runner (x86_64 host or arm64 host).
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zipName = "${{ steps.stage.outputs.zip }}"
+          $version = "${{ steps.meta.outputs.version }}"
+          $smoke = "smoke-windows_${{ matrix.arch }}"
+          if (Test-Path $smoke) { Remove-Item $smoke -Recurse -Force }
+          Expand-Archive -Path $zipName -DestinationPath $smoke
+          $exe = Get-ChildItem -Path $smoke -Recurse -Filter dynobox.exe |
+            Select-Object -First 1
+          if (-not $exe) { throw "dynobox.exe not found inside $zipName" }
+          $out = & $exe.FullName --version
+          Write-Host "version output: $out"
+          if ("$out" -notmatch [regex]::Escape($version)) {
+            throw "expected workspace version '$version' in --version output, got: $out"
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: windows_${{ matrix.arch }}-${{ github.ref_name }}
+          name: windows_${{ matrix.arch }}-${{ steps.meta.outputs.tag }}
           path: |
             ${{ steps.stage.outputs.zip }}
             ${{ steps.stage.outputs.zip }}.sha256
@@ -179,7 +248,7 @@ jobs:
 
   build-linux:
     name: build linux_${{ matrix.arch }}
-    needs: [test]
+    needs: [test, validate-version]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
@@ -216,6 +285,19 @@ jobs:
             libwayland-dev \
             libssl-dev
 
+      - name: Resolve release tag or commit
+        id: meta
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${GITHUB_SHA:0:7}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          version="$(sed -n -E 's/^version = "([^"]+)".*/\1/p' Cargo.toml | head -1)"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
       - name: Build release binary
         run: cargo build --release --locked -p dynobox-gui
 
@@ -225,7 +307,7 @@ jobs:
         # erases it, leaving users to `chmod +x` after extract).
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${{ steps.meta.outputs.tag }}"
           stage_basename="DynoBox-linux_${{ matrix.arch }}-${tag}"
           stage_dir="stage/${stage_basename}"
           mkdir -p "${stage_dir}"
@@ -243,10 +325,30 @@ jobs:
           sha256sum "${tar_name}" | awk '{print $1"  "$2}' > "${tar_name}.sha256"
           echo "tarball=${tar_name}" >> "${GITHUB_OUTPUT}"
 
+      - name: Smoke-test packaged binary --version
+        # Unpack the exact tarball we ship and run on this native arch runner.
+        run: |
+          set -euo pipefail
+          tar_name="${{ steps.stage.outputs.tarball }}"
+          version="${{ steps.meta.outputs.version }}"
+          smoke="smoke-linux_${{ matrix.arch }}"
+          rm -rf "${smoke}"
+          mkdir -p "${smoke}"
+          tar -xzf "${tar_name}" -C "${smoke}"
+          bin="$(find "${smoke}" -type f -name dynobox | head -1)"
+          [[ -n "${bin}" ]] || { echo "dynobox not found inside ${tar_name}" >&2; exit 1; }
+          chmod +x "${bin}"
+          out="$("${bin}" --version)"
+          echo "version output: ${out}"
+          echo "${out}" | grep -F "${version}" >/dev/null || {
+            echo "expected workspace version '${version}' in --version output, got: ${out}" >&2
+            exit 1
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: linux_${{ matrix.arch }}-${{ github.ref_name }}
+          name: linux_${{ matrix.arch }}-${{ steps.meta.outputs.tag }}
           path: |
             ${{ steps.stage.outputs.tarball }}
             ${{ steps.stage.outputs.tarball }}.sha256
@@ -254,8 +356,11 @@ jobs:
 
   build-macos:
     name: build macos_universal
-    needs: [test]
+    needs: [test, validate-version]
     # Single Apple Silicon runner builds both slices and lipo's a universal app.
+    # Structural arch membership (arm64 + x86_64) is enforced in make-app.sh.
+    # The post-package --version smoke runs the native arm64 slice only — we do
+    # not execute the x86_64 slice under Rosetta (may be absent on CI images).
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -272,9 +377,23 @@ jobs:
         with:
           key: release-macos-universal
 
+      - name: Resolve release tag or commit
+        id: meta
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${GITHUB_SHA:0:7}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          version="$(sed -n -E 's/^version = "([^"]+)".*/\1/p' Cargo.toml | head -1)"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
       - name: Build universal DynoBox.app + zip
         # make-app.sh builds both Mac arches, lipo's the universal binary,
-        # assembles + ad-hoc-signs DynoBox.app, and packages it as a .zip.
+        # allow-lists otool -L system dylibs, assembles + ad-hoc-signs
+        # DynoBox.app, and packages it as a .zip.
         # No Developer ID here — set MACOS_SIGN_IDENTITY to enable hardened
         # runtime signing when secrets are available.
         run: bash ./misc/macos/make-app.sh
@@ -283,16 +402,39 @@ jobs:
         id: stage
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${{ steps.meta.outputs.tag }}"
           zip_name="DynoBox-macos_universal-${tag}.zip"
           mv "dist/macos/DynoBox-macos-universal.zip" "${zip_name}"
           shasum -a 256 "${zip_name}" | awk '{print $1"  "$2}' > "${zip_name}.sha256"
           echo "zip=${zip_name}" >> "${GITHUB_OUTPUT}"
 
+      - name: Smoke-test packaged binary --version
+        # Unpack the shipped zip. Execution covers the native arm64 slice of the
+        # universal binary only; x86_64 is structurally verified via lipo in
+        # make-app.sh, not executed (Rosetta may be unavailable).
+        run: |
+          set -euo pipefail
+          zip_name="${{ steps.stage.outputs.zip }}"
+          version="${{ steps.meta.outputs.version }}"
+          smoke="smoke-macos_universal"
+          rm -rf "${smoke}"
+          mkdir -p "${smoke}"
+          unzip -q "${zip_name}" -d "${smoke}"
+          bin="$(find "${smoke}" -type f -path '*/Contents/MacOS/dynobox' | head -1)"
+          [[ -n "${bin}" ]] || { echo "Contents/MacOS/dynobox not found inside ${zip_name}" >&2; exit 1; }
+          chmod +x "${bin}"
+          out="$("${bin}" --version)"
+          echo "version output: ${out}"
+          echo "${out}" | grep -F "${version}" >/dev/null || {
+            echo "expected workspace version '${version}' in --version output, got: ${out}" >&2
+            exit 1
+          }
+          echo "Note: --version executed the native host slice only; universal arch membership is audited by make-app.sh (lipo -archs)."
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
-          name: macos_universal-${{ github.ref_name }}
+          name: macos_universal-${{ steps.meta.outputs.tag }}
           path: |
             ${{ steps.stage.outputs.zip }}
             ${{ steps.stage.outputs.zip }}.sha256
@@ -300,12 +442,17 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [fmt-clippy, cargo-deny, test, build-windows, build-linux, build-macos]
+    needs: [fmt-clippy, cargo-deny, test, validate-version, build-windows, build-linux, build-macos]
+    # Tag-only: workflow_dispatch packages artifacts but never publishes.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     permissions:
       contents: write
+      # actions/attest@v4 (SLSA build provenance): OIDC mint + persist + storage record.
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
@@ -314,6 +461,64 @@ jobs:
 
       - name: List artifacts
         run: find artifacts -type f | sort
+
+      - name: Generate combined SHA256SUMS
+        id: sums
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          expected=5
+
+          # First verify the per-platform checksums created on the native build
+          # runners. This catches archive corruption before release and before
+          # the release job generates fresh combined checksums or provenance.
+          verified=0
+          while IFS= read -r -d '' sidecar; do
+            (
+              cd "$(dirname "${sidecar}")"
+              sha256sum --check "$(basename "${sidecar}")"
+            )
+            ((verified += 1))
+          done < <(find artifacts -type f -name 'DynoBox-*.sha256' -print0 | sort -z)
+          if [[ "${verified}" != "${expected}" ]]; then
+            echo "ERROR: expected ${expected} platform checksum sidecars, verified ${verified}" >&2
+            exit 1
+          fi
+
+          # Collect only the platform archives (not per-archive .sha256 sidecars).
+          while IFS= read -r -d '' f; do
+            cp "${f}" "dist/$(basename "${f}")"
+          done < <(find artifacts -type f \( -name 'DynoBox-*.zip' -o -name 'DynoBox-*.tar.gz' \) ! -name '*.sha256' -print0 | sort -z)
+
+          shopt -s nullglob
+          archives=(dist/DynoBox-*.zip dist/DynoBox-*.tar.gz)
+          if (( ${#archives[@]} == 0 )); then
+            echo "no platform archives found under artifacts/" >&2
+            exit 1
+          fi
+
+          # sha256sum format ("<hash>  <filename>") is the actions/attest
+          # subject-checksums input format and the standard checksum file layout.
+          : > dist/SHA256SUMS
+          for f in "${archives[@]}"; do
+            (cd dist && sha256sum "$(basename "${f}")") >> dist/SHA256SUMS
+          done
+          sort -k2 -o dist/SHA256SUMS dist/SHA256SUMS
+
+          echo "=== SHA256SUMS ==="
+          cat dist/SHA256SUMS
+          actual="$(wc -l < dist/SHA256SUMS | tr -d ' ')"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "ERROR: expected ${expected} archive lines in SHA256SUMS, got ${actual}" >&2
+            exit 1
+          fi
+          echo "sha256sums=dist/SHA256SUMS" >> "${GITHUB_OUTPUT}"
+
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          # Official checksums input: one SLSA provenance attestation over all archives.
+          subject-checksums: dist/SHA256SUMS
 
       - name: Create draft release
         uses: softprops/action-gh-release@v2
@@ -332,3 +537,4 @@ jobs:
             artifacts/**/DynoBox-linux_arm64-*.tar.gz.sha256
             artifacts/**/DynoBox-macos_universal-*.zip
             artifacts/**/DynoBox-macos_universal-*.zip.sha256
+            dist/SHA256SUMS
