@@ -51,7 +51,9 @@ slices=()
 for t in "${TARGETS[@]}"; do
     if [ "${SKIP_BUILD:-0}" != "1" ]; then
         rustup target add "$t" >/dev/null 2>&1 || true
-        cargo build --release --locked --target "$t" -p dynobox-gui
+        # Avoid discovering Homebrew's dynamic liblzma on macOS runners. A
+        # bundled static copy keeps both universal slices self-contained.
+        LZMA_API_STATIC=1 cargo build --release --locked --target "$t" -p dynobox-gui
     fi
     slice="$REPO/target/$t/release/$CARGO_BIN_NAME"
     [ -x "$slice" ] || { echo "missing slice: $slice (run without SKIP_BUILD?)" >&2; exit 1; }
