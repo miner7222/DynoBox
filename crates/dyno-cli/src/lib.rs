@@ -108,6 +108,12 @@ enum Commands {
         #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_system_spl, requires = "resign")]
         system_spl: Option<String>,
 
+        /// Per-feature toggle for Lenovo's LGSI feature flags inside
+        /// system.img. Bare `--fuck-lgsi` runs the interactive flow; pass a
+        /// JSON path to run non-interactively. Requires --resign.
+        #[arg(long, value_name = "JSON_PATH", num_args = 0..=1, default_missing_value = "", requires = "resign")]
+        fuck_lgsi: Option<String>,
+
         /// Scan unpacked super partitions and write blobs.txt, then hide the
         /// listed files/folders from the ext4 images (no mount) and re-sign.
         /// Bare `--debloat` pauses for you to edit `<out>/debloat.txt`; pass a
@@ -824,6 +830,7 @@ where
             boot_spl,
             vendor_spl,
             system_spl,
+            fuck_lgsi,
             debloat,
             plus,
             complete,
@@ -846,7 +853,7 @@ where
                     boot_spl,
                     vendor_spl,
                     system_spl,
-                    None::<FuckLgsiMode>,
+                    resolve_fuck_lgsi_mode(fuck_lgsi),
                     resolve_debloat_mode(debloat),
                     plus,
                 ),
@@ -1118,6 +1125,36 @@ mod tests {
                 trusted_integrity_key,
                 ..
             } if trusted_integrity_key.len() == 2
+        ));
+    }
+
+    #[test]
+    fn cli_parses_unpack_resign_mutation_options() {
+        let cli = Cli::try_parse_from([
+            "dynobox",
+            "unpack",
+            "--input",
+            "input",
+            "--resign",
+            "--key",
+            "testkey_rsa4096",
+            "--fuck-lgsi=lgsi_features.json",
+            "--debloat=debloat.txt",
+            "--plus=one.dbp",
+            "--plus=two.dbp",
+        ])
+        .expect("unpack should accept resign mutation options");
+
+        assert!(matches!(
+            cli.command,
+            Commands::Unpack {
+                fuck_lgsi: Some(fuck_lgsi),
+                debloat: Some(debloat),
+                plus,
+                ..
+            } if fuck_lgsi == "lgsi_features.json"
+                && debloat == "debloat.txt"
+                && plus == [PathBuf::from("one.dbp"), PathBuf::from("two.dbp")]
         ));
     }
 
