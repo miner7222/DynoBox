@@ -1415,6 +1415,20 @@ where
                         },
                     )?;
                     split_new_image_to_fragments(&temp_new, &split_fragments, out_dir)?;
+                    if let Some(rebuilt) = regenerate_whole_partition_image(
+                        &temp_new,
+                        &split_fragments,
+                        &p_info.name,
+                        p_info.new_size,
+                        input,
+                        out_dir,
+                    )? {
+                        message(
+                            events,
+                            MessageLevel::Info,
+                            format!("Split source {}: rebuilt {}.", p_info.name, rebuilt),
+                        );
+                    }
                     let _ = std::fs::remove_file(&recon_src);
                     let _ = std::fs::remove_file(&temp_new);
                     continue;
@@ -1755,6 +1769,114 @@ fn reconstruct_split_source(
     }
     out.flush()?;
     Ok(())
+}
+
+/// Whole-partition filenames that can ship next to a split partition's raw
+/// fragments. Mirrors the candidate set `collect_split_fragment_filenames`
+/// folds into its skip list, so apply rebuilds exactly the files the resign
+/// and verify stages deliberately ignore.
+fn whole_partition_candidates(partition_name: &str) -> Vec<String> {
+    let base = dynobox_core::ab_slot::base_name(partition_name);
+    if base.is_empty() {
+        return Vec::new();
+    }
+    vec![
+        format!("{base}.img"),
+        format!("{base}.bin"),
+        format!("{base}_a.img"),
+        format!("{base}_b.img"),
+    ]
+}
+
+/// Rewrite the combined image that ships alongside a split partition's raw
+/// fragments.
+///
+/// Apply materializes a split source as fragments only, so the vendor's
+/// whole-partition file was never rebuilt and `--complete` carried the
+/// pre-OTA copy into the output, where it misrepresents the partition to
+/// anything reading it instead of the fragments. The fragment layout is the
+/// mapped-region set of the vendor sparse image, so the gaps between
+/// fragments are exactly its DONT_CARE ranges.
+///
+/// Returns the rewritten file name, or `None` when the input ships no such
+/// combined image.
+fn regenerate_whole_partition_image(
+    new_image: &Path,
+    fragments: &[SplitFragment],
+    partition_name: &str,
+    total_size: u64,
+    input: &Path,
+    out_dir: &Path,
+) -> anyhow::Result<Option<String>> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Some(file_name) = whole_partition_candidates(partition_name)
+        .into_iter()
+        .find(|name| input.join(name).is_file())
+    else {
+        return Ok(None);
+    };
+
+    let src_path = input.join(&file_name);
+    let (is_sparse, block_size) = {
+        let handler = avbtool_rs::sparse::ImageHandler::open(&src_path, true)
+            .map_err(|e| anyhow::anyhow!("reading {}: {e}", src_path.display()))?;
+        (handler.is_sparse(), handler.block_size())
+    };
+
+    std::fs::create_dir_all(out_dir)?;
+    let dst_path = out_dir.join(&file_name);
+    if !is_sparse {
+        std::fs::copy(new_image, &dst_path)
+            .with_context(|| format!("rewriting {}", dst_path.display()))?;
+        return Ok(Some(file_name));
+    }
+
+    let mut ordered: Vec<&SplitFragment> = fragments.iter().collect();
+    ordered.sort_by_key(|frag| frag.offset);
+
+    let mut image =
+        avbtool_rs::sparse::SparseImage::new(block_size).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut src = std::fs::File::open(new_image)
+        .with_context(|| format!("opening new image {}", new_image.display()))?;
+    let mut cursor = 0u64;
+    for frag in ordered {
+        if frag.offset < cursor {
+            anyhow::bail!(
+                "Split fragments for `{partition_name}` overlap at offset {}.",
+                frag.offset
+            );
+        }
+        if frag.offset > cursor {
+            image
+                .append_dont_care(frag.offset - cursor)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+        let size = usize::try_from(frag.size).map_err(|_| {
+            anyhow::anyhow!(
+                "Split fragment {} exceeds addressable memory.",
+                frag.filename
+            )
+        })?;
+        let mut data = vec![0u8; size];
+        src.seek(SeekFrom::Start(frag.offset))?;
+        src.read_exact(&mut data)?;
+        image
+            .append_raw(&data, true)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        cursor = frag.offset.saturating_add(frag.size);
+    }
+    if cursor < total_size {
+        image
+            .append_dont_care(total_size - cursor)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+
+    let out = std::fs::File::create(&dst_path)
+        .with_context(|| format!("creating {}", dst_path.display()))?;
+    avbtool_rs::sparse::write_sparse_image(&image, std::io::BufWriter::new(out))
+        .map_err(|e| anyhow::anyhow!("writing {}: {e}", dst_path.display()))?;
+    Ok(Some(file_name))
 }
 
 fn split_new_image_to_fragments(
@@ -4532,6 +4654,7 @@ where
 
 #[cfg(test)]
 mod tests {
+
     use std::cell::RefCell;
     use std::fs;
 
@@ -4539,6 +4662,168 @@ mod tests {
 
     use super::*;
     use crate::events::NoopEventSink;
+
+    fn write_sparse_fixture(path: &std::path::Path, block: u32, ranges: &[(u64, u64)], total: u64) {
+        let mut image = avbtool_rs::sparse::SparseImage::new(block).unwrap();
+        let mut cursor = 0u64;
+        for &(offset, size) in ranges {
+            if offset > cursor {
+                image.append_dont_care(offset - cursor).unwrap();
+            }
+            image
+                .append_raw(&vec![0x11u8; size as usize], true)
+                .unwrap();
+            cursor = offset + size;
+        }
+        if cursor < total {
+            image.append_dont_care(total - cursor).unwrap();
+        }
+        let out = std::fs::File::create(path).unwrap();
+        avbtool_rs::sparse::write_sparse_image(&image, out).unwrap();
+    }
+
+    /// The TB324ZC `dataext` shape: a sparse whole-partition image ships next
+    /// to the raw fragments the flashing XML actually references. Apply must
+    /// rebuild it from the post-OTA image instead of letting `--complete`
+    /// carry the pre-OTA copy through.
+    #[test]
+    fn rebuilds_sparse_whole_partition_image_from_fragments() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let block = 4096u64;
+        let total = 64 * block;
+        let ranges = [
+            (0u64, 2 * block),
+            (10 * block, 3 * block),
+            (60 * block, block),
+        ];
+        write_sparse_fixture(&input.join("dataext.img"), block as u32, &ranges, total);
+
+        // Post-OTA dense image: every byte distinct from the stale fixture.
+        let new_image = dir.path().join("dataext_new.img");
+        let dense: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&new_image, &dense).unwrap();
+
+        let fragments: Vec<SplitFragment> = ranges
+            .iter()
+            .enumerate()
+            .map(|(i, &(offset, size))| SplitFragment {
+                filename: format!("dataext_{}.img", i + 1),
+                offset,
+                size,
+            })
+            .collect();
+
+        let rebuilt = regenerate_whole_partition_image(
+            &new_image, &fragments, "dataext", total, &input, &out_dir,
+        )
+        .unwrap();
+        assert_eq!(rebuilt.as_deref(), Some("dataext.img"));
+
+        let bytes = std::fs::read(out_dir.join("dataext.img")).unwrap();
+        let image = avbtool_rs::sparse::SparseImage::parse(&bytes).unwrap();
+        assert_eq!(
+            image.image_size(),
+            total,
+            "logical size must cover the partition"
+        );
+
+        // Mapped regions must be exactly the fragment layout, so the rebuilt
+        // file stays as small as the vendor's rather than a dense 512 MB blob.
+        let mapped: Vec<(u64, u64)> = {
+            let mut cursor = 0u64;
+            let mut acc = Vec::new();
+            for chunk in image.chunks() {
+                match chunk {
+                    avbtool_rs::sparse::SparseChunk::Raw { output_size, .. } => {
+                        acc.push((cursor, *output_size));
+                        cursor += output_size;
+                    }
+                    avbtool_rs::sparse::SparseChunk::Fill { output_size, .. }
+                    | avbtool_rs::sparse::SparseChunk::DontCare { output_size } => {
+                        cursor += output_size;
+                    }
+                    _ => {}
+                }
+            }
+            acc
+        };
+        assert_eq!(
+            mapped,
+            ranges.to_vec(),
+            "raw chunks must match fragment layout"
+        );
+
+        // Mapped bytes must come from the post-OTA image, not the stale input.
+        let restored = image.to_dense_bytes().unwrap();
+        for &(offset, size) in &ranges {
+            let a = offset as usize;
+            let b = (offset + size) as usize;
+            assert_eq!(
+                &restored[a..b],
+                &dense[a..b],
+                "fragment {offset} must be post-OTA data"
+            );
+        }
+    }
+
+    /// A dense whole-partition sibling is rewritten verbatim, and a partition
+    /// that ships no combined image leaves the output untouched.
+    #[test]
+    fn rebuilds_dense_sibling_and_skips_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("input");
+        let out_dir = dir.path().join("out");
+        std::fs::create_dir_all(&input).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+
+        let block = 4096u64;
+        let total = 4 * block;
+        let dense: Vec<u8> = (0..total).map(|i| (i % 97) as u8).collect();
+        let new_image = dir.path().join("vm-bootsys_new.img");
+        std::fs::write(&new_image, &dense).unwrap();
+        std::fs::write(input.join("vm-bootsys.img"), vec![0u8; total as usize]).unwrap();
+
+        let fragments = vec![SplitFragment {
+            filename: "vm-bootsys_1.img".to_string(),
+            offset: 0,
+            size: total,
+        }];
+
+        let rebuilt = regenerate_whole_partition_image(
+            &new_image,
+            &fragments,
+            "vm-bootsys",
+            total,
+            &input,
+            &out_dir,
+        )
+        .unwrap();
+        assert_eq!(rebuilt.as_deref(), Some("vm-bootsys.img"));
+        assert_eq!(
+            std::fs::read(out_dir.join("vm-bootsys.img")).unwrap(),
+            dense
+        );
+
+        let absent = regenerate_whole_partition_image(
+            &new_image,
+            &fragments,
+            "nosibling",
+            total,
+            &input,
+            &out_dir,
+        )
+        .unwrap();
+        assert!(
+            absent.is_none(),
+            "no combined image means nothing to rebuild"
+        );
+        assert!(!out_dir.join("nosibling.img").exists());
+    }
 
     #[derive(Default)]
     struct TestPipelineOps {
