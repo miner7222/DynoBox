@@ -51,6 +51,11 @@ where
     S: EventSink + ?Sized,
 {
     // 1. blobs.txt — same scan as `--debloat`, but the catalog is kept.
+    // Standalone partition images are the final pipeline state; super
+    // container chunks coexisting with them are stale input copies (e.g.
+    // carried in by `--complete`) and must not be inventoried. Only when
+    // no standalone image scans (e.g. a repack-only output) do the chunks
+    // themselves become the final state and get scanned as a fallback.
     let mut blob_lines: Vec<String> = Vec::new();
     let mut scanned = 0usize;
     let entries = std::fs::read_dir(source_dir)
@@ -61,21 +66,15 @@ where
         .filter(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("img"))
         .collect();
     img_paths.sort();
-    for path in &img_paths {
-        let stem = match path.file_stem().and_then(|s| s.to_str()) {
-            Some(s) => s,
-            None => continue,
-        };
-        match crate::debloat::list_partition_paths(path) {
-            Ok(paths) => {
-                scanned += 1;
-                for p in paths {
-                    blob_lines.push(format!("{stem}:{p}"));
-                }
-            }
-            // Not a supported ext4 image (boot/vbmeta/erofs/super chunk): skip.
-            Err(_) => continue,
-        }
+    let (standalone, chunks) = split_super_chunks(&img_paths);
+    scan_images(&standalone, &mut blob_lines, &mut scanned);
+    if scanned == 0 && !chunks.is_empty() {
+        message(
+            events,
+            MessageLevel::Info,
+            "--info: no standalone partition images; scanning super chunks.".to_string(),
+        );
+        scan_images(&chunks, &mut blob_lines, &mut scanned);
     }
 
     let blob_count = if scanned == 0 {
@@ -114,6 +113,52 @@ where
         features,
         html_name,
     })
+}
+
+/// Scan `paths` (already sorted) for ext4 partition listings, appending
+/// `stem:/absolute/path` lines to `blob_lines` and counting successes in
+/// `scanned`. Unparseable files (boot/vbmeta/erofs/packed super) are skipped.
+fn scan_images(paths: &[&PathBuf], blob_lines: &mut Vec<String>, scanned: &mut usize) {
+    for path in paths {
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => continue,
+        };
+        match crate::debloat::list_partition_paths(path) {
+            Ok(paths) => {
+                *scanned += 1;
+                for p in paths {
+                    blob_lines.push(format!("{stem}:{p}"));
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+}
+
+/// Split image paths into standalone partition images and super container
+/// chunks (`super.img`, `super_*.img`). See [`dump_info`] for why the chunks
+/// are only a fallback source.
+fn split_super_chunks(img_paths: &[PathBuf]) -> (Vec<&PathBuf>, Vec<&PathBuf>) {
+    let mut standalone = Vec::new();
+    let mut chunks = Vec::new();
+    for path in img_paths {
+        let is_chunk = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(is_super_chunk_file_name);
+        if is_chunk {
+            chunks.push(path);
+        } else {
+            standalone.push(path);
+        }
+    }
+    (standalone, chunks)
+}
+
+fn is_super_chunk_file_name(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    lower == "super.img" || (lower.starts_with("super_") && lower.ends_with(".img"))
 }
 
 fn dump_lgsi_features<S>(
@@ -225,5 +270,43 @@ mod tests {
         assert_eq!(outcome.features, None);
         assert!(!dest.join(INFO_BLOBS_NAME).exists());
         assert!(!dest.join(INFO_FEATURES_NAME).exists());
+    }
+
+    #[test]
+    fn super_chunk_file_names_are_classified_case_insensitively() {
+        for name in ["super.img", "super_1.img", "super_10.img", "SUPER_2.IMG"] {
+            assert!(is_super_chunk_file_name(name), "{name} should be a chunk");
+        }
+        for name in [
+            "system.img",
+            "super.img.bak",
+            "superior.img",
+            "my_super_1.img",
+            "super",
+        ] {
+            assert!(
+                !is_super_chunk_file_name(name),
+                "{name} should not be a chunk"
+            );
+        }
+    }
+
+    #[test]
+    fn split_super_chunks_separates_standalone_images_from_chunks() {
+        let paths = vec![
+            PathBuf::from("system.img"),
+            PathBuf::from("super_2.img"),
+            PathBuf::from("super.img"),
+            PathBuf::from("vendor.img"),
+        ];
+        let (standalone, chunks) = split_super_chunks(&paths);
+        let names = |group: &[&PathBuf]| {
+            group
+                .iter()
+                .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(&standalone), vec!["system.img", "vendor.img"]);
+        assert_eq!(names(&chunks), vec!["super_2.img", "super.img"]);
     }
 }
