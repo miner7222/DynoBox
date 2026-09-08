@@ -58,6 +58,7 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Optional Ed25519 PKCS#8 private key used to sign the final SHA-256 manifest
+        /// (the manifest is only written when repacking)
         #[arg(long, value_name = "PRIVATE_KEY_PEM")]
         integrity_key: Option<PathBuf>,
 
@@ -152,6 +153,7 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Optional Ed25519 PKCS#8 private key used to sign the final SHA-256 manifest
+        /// (the manifest is only written when repacking)
         #[arg(long, value_name = "PRIVATE_KEY_PEM")]
         integrity_key: Option<PathBuf>,
 
@@ -263,6 +265,7 @@ enum Commands {
         output: Option<PathBuf>,
 
         /// Optional Ed25519 PKCS#8 private key used to sign the final SHA-256 manifest
+        /// (the manifest is only written when repacking)
         #[arg(long, value_name = "PRIVATE_KEY_PEM")]
         integrity_key: Option<PathBuf>,
 

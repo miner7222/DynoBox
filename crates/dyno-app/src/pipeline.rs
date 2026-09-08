@@ -451,6 +451,7 @@ fn verify_and_finalize_output<O>(
     resign_performed: bool,
     input_artifacts: &[crate::integrity::ManifestArtifact],
     integrity_key: Option<&Path>,
+    seal_manifest: bool,
     events: &mut dyn EventSink,
 ) -> anyhow::Result<()>
 where
@@ -458,6 +459,19 @@ where
 {
     ops.verify_stage(output_dir, events)?;
     ops.finalize_report(output_dir)?;
+    if !seal_manifest {
+        // `dynobox-manifest.json` is only sealed for repack outputs; without
+        // it a signing key has nothing to sign.
+        if integrity_key.is_some() {
+            message(
+                events,
+                MessageLevel::Warning,
+                "--integrity-key ignored without repack; no dynobox-manifest.json written."
+                    .to_string(),
+            );
+        }
+        return Ok(());
+    }
     ops.seal_output(
         output_dir,
         resign_performed,
@@ -500,7 +514,13 @@ where
         input: request.input.clone(),
         output: request.output.clone(),
     });
-    let input_artifacts = capture_original_input_artifacts(&request.input, events)?;
+    // The manifest inventory is only sealed for repack outputs; skip the
+    // input hashing entirely otherwise.
+    let input_artifacts = if request.repack {
+        capture_original_input_artifacts(&request.input, events)?
+    } else {
+        Vec::new()
+    };
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
     let decrypted_input = auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
@@ -515,6 +535,7 @@ where
             request.resign.is_some(),
             &input_artifacts,
             request.integrity_key.as_deref(),
+            false,
             events,
         );
     }
@@ -583,6 +604,7 @@ where
         request.resign.is_some(),
         &input_artifacts,
         request.integrity_key.as_deref(),
+        request.repack,
         events,
     )
 }
@@ -605,7 +627,11 @@ where
         input: request.input.clone(),
         output: request.output.clone(),
     });
-    let input_artifacts = capture_original_input_artifacts(&request.input, events)?;
+    let input_artifacts = if request.repack {
+        capture_original_input_artifacts(&request.input, events)?
+    } else {
+        Vec::new()
+    };
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
     ops.apply_preflight(&request.ota_zips, temp_root.path(), events)?;
@@ -676,6 +702,7 @@ where
         request.resign.is_some(),
         &input_artifacts,
         request.integrity_key.as_deref(),
+        request.repack,
         events,
     )
 }
@@ -697,7 +724,11 @@ where
         input: request.input.clone(),
         output: request.output.clone(),
     });
-    let input_artifacts = capture_original_input_artifacts(&request.input, events)?;
+    let input_artifacts = if request.repack {
+        capture_original_input_artifacts(&request.input, events)?
+    } else {
+        Vec::new()
+    };
 
     let temp_root = create_pipeline_temp_root(&request.output)?;
     let decrypted_input = auto_decrypt_xml_if_needed(&request.input, temp_root.path(), events)?;
@@ -714,6 +745,7 @@ where
             true,
             &input_artifacts,
             request.integrity_key.as_deref(),
+            false,
             events,
         );
     }
@@ -735,6 +767,7 @@ where
         true,
         &input_artifacts,
         request.integrity_key.as_deref(),
+        true,
         events,
     )
 }
@@ -857,6 +890,7 @@ where
         false,
         &input_artifacts,
         request.integrity_key.as_deref(),
+        true,
         events,
     )
 }
@@ -5183,7 +5217,7 @@ mod tests {
                 output: temp.path().join("unpack-output"),
                 integrity_key: None,
                 resign: None,
-                repack: false,
+                repack: true,
                 complete: false,
                 info: false,
             },
@@ -5205,7 +5239,7 @@ mod tests {
                 ota_zips: vec![temp.path().join("ota.zip")],
                 force_unpack: false,
                 resign: None,
-                repack: false,
+                repack: true,
                 complete: false,
                 info: false,
             },
@@ -5225,7 +5259,7 @@ mod tests {
                 output: temp.path().join("resign-output"),
                 integrity_key: None,
                 config: sample_resign_config(),
-                repack: false,
+                repack: true,
                 info: false,
             },
             &mut NoopEventSink,
@@ -5378,11 +5412,13 @@ mod tests {
                 "apply_stage(force_unpack=false)",
                 "verify_stage",
                 "finalize_report",
-                "seal_output",
             ]
         );
         assert!(output.exists());
-        assert_eq!(ops.seal_resign_flags(), vec![false]);
+        assert!(
+            ops.seal_resign_flags().is_empty(),
+            "no manifest is sealed without repack"
+        );
         assert_no_stage_dirs(temp.path());
     }
 
@@ -5417,11 +5453,13 @@ mod tests {
                 "resign_stage",
                 "verify_stage",
                 "finalize_report",
-                "seal_output",
             ]
         );
         assert!(output.exists());
-        assert_eq!(ops.seal_resign_flags(), vec![true]);
+        assert!(
+            ops.seal_resign_flags().is_empty(),
+            "no manifest is sealed without repack"
+        );
         assert_no_stage_dirs(temp.path());
     }
 
