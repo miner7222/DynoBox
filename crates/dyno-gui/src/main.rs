@@ -540,12 +540,10 @@ impl eframe::App for DynoGui {
 
                     match self.mode {
                         Mode::Apply => self.apply_section(ui),
-                        Mode::Unpack => self.unpack_section(ui),
-                        Mode::Resign | Mode::Repack => {}
+                        Mode::Unpack | Mode::Resign | Mode::Repack => {}
                     }
 
                     if !matches!(self.mode, Mode::Repack) {
-                        ui.separator();
                         self.info_section(ui);
                         ui.separator();
                         self.resign_section(ui);
@@ -568,7 +566,11 @@ impl eframe::App for DynoGui {
                         Mode::Repack => {}
                     }
 
-                    ui.separator();
+                    // In Repack mode the section above is empty, so its
+                    // separator already divides the Run button.
+                    if !matches!(self.mode, Mode::Repack) {
+                        ui.separator();
+                    }
                     self.run_button(ui);
                 });
         });
@@ -763,16 +765,6 @@ impl DynoGui {
             self.ota_zips.insert(target, item);
         }
         ui.separator();
-        // Only the resign toggle lives here — repack / --complete
-        // moved below the resign-options block (rendered by the
-        // top-level update fn) so the visual pipeline reads
-        // top-to-bottom: inputs → resign opts → repack / complete.
-        ui.checkbox(&mut self.do_resign, "resign");
-    }
-
-    fn unpack_section(&mut self, ui: &mut egui::Ui) {
-        // Same layout as `apply_section` minus the OTA-zip list.
-        ui.checkbox(&mut self.do_resign, "resign");
     }
 
     fn info_section(&mut self, ui: &mut egui::Ui) {
@@ -789,6 +781,12 @@ impl DynoGui {
     }
 
     fn resign_section(&mut self, ui: &mut egui::Ui) {
+        // In Apply / Unpack modes resign is opt-in; the toggle lives at
+        // the top of this same section, above the options it enables.
+        // (Resign mode always runs the stage, so it needs no toggle.)
+        if matches!(self.mode, Mode::Apply | Mode::Unpack) {
+            ui.checkbox(&mut self.do_resign, "resign");
+        }
         let active = self.resign_active();
         ui.add_enabled_ui(active, |ui| {
             ui.label(egui::RichText::new("Resign options").strong());
