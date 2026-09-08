@@ -71,6 +71,8 @@ struct FormSnapshot {
     fuck_lgsi_config: Option<PathBuf>,
     debloat: bool,
     debloat_list: Option<PathBuf>,
+    #[serde(default)]
+    info: bool,
     plus_patches: Vec<PathBuf>,
 }
 
@@ -97,6 +99,7 @@ impl FormSnapshot {
             fuck_lgsi_config: gui.fuck_lgsi_config.clone(),
             debloat: gui.debloat,
             debloat_list: gui.debloat_list.clone(),
+            info: gui.info,
             plus_patches: gui.plus_patches.clone(),
         }
     }
@@ -124,6 +127,7 @@ impl FormSnapshot {
         gui.fuck_lgsi_config.clone_from(&self.fuck_lgsi_config);
         gui.debloat = self.debloat;
         gui.debloat_list.clone_from(&self.debloat_list);
+        gui.info = self.info;
         gui.plus_patches.clone_from(&self.plus_patches);
     }
 
@@ -233,6 +237,7 @@ struct DynoGui {
     fuck_lgsi_config: Option<PathBuf>,
     debloat: bool,
     debloat_list: Option<PathBuf>,
+    info: bool,
     plus_patches: Vec<PathBuf>,
 
     // Last spawn result, surfaced inline next to the Run button so
@@ -277,6 +282,7 @@ impl Default for DynoGui {
             fuck_lgsi_config: None,
             debloat: false,
             debloat_list: None,
+            info: false,
             plus_patches: Vec::new(),
             last_status: None,
             history: RunHistory::default(),
@@ -311,6 +317,9 @@ impl DynoGui {
                 if self.do_complete {
                     a.push("--complete".into());
                 }
+                if self.info {
+                    a.push("--info".into());
+                }
                 if self.do_resign {
                     self.push_resign_args(&mut a);
                 }
@@ -330,6 +339,9 @@ impl DynoGui {
                 if self.do_complete {
                     a.push("--complete".into());
                 }
+                if self.info {
+                    a.push("--info".into());
+                }
                 if self.do_resign {
                     self.push_resign_args(&mut a);
                 }
@@ -339,6 +351,9 @@ impl DynoGui {
                 self.push_io_args(&mut a);
                 if self.do_repack {
                     a.push("--repack".into());
+                }
+                if self.info {
+                    a.push("--info".into());
                 }
                 self.push_resign_args(&mut a);
             }
@@ -530,6 +545,9 @@ impl eframe::App for DynoGui {
                     }
 
                     if !matches!(self.mode, Mode::Repack) {
+                        ui.separator();
+                        self.info_section(ui);
+                        ui.separator();
                         self.resign_section(ui);
                     }
 
@@ -543,7 +561,9 @@ impl eframe::App for DynoGui {
                         }
                         Mode::Resign => {
                             ui.separator();
-                            ui.checkbox(&mut self.do_repack, "repack");
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut self.do_repack, "repack");
+                            });
                         }
                         Mode::Repack => {}
                     }
@@ -753,6 +773,19 @@ impl DynoGui {
     fn unpack_section(&mut self, ui: &mut egui::Ui) {
         // Same layout as `apply_section` minus the OTA-zip list.
         ui.checkbox(&mut self.do_resign, "resign");
+    }
+
+    fn info_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Unpack options").strong());
+        ui.checkbox(&mut self.info, "--info")
+            .on_hover_text("Write blobs.txt + lgsi_features.json into the output");
+        ui.label(
+            egui::RichText::new(
+                "Read-only inventory of the unpacked partitions (no resign needed).",
+            )
+            .weak()
+            .small(),
+        );
     }
 
     fn resign_section(&mut self, ui: &mut egui::Ui) {
@@ -1330,6 +1363,7 @@ mod tests {
             fuck_lgsi_config: Some(PathBuf::from("lgsi.json")),
             debloat: true,
             debloat_list: Some(PathBuf::from("debloat.txt")),
+            info: true,
             plus_patches: vec![PathBuf::from("one.dbp"), PathBuf::from("two.dbp")],
             ..Default::default()
         }
@@ -1374,6 +1408,25 @@ mod tests {
             assert_eq!(restored.vendor_spl_date, Date::constant(2024, 3, 4));
             assert_eq!(restored.system_spl_date, Date::constant(2024, 5, 6));
         }
+    }
+
+    #[test]
+    fn info_flag_is_emitted_in_apply_unpack_and_resign_modes() {
+        for mode in [Mode::Apply, Mode::Unpack, Mode::Resign] {
+            let mut gui = populated_gui(mode);
+            gui.info = true;
+            let args = gui.build_args();
+            assert!(
+                args.contains(&"--info".to_string()),
+                "{mode:?} should emit --info, got: {args:?}"
+            );
+        }
+        let mut off = populated_gui(Mode::Apply);
+        off.info = false;
+        assert!(
+            !off.build_args().contains(&"--info".to_string()),
+            "info off should not emit --info"
+        );
     }
 
     #[test]

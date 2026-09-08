@@ -7,6 +7,7 @@ pub mod events;
 pub mod ext4_helpers;
 pub mod ext4_reader;
 pub mod fuck_lgsi;
+pub mod info;
 pub mod integrity;
 pub mod integrity_signature;
 pub mod pipeline;

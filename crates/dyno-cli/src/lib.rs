@@ -129,6 +129,14 @@ enum Commands {
         #[arg(long, value_name = "DBP", requires = "resign")]
         plus: Vec<PathBuf>,
 
+        /// Scan unpacked super partitions and write `blobs.txt` (every
+        /// `partition:/path`, same format `--debloat` consumes) plus
+        /// `lgsi_features.json` (parsed from
+        /// `product.img:/etc/lgsi_build_info*.html`) into the output.
+        /// Read-only inventory; needs no --resign.
+        #[arg(long)]
+        info: bool,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -229,6 +237,11 @@ enum Commands {
         #[arg(long, value_name = "DBP")]
         plus: Vec<PathBuf>,
 
+        /// Scan unpacked super partitions and write `blobs.txt` plus
+        /// `lgsi_features.json` into the output. Read-only inventory.
+        #[arg(long)]
+        info: bool,
+
         /// Copy all input files to output so it mirrors the original firmware structure
         #[arg(long)]
         complete: bool,
@@ -325,6 +338,11 @@ enum Commands {
         /// (`--plus a.dbp --plus b.dbp`).
         #[arg(long, value_name = "DBP")]
         plus: Vec<PathBuf>,
+
+        /// Scan unpacked super partitions and write `blobs.txt` plus
+        /// `lgsi_features.json` into the output. Read-only inventory.
+        #[arg(long)]
+        info: bool,
 
         /// Repack dynamic partitions back into super after resign
         #[arg(long)]
@@ -1114,6 +1132,7 @@ where
             fuck_lgsi,
             debloat,
             plus,
+            info,
             complete,
         } => {
             if resign && key.is_none() {
@@ -1140,6 +1159,7 @@ where
                 ),
                 repack,
                 complete,
+                info,
             };
             match cli.progress_format {
                 ProgressFormat::Text => run_unpack(&request, &mut text_sink),
@@ -1163,6 +1183,7 @@ where
             fuck_lgsi,
             debloat,
             plus,
+            info,
             complete,
             ota_zips,
         } => {
@@ -1214,6 +1235,7 @@ where
                 ),
                 repack,
                 complete,
+                info,
             };
             match cli.progress_format {
                 ProgressFormat::Text => run_apply(&request, &mut text_sink),
@@ -1234,6 +1256,7 @@ where
             fuck_lgsi,
             debloat,
             plus,
+            info,
             repack,
         } => {
             let out_dir = resolve_output_dir(output, default_output_name_for_resign(repack));
@@ -1255,6 +1278,7 @@ where
                     plus,
                 },
                 repack,
+                info,
             };
             match cli.progress_format {
                 ProgressFormat::Text => run_resign(&request, &mut text_sink),

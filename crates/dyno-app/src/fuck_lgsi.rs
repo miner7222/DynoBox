@@ -533,7 +533,7 @@ fn read_lgsi_build_info_html(product_image: &Path) -> Result<Vec<u8>> {
 // HTML parser
 // ---------------------------------------------------------------------------
 
-mod html_parser {
+pub(crate) mod html_parser {
     //! Extract the `featureData` JS array from `lgsi_build_info.html`
     //! and pull out the per-feature `(name, enabled)` pairs.
     //!

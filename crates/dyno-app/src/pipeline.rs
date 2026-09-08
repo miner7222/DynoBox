@@ -107,6 +107,9 @@ pub struct UnpackRequest {
     pub resign: Option<ResignConfig>,
     pub repack: bool,
     pub complete: bool,
+    /// When true, write `blobs.txt` + `lgsi_features.json` into the output.
+    /// Read-only inventory of the unpacked super partitions; needs no resign.
+    pub info: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +122,8 @@ pub struct ApplyRequest {
     pub resign: Option<ResignConfig>,
     pub repack: bool,
     pub complete: bool,
+    /// When true, write `blobs.txt` + `lgsi_features.json` into the output.
+    pub info: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +133,8 @@ pub struct ResignRequest {
     pub integrity_key: Option<PathBuf>,
     pub config: ResignConfig,
     pub repack: bool,
+    /// When true, write `blobs.txt` + `lgsi_features.json` into the output.
+    pub info: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -501,6 +508,7 @@ where
 
     if request.resign.is_none() && !request.repack {
         ops.unpack_stage(input_dir, &request.output, events)?;
+        run_info_if_requested(request.info, &request.output, &request.output, events)?;
         return verify_and_finalize_output(
             ops,
             &request.output,
@@ -558,6 +566,15 @@ where
 
     if let Some(dir) = &staged_resign_dir {
         propagate_resign_artifacts(dir, &request.output, events);
+    }
+
+    if request.info {
+        let source = if request.repack {
+            &current_image_dir
+        } else {
+            &request.output
+        };
+        run_info_if_requested(true, source, &request.output, events)?;
     }
 
     verify_and_finalize_output(
@@ -644,6 +661,15 @@ where
         propagate_resign_artifacts(dir, &request.output, events);
     }
 
+    if request.info {
+        let source = if request.repack {
+            &current_image_dir
+        } else {
+            &request.output
+        };
+        run_info_if_requested(true, source, &request.output, events)?;
+    }
+
     verify_and_finalize_output(
         ops,
         &request.output,
@@ -681,6 +707,7 @@ where
 
     if !request.repack {
         ops.resign_stage(input_dir, &request.output, &request.config, events)?;
+        run_info_if_requested(request.info, &request.output, &request.output, events)?;
         return verify_and_finalize_output(
             ops,
             &request.output,
@@ -701,6 +728,7 @@ where
         events,
     )?;
     propagate_resign_artifacts(&resign_stage_dir, &request.output, events);
+    run_info_if_requested(request.info, &resign_stage_dir, &request.output, events)?;
     verify_and_finalize_output(
         ops,
         &request.output,
@@ -709,6 +737,25 @@ where
         request.integrity_key.as_deref(),
         events,
     )
+}
+
+/// `--info`: dump `blobs.txt` + `lgsi_features.json` from `source_dir` (the
+/// directory holding the unpacked partition images) into `dest_dir` (the
+/// final pipeline output). Read-only; missing sources warn and skip.
+fn run_info_if_requested<S>(
+    enabled: bool,
+    source_dir: &Path,
+    dest_dir: &Path,
+    events: &mut S,
+) -> anyhow::Result<()>
+where
+    S: EventSink + ?Sized,
+{
+    if !enabled {
+        return Ok(());
+    }
+    crate::info::dump_info(source_dir, dest_dir, events)?;
+    Ok(())
 }
 
 /// Copy retained resign artifacts from a temporary resign stage to the final
@@ -5138,6 +5185,7 @@ mod tests {
                 resign: None,
                 repack: false,
                 complete: false,
+                info: false,
             },
             &mut NoopEventSink,
             &unpack_ops,
@@ -5159,6 +5207,7 @@ mod tests {
                 resign: None,
                 repack: false,
                 complete: false,
+                info: false,
             },
             &mut NoopEventSink,
             &apply_ops,
@@ -5177,6 +5226,7 @@ mod tests {
                 integrity_key: None,
                 config: sample_resign_config(),
                 repack: false,
+                info: false,
             },
             &mut NoopEventSink,
             &resign_ops,
@@ -5314,6 +5364,7 @@ mod tests {
             resign: None,
             repack: false,
             complete: false,
+            info: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
@@ -5351,6 +5402,7 @@ mod tests {
             resign: Some(sample_resign_config()),
             repack: false,
             complete: false,
+            info: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
@@ -5389,6 +5441,7 @@ mod tests {
             resign: None,
             repack: true,
             complete: false,
+            info: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
@@ -5427,6 +5480,7 @@ mod tests {
             resign: Some(sample_resign_config()),
             repack: true,
             complete: false,
+            info: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
@@ -5465,6 +5519,7 @@ mod tests {
             resign: None,
             repack: true,
             complete: false,
+            info: false,
         };
         let ops = TestPipelineOps::default();
         let mut sink = NoopEventSink;
