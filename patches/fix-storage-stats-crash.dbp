@@ -1,0 +1,20 @@
+name = "fix-storage-stats-crash"
+description = "Stop Settings app-list crashes on packages with null sourceDir."
+
+# Settings' app-list loader calls StorageStatsManager.queryStatsForPackage per
+# app; system_server answers from StorageStatsService.queryStatsForUid, which
+# guards only getCodePath() (== the scanSourceDir field) but then passes
+# appInfo.sourceDir UNCHECKED into computeAppStatsByDataTypes -> new File().
+# Any installed package record with a null/empty sourceDir (stale or
+# mid-update install state) NPEs system_server and kills Settings.
+# Neutralizing the breakdown computation keeps the list working: apk/lib/dm
+# and dexopt/profile sizes stay 0, while code/data/cache from installd (what
+# the list sorts and shows) are unaffected. method_nop preserves
+# tries_size/handler bytes; verified by disassembly of services.jar.
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/usage/StorageStatsService;"
+method = "computeAppStatsByDataTypes"
+proto = "(Landroid/content/pm/PackageStats;Ljava/lang/String;Ljava/lang/String;)V"

@@ -445,6 +445,7 @@ while still advancing the setup wizard.
 * **`enable-circle-to-search.dbp`**
 * **`enable-google-services.dbp`**
 * **`fix-leaudio.dbp`**
+* **`fix-storage-stats-crash.dbp`**
 * **`fix-third-party-recents.dbp`**
 * **`show-google-lens.dbp`**
 * **`show-power-gesture.dbp`**

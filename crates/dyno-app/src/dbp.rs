@@ -3559,6 +3559,30 @@ value = false
             _ => panic!("debloat-theme must contain only the FontActivity invoke_const_bool op"),
         }
 
+        let sc = load_dbp(&patches_dir().join("fix-storage-stats-crash.dbp"))
+            .expect("fix-storage-stats-crash.dbp");
+        assert_eq!(sc.name, "fix-storage-stats-crash");
+        assert_eq!(sc.ops.len(), 1);
+        match &sc.ops[0] {
+            DbpOp::MethodNop {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(class, "Lcom/android/server/usage/StorageStatsService;");
+                assert_eq!(method, "computeAppStatsByDataTypes");
+                assert_eq!(
+                    proto,
+                    "(Landroid/content/pm/PackageStats;Ljava/lang/String;Ljava/lang/String;)V"
+                );
+            }
+            _ => panic!("fix-storage-stats-crash must use method_nop"),
+        }
+
         let rf = load_dbp(&patches_dir().join("fix-third-party-recents.dbp"))
             .expect("fix-third-party-recents.dbp");
         assert_eq!(rf.name, "fix-third-party-recents");
