@@ -1,0 +1,94 @@
+name = "disable-dolby-atmos"
+description = "Allow the Dolby Atmos switch to be turned off even on speaker (no headset), and keep the user's choice across headset connect/disconnects."
+
+# BaseDolbyController.isDolbySwitchEnable() returns isHeadsetConnected() on
+# this build (zui_config_support_dolby_switch_toggle=false), greying out the
+# "dolby_switch" toggle whenever no headset is attached. Forcing true enables
+# the switch on speaker; tapping it off writes dlb_dap_state=0 like the
+# headset path already does. handlePreferenceTreeClick writes the same two
+# settings on both branches, so only the enabled-state changes.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/sound/dolby/BaseDolbyController;"
+method = "isDolbySwitchEnable"
+value = true
+
+# The stale "cannot be turned off on speaker" summary is the preference XML
+# default; updateState only clears it (setSummary(null)) when
+# isDolbyEnabledNoHeadphones() is true. That predicate is a trivial R8-shared
+# body so method_const_bool is refused by the shared-code-item guard — nop
+# the branch instead (if-eqz v1 -> fall through) so the clear always runs.
+# No pool references in the pattern, no code moves, and the checked-state
+# logic below is untouched.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/sound/dolby/DolbySwitchPreferenceController;"
+method = "updateState"
+proto = "(Landroidx/preference/Preference;)V"
+
+[[op.replacement]]
+from = "0a 01 38 01 06 00"
+to = "0a 01 00 00 00 00"
+expected = 1
+
+# AudioService.setWiredDeviceConnectionState forces dlb_dap_state=1 on wired
+# disconnect, silently re-enabling Dolby after the user turned it off. The
+# user's choice is already preserved in recordDolbySwitchStatusWidthHeadSet
+# (the toggle writes both settings on every tap, and the connect path
+# restores from it), so the disconnect write carries no information — nop it
+# instead of forcing a value either way. Nopping keeps ON-users ON and
+# OFF-users OFF; the putInt result is discarded at this site.
+# Pool indexes move between builds, so the putInt reference is resolved by
+# symbol; only the register shape ({v5,v7,v6}) is pinned.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/audio/AudioService;"
+method = "setWiredDeviceConnectionState"
+proto = "(Landroid/media/AudioDeviceAttributes;ILjava/lang/String;)V"
+
+[[op.symbol]]
+name = "put_int"
+kind = "method"
+class = "Landroid/provider/Settings$Global;"
+method = "putInt"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)Z"
+
+[[op.replacement]]
+from = "0c 05 71 30 ${put_int:u16} 75 06"
+to = "0c 05 00 00 00 00 00 00"
+expected = 1
+
+# Same forced-ON on Bluetooth disconnect (AudioHandler BT-device-changed
+# handler writes dlb_dap_state=1 when mNewDevice==null). Nop that putInt too;
+# the BT-connect restore from recordDolbySwitchStatusWidthHeadSet stays, so
+# per-device choice keeps working in both directions.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/audio/AudioService$AudioHandler;"
+method = "handleMessage"
+proto = "(Landroid/os/Message;)V"
+
+[[op.symbol]]
+name = "dlb_dap_state"
+kind = "string"
+value = "dlb_dap_state"
+
+[[op.symbol]]
+name = "put_int"
+kind = "method"
+class = "Landroid/provider/Settings$Global;"
+method = "putInt"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)Z"
+
+[[op.replacement]]
+from = "1a 00 ${dlb_dap_state:u16} 71 30 ${put_int:u16} 0d 01"
+to = "1a 00 ${dlb_dap_state:u16} 00 00 00 00 00 00"
+expected = 1

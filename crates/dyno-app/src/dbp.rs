@@ -3632,6 +3632,117 @@ value = false
             }
             _ => panic!("debloat-bootanim must use zip_entry_replace"),
         }
+
+        let da = load_dbp(&patches_dir().join("disable-dolby-atmos.dbp"))
+            .expect("disable-dolby-atmos.dbp");
+        assert_eq!(da.name, "disable-dolby-atmos");
+        assert_eq!(da.ops.len(), 4);
+        match &da.ops[0] {
+            DbpOp::MethodConstBool {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                value,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                assert_eq!(
+                    class,
+                    "Lcom/lenovo/settings/sound/dolby/BaseDolbyController;"
+                );
+                assert_eq!(method, "isDolbySwitchEnable");
+                assert_eq!(proto, "()Z");
+                assert!(*value);
+            }
+            _ => panic!("disable-dolby-atmos op[0] must use method_const_bool"),
+        }
+        match &da.ops[1] {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                assert_eq!(
+                    class,
+                    "Lcom/lenovo/settings/sound/dolby/DolbySwitchPreferenceController;"
+                );
+                assert_eq!(method, "updateState");
+                assert_eq!(proto, "(Landroidx/preference/Preference;)V");
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(replacements[0].from, "0a 01 38 01 06 00");
+                assert_eq!(replacements[0].to, "0a 01 00 00 00 00");
+                assert_eq!(replacements[0].expected, 1);
+            }
+            _ => panic!("disable-dolby-atmos op[1] must use method_code_patch"),
+        }
+        match &da.ops[2] {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(class, "Lcom/android/server/audio/AudioService;");
+                assert_eq!(method, "setWiredDeviceConnectionState");
+                assert_eq!(
+                    proto,
+                    "(Landroid/media/AudioDeviceAttributes;ILjava/lang/String;)V"
+                );
+                assert_eq!(symbols.len(), 1);
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(replacements[0].from, "0c 05 71 30 ${put_int:u16} 75 06");
+                assert_eq!(replacements[0].to, "0c 05 00 00 00 00 00 00");
+                assert_eq!(replacements[0].expected, 1);
+            }
+            _ => panic!("disable-dolby-atmos op[2] must use method_code_patch"),
+        }
+        match &da.ops[3] {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(
+                    class,
+                    "Lcom/android/server/audio/AudioService$AudioHandler;"
+                );
+                assert_eq!(method, "handleMessage");
+                assert_eq!(proto, "(Landroid/os/Message;)V");
+                assert_eq!(symbols.len(), 2);
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(
+                    replacements[0].from,
+                    "1a 00 ${dlb_dap_state:u16} 71 30 ${put_int:u16} 0d 01"
+                );
+                assert_eq!(
+                    replacements[0].to,
+                    "1a 00 ${dlb_dap_state:u16} 00 00 00 00 00 00"
+                );
+                assert_eq!(replacements[0].expected, 1);
+            }
+            _ => panic!("disable-dolby-atmos op[3] must use method_code_patch"),
+        }
     }
 
     #[test]
@@ -4420,6 +4531,40 @@ value = false
         }
     }
 
+    /// Land the disable-dolby-atmos `DolbySwitchPreferenceController.updateState`
+    /// branch nop on the real ZuiSettings dex. Set `DYNOBOX_ZUISETTINGS_DEX_DIR`
+    /// to the extracted STORED dex dir (skipped when unset).
+    #[test]
+    fn bundled_disable_dolby_atmos_lands_on_real_dex() {
+        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("disable-dolby-atmos.dbp")).unwrap();
+        assert_eq!(doc.ops.len(), 4);
+        let op = &doc.ops[1];
+        assert!(matches!(
+            op,
+            DbpOp::MethodCodePatch { class, method, .. }
+                if class == "Lcom/lenovo/settings/sound/dolby/DolbySwitchPreferenceController;"
+                    && method == "updateState"
+        ));
+        let dir = std::path::Path::new(&dir);
+        let mut landed = 0usize;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("dex") {
+                continue;
+            }
+            let Ok(mut dex) = std::fs::read(&path) else {
+                continue;
+            };
+            if apply_one_op(&mut dex, op).unwrap() {
+                landed += 1;
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+            }
+        }
+        assert_eq!(landed, 1, "updateState branch nop should land exactly once");
+    }
     /// The deduplicated-code-item guard: forcing the "Service hotline"
     /// `LenovoServicePreferenceController.getAvailabilityStatus()` (a trivial
     /// `return 0` R8-shared with `ImmutableMap.isHashCodeFast():Z`) must be

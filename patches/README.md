@@ -441,6 +441,7 @@ while still advancing the setup wizard.
 * **`debloat-settings.dbp`**
 * **`debloat-setupwizard.dbp`**
 * **`debloat-theme.dbp`**
+* **`disable-dolby-atmos.dbp`**
 * **`disable-quick-kill.dbp`**
 * **`enable-circle-to-search.dbp`**
 * **`enable-google-services.dbp`**
