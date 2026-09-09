@@ -56,3 +56,29 @@ file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
 class = "Lcom/android/launcher3/config/FeatureFlags;"
 method = "isIsShowPrcGlobalSearch"
 value = false
+
+# UE provider writes: with the User Experience app debloated, every
+# ContentResolver.insert to content://com.lenovo.ue.device.provider/*
+# throws IllegalArgumentException (caught, but spams logcat on a worker
+# thread on every upload). Both DataUtils copies (launcher + weather
+# widget) funnel all SendTypes through their b() into that insert and
+# already treat false as "not delivered", so forcing b() false keeps
+# caller behavior identical minus the exception. Insert-only; no
+# query/update/delete paths reference the provider.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/util/DataUtils;"
+method = "b"
+proto = "(Lcom/zui/launcher/util/DataUtils$SendType;Landroid/content/ContentValues;)Z"
+value = false
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/timelaweather/util/DataUtils;"
+method = "b"
+proto = "(Lcom/zui/timelaweather/util/DataUtils$SendType;Landroid/content/ContentValues;)Z"
+value = false

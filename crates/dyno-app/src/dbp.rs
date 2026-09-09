@@ -2746,7 +2746,20 @@ value = false
         let cl =
             load_dbp(&patches_dir().join("debloat-launcher.dbp")).expect("debloat-launcher.dbp");
         assert_eq!(cl.name, "debloat-launcher");
-        assert_eq!(cl.ops.len(), 6);
+        assert_eq!(cl.ops.len(), 8);
+        assert!(cl.ops.iter().any(|op| {
+            matches!(
+                op,
+                DbpOp::MethodConstBool {
+                    class,
+                    method,
+                    value,
+                    ..
+                } if class == "Lcom/zui/launcher/util/DataUtils;"
+                    && method == "b"
+                    && !value
+            )
+        }));
         assert!(cl.ops.iter().any(|op| {
             matches!(
                 op,
