@@ -48,7 +48,9 @@ use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow};
 
-use crate::fuck_lgsi::{dex_walker, read_u16_le, read_u32_le};
+use crate::fuck_lgsi::{
+    crc32_ieee, dex_walker, parse_zip_central_directory, read_u16_le, read_u32_le, write_u32_le,
+};
 
 // ---------------------------------------------------------------------------
 // JVM method descriptor parsing
@@ -3496,6 +3498,70 @@ fn cover_whole_instructions(
         cover_end = next;
     }
     Some(cover_end)
+}
+
+/// Replace the data of STORED zip entries with `payload`, zero-padding to each
+/// entry's original data length, and fix the CRC32 in both the local header
+/// and the central directory. The archive length never changes.
+///
+/// All `entries` must resolve or nothing is written (all-or-nothing): a
+/// missing name, a non-STORED method, a data descriptor, zip64, or a payload
+/// that does not fit returns `Ok(false)` with the buffer untouched.
+pub fn force_zip_entry_replace(
+    zip_bytes: &mut [u8],
+    entries: &[String],
+    payload: &[u8],
+) -> Result<bool> {
+    if entries.is_empty() || payload.is_empty() {
+        return Ok(false);
+    }
+    let layout = parse_zip_central_directory(zip_bytes)?;
+    // Resolve every target before touching any byte.
+    let mut targets: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(entries.len());
+    for name in entries {
+        let Some(entry) = layout.entries.iter().find(|e| e.name == *name) else {
+            return Ok(false);
+        };
+        if entry.compression_method != 0 || entry.uses_data_descriptor || entry.is_zip64 {
+            return Ok(false);
+        }
+        if payload.len() > entry.compressed_size {
+            return Ok(false);
+        }
+        let Some(data_end) = entry.data_start.checked_add(entry.compressed_size) else {
+            return Ok(false);
+        };
+        if data_end > zip_bytes.len()
+            || entry
+                .local_header_crc_offset
+                .checked_add(4)
+                .is_none_or(|end| end > zip_bytes.len())
+            || entry
+                .cd_crc_offset
+                .checked_add(4)
+                .is_none_or(|end| end > zip_bytes.len())
+        {
+            return Ok(false);
+        }
+        targets.push((
+            entry.data_start,
+            entry.compressed_size,
+            entry.local_header_crc_offset,
+            entry.cd_crc_offset,
+        ));
+    }
+    for (data_start, data_len, local_crc_off, cd_crc_off) in targets {
+        let data_end = data_start + data_len;
+        {
+            let data = &mut zip_bytes[data_start..data_end];
+            data[..payload.len()].copy_from_slice(payload);
+            data[payload.len()..].fill(0);
+        }
+        let new_crc = crc32_ieee(&zip_bytes[data_start..data_end]);
+        write_u32_le(zip_bytes, local_crc_off, new_crc);
+        write_u32_le(zip_bytes, cd_crc_off, new_crc);
+    }
+    Ok(true)
 }
 
 #[cfg(test)]

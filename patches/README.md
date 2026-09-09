@@ -231,6 +231,22 @@ property-file edits where growing the ext4 file would be unnecessary risk.
 | `to`   | yes      | replacement text/bytes; same byte length as `from` |
 | `all`  | no       | replace every match instead of just the first (default `false`) |
 
+### `zip_entry_replace`
+
+Overwrite the data of STORED zip entries with `payload` (whitespace-separated
+hex bytes), zero-padding to each entry's original data length, and fix the
+CRC32 in both the local header and the central directory. The archive length
+never changes. All `entries` must resolve or nothing is written
+(all-or-nothing). The payload must fit inside every listed entry. Intended for
+neutralizing asset frames (e.g. boot-animation PNGs) that have no code gate —
+`desc.txt` can only replay whole parts, so middle frames cannot be skipped
+there.
+
+| field     | required | meaning                                                       |
+|-----------|----------|---------------------------------------------------------------|
+| `entries` | yes      | exact zip entry names, e.g. `part1/frame_010.png` (non-empty, no duplicates) |
+| `payload` | yes      | plain hex bytes (no `${slots}`), e.g. a 1×1 transparent PNG   |
+
 ### `invoke_const_bool`
 
 Force `target_class.target_method()Z` results to a constant, but only at the
@@ -419,6 +435,7 @@ while still advancing the setup wizard.
 
 ## Bundled patches
 
+* **`debloat-bootanim.dbp`**
 * **`debloat-launcher.dbp`**
 * **`debloat-security.dbp`**
 * **`debloat-settings.dbp`**

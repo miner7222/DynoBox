@@ -1,0 +1,35 @@
+name = "debloat-bootanim"
+description = "Blank part1 frames 010-031 of the system boot animation with a 1x1 transparent PNG (size-preserving)."
+
+# `desc.txt` can only replay whole parts, so middle frames cannot be skipped
+# there. Each listed STORED entry is overwritten with a 1x1 transparent PNG
+# (payload) and zero-padded to its original length, with both CRC32s fixed.
+[[op]]
+kind = "zip_entry_replace"
+partition = "system"
+file = "system/media/bootanimation.zip"
+entries = [
+  "part1/1600X2560 Wuji with Tianxi Logo_010.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_011.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_012.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_013.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_014.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_015.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_016.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_017.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_018.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_019.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_020.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_021.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_022.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_023.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_024.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_025.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_026.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_027.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_028.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_029.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_030.png",
+  "part1/1600X2560 Wuji with Tianxi Logo_031.png",
+]
+payload = "89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 00 00 00 01 00 00 00 01 08 06 00 00 00 1F 15 C4 89 00 00 00 0C 49 44 41 54 78 9C 63 60 60 60 00 00 00 04 00 01 F6 17 38 55 00 00 00 00 49 45 4E 44 AE 42 60 82"

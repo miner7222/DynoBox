@@ -5,7 +5,9 @@
 //! target one APK/JAR inside one partition image and rewrite a method, invocation
 //! result, field read, Intent launch, or compiled resource in place. Text ops
 //! replace one exact byte string inside a regular file with another same-length
-//! string. Dex rewrites use the [`crate::dex_patch`] primitives. This is how DynoBox ships
+//! string. Zip ops swap the data of STORED entries inside any zip archive
+//! (APK or otherwise) with a fixed payload, zero-padding to the original
+//! entry length. Dex rewrites use the [`crate::dex_patch`] primitives. This is how DynoBox ships
 //! the former built-in launcher and ZuiSettings locale patches as data
 //! instead of code.
 //!
@@ -47,9 +49,9 @@ use crate::dex_patch::{
     force_invoke_const_bool_at, force_invoke_const_int, force_method_broadcast_finish,
     force_method_return_bool, force_method_return_const_string, force_method_return_int,
     force_method_return_void, force_nop_anchored_invoke, force_preference_controller_hidden,
-    force_remoteviews_gone, force_view_gone, parse_method_descriptor, patch_method_code,
-    redirect_intent_action_to_broadcast, redirect_method_code, resolve_dex_pool_symbol,
-    validate_method_code_template_slots,
+    force_remoteviews_gone, force_view_gone, force_zip_entry_replace, parse_method_descriptor,
+    patch_method_code, redirect_intent_action_to_broadcast, redirect_method_code,
+    resolve_dex_pool_symbol, validate_method_code_template_slots,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
 use crate::fuck_lgsi::{
@@ -272,6 +274,18 @@ pub enum DbpOp {
         #[serde(default)]
         all: bool,
     },
+    /// Replace the data of STORED zip entries with `payload` (whitespace-
+    /// separated hex bytes), zero-padding to each entry's original data
+    /// length, and fix the CRC32 in both headers. All `entries` must resolve
+    /// or nothing is written. Size-preserving: the payload must fit inside
+    /// every listed entry. Intended for neutralizing asset frames (e.g. boot
+    /// animation PNGs) that have no code gate.
+    ZipEntryReplace {
+        partition: String,
+        file: String,
+        entries: Vec<String>,
+        payload: String,
+    },
     /// Force `invoke-static target_class.target_method()Z` results to `value`
     /// inside `scan_class` (optionally one `scan_method` and zero-based site).
     InvokeConstBool {
@@ -404,6 +418,7 @@ impl DbpOp {
             | DbpOp::ResourceBool { partition, .. }
             | DbpOp::ResourceDimen { partition, .. }
             | DbpOp::TextReplace { partition, .. }
+            | DbpOp::ZipEntryReplace { partition, .. }
             | DbpOp::InvokeConstBool { partition, .. }
             | DbpOp::InvokeConstInt { partition, .. }
             | DbpOp::FieldConstBool { partition, .. }
@@ -428,6 +443,7 @@ impl DbpOp {
             | DbpOp::ResourceBool { file, .. }
             | DbpOp::ResourceDimen { file, .. }
             | DbpOp::TextReplace { file, .. }
+            | DbpOp::ZipEntryReplace { file, .. }
             | DbpOp::InvokeConstBool { file, .. }
             | DbpOp::InvokeConstInt { file, .. }
             | DbpOp::FieldConstBool { file, .. }
@@ -779,6 +795,41 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
                         from.len(),
                         to.len()
                     )));
+                }
+            }
+            DbpOp::ZipEntryReplace {
+                entries, payload, ..
+            } => {
+                if entries.is_empty() {
+                    return Err(bail(
+                        "zip_entry_replace `entries` must not be empty".to_string(),
+                    ));
+                }
+                let mut seen = BTreeSet::new();
+                for entry in entries {
+                    if entry.is_empty() || entry.contains('\0') {
+                        return Err(bail(
+                            "zip_entry_replace `entries` must be non-empty zip paths".to_string(),
+                        ));
+                    }
+                    if !seen.insert(entry) {
+                        return Err(bail(format!(
+                            "zip_entry_replace lists duplicate entry `{entry}`"
+                        )));
+                    }
+                }
+                let parsed = parse_code_template(payload)
+                    .map_err(|message| bail(format!("zip_entry_replace `payload`: {message}")))?;
+                if !parsed.slots.is_empty() {
+                    return Err(bail(
+                        "zip_entry_replace `payload` must be plain hex bytes (no ${slots})"
+                            .to_string(),
+                    ));
+                }
+                if parsed.bytes.is_empty() {
+                    return Err(bail(
+                        "zip_entry_replace `payload` must not be empty".to_string(),
+                    ));
                 }
             }
             DbpOp::FieldConstBool {
@@ -1412,6 +1463,23 @@ fn apply_ops_to_apk(
         }
     }
 
+    // Whole-archive zip ops run against the full file bytes rather than
+    // individual dex slices.
+    for (i, op) in ops.iter().enumerate() {
+        let DbpOp::ZipEntryReplace {
+            entries, payload, ..
+        } = op
+        else {
+            continue;
+        };
+        let template = parse_code_template(payload)
+            .map_err(|message| anyhow!("zip_entry_replace `payload`: {message}"))?;
+        if force_zip_entry_replace(&mut apk_bytes, entries, &template.bytes)? {
+            op_landed[i] = true;
+            patched_entries.extend(entries.iter().cloned());
+        }
+    }
+
     let ops_applied = op_landed.iter().filter(|&&b| b).count();
     if ops_applied > 0 {
         write_via_extents(image_path, &apk_bytes, &apk_extents, block_size)?;
@@ -1729,6 +1797,9 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
         }
         DbpOp::ResourceBool { .. } | DbpOp::ResourceDimen { .. } => Ok(false),
         DbpOp::TextReplace { .. } => Ok(false),
+        // File-level op: handled against whole-archive bytes in
+        // `apply_ops_to_apk`, never against a dex slice.
+        DbpOp::ZipEntryReplace { .. } => Ok(false),
     }
 }
 
@@ -2094,6 +2165,212 @@ proto = "(Landroid/content/Context;Z)V"
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn parse_zip_entry_replace_op() {
+        let doc: DbpDocument = toml::from_str(
+            r#"
+name = "t"
+[[op]]
+kind = "zip_entry_replace"
+partition = "system"
+file = "system/media/bootanimation.zip"
+entries = ["part1/a.png", "part1/b.png"]
+payload = "89 50 4E 47"
+"#,
+        )
+        .unwrap();
+        assert_eq!(doc.ops.len(), 1);
+        match &doc.ops[0] {
+            DbpOp::ZipEntryReplace {
+                entries, payload, ..
+            } => {
+                assert_eq!(
+                    entries,
+                    &["part1/a.png".to_string(), "part1/b.png".to_string()]
+                );
+                assert_eq!(payload, "89 50 4E 47");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn load_rejects_zip_entry_replace_without_entries() {
+        let f = write_temp_dbp(
+            r#"
+name = "t"
+[[op]]
+kind = "zip_entry_replace"
+partition = "system"
+file = "system/media/bootanimation.zip"
+entries = []
+payload = "89 50"
+"#,
+        );
+        assert!(load_dbp(f.path()).is_err());
+    }
+
+    #[test]
+    fn load_rejects_zip_entry_replace_duplicate_entries() {
+        let f = write_temp_dbp(
+            r#"
+name = "t"
+[[op]]
+kind = "zip_entry_replace"
+partition = "system"
+file = "system/media/bootanimation.zip"
+entries = ["part1/a.png", "part1/a.png"]
+payload = "89 50"
+"#,
+        );
+        assert!(load_dbp(f.path()).is_err());
+    }
+
+    #[test]
+    fn load_rejects_zip_entry_replace_bad_payload() {
+        for payload in ["", "8 505", "89 ${x:u16}"] {
+            let f = write_temp_dbp(&format!(
+                r#"
+name = "t"
+[[op]]
+kind = "zip_entry_replace"
+partition = "system"
+file = "system/media/bootanimation.zip"
+entries = ["part1/a.png"]
+payload = "{payload}"
+"#
+            ));
+            assert!(load_dbp(f.path()).is_err(), "payload `{payload}`");
+        }
+    }
+
+    /// Minimal STORED-only zip builder for `force_zip_entry_replace` tests:
+    /// `(name, data, method)` triples, no extra fields, no comment.
+    fn build_test_zip(entries: &[(&str, &[u8], u16)]) -> Vec<u8> {
+        fn u16le(v: u16, out: &mut Vec<u8>) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        fn u32le(v: u32, out: &mut Vec<u8>) {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut zip = Vec::new();
+        let mut central = Vec::new();
+        for (name, data, method) in entries {
+            let crc = crc32_ieee(data);
+            let local_off = zip.len() as u32;
+            zip.extend_from_slice(&0x04034B50u32.to_le_bytes());
+            u16le(20, &mut zip);
+            u16le(0, &mut zip);
+            u16le(*method, &mut zip);
+            u16le(0, &mut zip);
+            u16le(0, &mut zip);
+            u32le(crc, &mut zip);
+            u32le(data.len() as u32, &mut zip);
+            u32le(data.len() as u32, &mut zip);
+            u16le(name.len() as u16, &mut zip);
+            u16le(0, &mut zip);
+            zip.extend_from_slice(name.as_bytes());
+            zip.extend_from_slice(data);
+            central.extend_from_slice(&0x02014B50u32.to_le_bytes());
+            u16le(20, &mut central);
+            u16le(20, &mut central);
+            u16le(0, &mut central);
+            u16le(*method, &mut central);
+            u16le(0, &mut central);
+            u16le(0, &mut central);
+            u32le(crc, &mut central);
+            u32le(data.len() as u32, &mut central);
+            u32le(data.len() as u32, &mut central);
+            u16le(name.len() as u16, &mut central);
+            u16le(0, &mut central);
+            u16le(0, &mut central);
+            u16le(0, &mut central);
+            u16le(0, &mut central);
+            u32le(0, &mut central);
+            u32le(local_off, &mut central);
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_off = zip.len() as u32;
+        let cd_len = central.len() as u32;
+        zip.extend_from_slice(&central);
+        zip.extend_from_slice(&0x06054B50u32.to_le_bytes());
+        u16le(0, &mut zip);
+        u16le(0, &mut zip);
+        u16le(entries.len() as u16, &mut zip);
+        u16le(entries.len() as u16, &mut zip);
+        u32le(cd_len, &mut zip);
+        u32le(cd_off, &mut zip);
+        u16le(0, &mut zip);
+        zip
+    }
+
+    #[test]
+    fn zip_entry_replace_swaps_stored_data() {
+        let data_a: Vec<u8> = (0..32u8).collect();
+        let data_b: Vec<u8> = (100..112u8).collect();
+        let mut zip = build_test_zip(&[("a.bin", &data_a, 0), ("b.bin", &data_b, 0)]);
+        let payload = vec![0x89, 0x50, 0x4E, 0x47];
+        let targets = ["a.bin".to_string(), "b.bin".to_string()];
+        assert!(force_zip_entry_replace(&mut zip, &targets, &payload).unwrap());
+        let layout = parse_zip_central_directory(&zip).unwrap();
+        assert_eq!(layout.entries.len(), 2);
+        for (entry, original_len) in layout.entries.iter().zip([32usize, 12usize]) {
+            let data = &zip[entry.data_start..entry.data_start + entry.compressed_size];
+            assert_eq!(data.len(), original_len);
+            assert_eq!(&data[..payload.len()], payload.as_slice());
+            assert!(data[payload.len()..].iter().all(|&b| b == 0));
+            let expected_crc = crc32_ieee(data);
+            assert_eq!(
+                u32::from_le_bytes(
+                    zip[entry.local_header_crc_offset..entry.local_header_crc_offset + 4]
+                        .try_into()
+                        .unwrap()
+                ),
+                expected_crc
+            );
+            assert_eq!(
+                u32::from_le_bytes(
+                    zip[entry.cd_crc_offset..entry.cd_crc_offset + 4]
+                        .try_into()
+                        .unwrap()
+                ),
+                expected_crc
+            );
+        }
+    }
+
+    #[test]
+    fn zip_entry_replace_is_all_or_nothing() {
+        let data_a: Vec<u8> = (0..32u8).collect();
+        let mut zip = build_test_zip(&[("a.bin", &data_a, 0)]);
+        let before = zip.clone();
+        // Unknown entry: refused, buffer untouched.
+        assert!(
+            !force_zip_entry_replace(
+                &mut zip,
+                &["a.bin".to_string(), "missing.bin".to_string()],
+                &[0x89, 0x50],
+            )
+            .unwrap()
+        );
+        assert_eq!(zip, before);
+        // Deflated entry: refused even though the name resolves.
+        let mut deflated = build_test_zip(&[("a.bin", &data_a, 8)]);
+        assert!(
+            !force_zip_entry_replace(&mut deflated, &["a.bin".to_string()], &[0x89, 0x50],)
+                .unwrap()
+        );
+        assert_eq!(deflated, build_test_zip(&[("a.bin", &data_a, 8)]));
+        // Oversized payload: refused.
+        let big = vec![0u8; 33];
+        assert!(!force_zip_entry_replace(&mut zip, &["a.bin".to_string()], &big).unwrap());
+        assert_eq!(zip, before);
+        // Empty selector / empty payload: refused.
+        assert!(!force_zip_entry_replace(&mut zip, &[], &[0x89]).unwrap());
+        assert!(!force_zip_entry_replace(&mut zip, &["a.bin".to_string()], &[]).unwrap());
+        assert_eq!(zip, before);
     }
 
     #[test]
@@ -3295,6 +3572,29 @@ value = false
                 _ => panic!("recents fix op[{index}] must use method_code_patch"),
             }
         }
+
+        let ba =
+            load_dbp(&patches_dir().join("debloat-bootanim.dbp")).expect("debloat-bootanim.dbp");
+        assert_eq!(ba.name, "debloat-bootanim");
+        assert_eq!(ba.ops.len(), 1);
+        match &ba.ops[0] {
+            DbpOp::ZipEntryReplace {
+                partition,
+                file,
+                entries,
+                payload,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/media/bootanimation.zip");
+                assert_eq!(entries.len(), 22);
+                assert!(entries.iter().all(|e| e.starts_with("part1/")));
+                let parsed = parse_code_template(payload).expect("payload must be hex");
+                assert!(parsed.slots.is_empty());
+                assert_eq!(parsed.bytes.len(), 69);
+                assert_eq!(&parsed.bytes[..8], b"\x89PNG\r\n\x1a\n");
+            }
+            _ => panic!("debloat-bootanim must use zip_entry_replace"),
+        }
     }
 
     #[test]
@@ -4013,6 +4313,74 @@ value = false
             landed, 8,
             "eight build-compatible debloat-settings ops should land"
         );
+    }
+
+    /// Apply the bundled debloat-bootanim op to a COPY of the real
+    /// bootanimation.zip. Set `DYNOBOX_BOOTANIM_ZIP` to the copy path (never
+    /// the source tree); optionally `DYNOBOX_BOOTANIM_OUT` to keep the patched
+    /// copy for out-of-band inspection.
+    #[test]
+    fn zip_entry_replace_lands_on_real_bootanimation() {
+        let Ok(path) = std::env::var("DYNOBOX_BOOTANIM_ZIP") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("debloat-bootanim.dbp")).unwrap();
+        assert_eq!(doc.ops.len(), 1);
+        let DbpOp::ZipEntryReplace {
+            entries, payload, ..
+        } = &doc.ops[0]
+        else {
+            panic!("debloat-bootanim must use zip_entry_replace");
+        };
+        let template = parse_code_template(payload).expect("payload must be hex");
+        assert_eq!(template.bytes.len(), 69);
+        let mut bytes = std::fs::read(&path).expect("read bootanimation copy");
+        let before = bytes.clone();
+        assert!(force_zip_entry_replace(&mut bytes, entries, &template.bytes).unwrap());
+        assert_eq!(bytes.len(), before.len(), "archive length must not change");
+        let layout = parse_zip_central_directory(&bytes).expect("patched zip parses");
+        let before_layout = parse_zip_central_directory(&before).expect("pristine zip parses");
+        assert_eq!(layout.entries.len(), before_layout.entries.len());
+        for name in entries {
+            let entry = layout
+                .entries
+                .iter()
+                .find(|e| e.name == *name)
+                .expect("target present after patch");
+            let data = &bytes[entry.data_start..entry.data_start + entry.compressed_size];
+            assert_eq!(&data[..template.bytes.len()], template.bytes.as_slice());
+            assert!(data[template.bytes.len()..].iter().all(|&b| b == 0));
+            let expected_crc = crc32_ieee(data);
+            let read_crc =
+                |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().expect("crc range"));
+            assert_eq!(read_crc(entry.local_header_crc_offset), expected_crc);
+            assert_eq!(read_crc(entry.cd_crc_offset), expected_crc);
+        }
+        // Entries outside the target list are byte-identical to pristine.
+        for entry in &layout.entries {
+            if entries.iter().any(|name| name == &entry.name) {
+                continue;
+            }
+            let pristine = before_layout
+                .entries
+                .iter()
+                .find(|e| e.name == entry.name)
+                .expect("untouched entry present before");
+            assert_eq!(
+                entry.compressed_size, pristine.compressed_size,
+                "untouched entry {} changed size",
+                entry.name
+            );
+            assert_eq!(
+                &bytes[entry.data_start..entry.data_start + entry.compressed_size],
+                &before[pristine.data_start..pristine.data_start + pristine.compressed_size],
+                "untouched entry {} changed data",
+                entry.name
+            );
+        }
+        if let Ok(out) = std::env::var("DYNOBOX_BOOTANIM_OUT") {
+            std::fs::write(&out, &bytes).expect("write patched copy");
+        }
     }
 
     /// The deduplicated-code-item guard: forcing the "Service hotline"
