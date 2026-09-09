@@ -1,0 +1,38 @@
+name = "enable-adb-debug"
+description = "USB debugging from first boot with no adb auth (debug builds)."
+
+# No-auth adb: adbd skips the RSA prompt when ro.adb.secure=0. Both
+# build.prop copies carry ro.adb.secure=1 on this user build and neither
+# ramdisk presets it, so flipping both is effective (same-length 1->0).
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/build.prop"
+from = "ro.adb.secure=1\n"
+to = "ro.adb.secure=0\n"
+
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "build.prop"
+from = "ro.adb.secure=1\n"
+to = "ro.adb.secure=0\n"
+
+# adb from first boot: on user builds init.qcom.usb.sh clears
+# persist.vendor.usb.config every boot, so sys.usb.config (and through the
+# gadget HAL, the USB composition) never contains adb until the user flips
+# the Settings toggle. Seed persist.sys.usb.config=adb from an `on boot`
+# block in init.qcom.usb.rc instead: init context is allowed to write it
+# (ffbm precedent in system init.rc), while the vendor_qti_init_shell script
+# context is SELinux-denied for persist.sys.* (seen live in auditd). The
+# existing `on boot && property:persist.sys.usb.config=*` trigger plus
+# UsbDeviceManager then apply adb to sys.usb.config, the HAL exposes the
+# function and starts adbd. Re-seeded every boot, so a wipe keeps adb.
+# Same byte length: the replaced vendor-config line trades its bytes for a
+# comment line.
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "etc/init/hw/init.qcom.usb.rc"
+from = "on boot\n    setprop sys.usb.config ${persist.vendor.usb.config}\n"
+to = "on boot\n    setprop persist.sys.usb.config adb\n# adb on boot...\n"

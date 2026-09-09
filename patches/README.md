@@ -443,6 +443,7 @@ while still advancing the setup wizard.
 * **`debloat-theme.dbp`**
 * **`disable-dolby-atmos.dbp`**
 * **`disable-quick-kill.dbp`**
+* **`enable-adb-debug.dbp`**
 * **`enable-circle-to-search.dbp`**
 * **`enable-google-services.dbp`**
 * **`fix-leaudio.dbp`**

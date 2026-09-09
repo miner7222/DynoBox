@@ -3743,6 +3743,58 @@ value = false
             }
             _ => panic!("disable-dolby-atmos op[3] must use method_code_patch"),
         }
+
+        let adb =
+            load_dbp(&patches_dir().join("enable-adb-debug.dbp")).expect("enable-adb-debug.dbp");
+        assert_eq!(adb.name, "enable-adb-debug");
+        assert_eq!(adb.ops.len(), 3);
+        match &adb.ops[0] {
+            DbpOp::TextReplace {
+                partition,
+                file,
+                from,
+                to,
+                all,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/build.prop");
+                assert_eq!(from, "ro.adb.secure=1\n");
+                assert_eq!(to, "ro.adb.secure=0\n");
+                assert_eq!(from.len(), to.len());
+                assert!(!*all);
+            }
+            _ => panic!("enable-adb-debug op[0] must replace ro.adb.secure in system build.prop"),
+        }
+        match &adb.ops[1] {
+            DbpOp::TextReplace {
+                partition,
+                file,
+                from,
+                to,
+                ..
+            } => {
+                assert_eq!(partition, "vendor");
+                assert_eq!(file, "build.prop");
+                assert_eq!(from, "ro.adb.secure=1\n");
+                assert_eq!(to, "ro.adb.secure=0\n");
+            }
+            _ => panic!("enable-adb-debug op[1] must replace ro.adb.secure in vendor build.prop"),
+        }
+        match &adb.ops[2] {
+            DbpOp::TextReplace {
+                partition,
+                file,
+                from,
+                to,
+                ..
+            } => {
+                assert_eq!(partition, "vendor");
+                assert_eq!(file, "etc/init/hw/init.qcom.usb.rc");
+                assert_eq!(from.len(), to.len());
+                assert!(to.contains("persist.sys.usb.config adb"));
+            }
+            _ => panic!("enable-adb-debug op[2] must reseed persist.sys.usb.config=adb"),
+        }
     }
 
     #[test]
