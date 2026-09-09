@@ -3477,7 +3477,7 @@ value = false
         let ds2 =
             load_dbp(&patches_dir().join("debloat-settings.dbp")).expect("debloat-settings.dbp");
         assert_eq!(ds2.name, "debloat-settings");
-        assert_eq!(ds2.ops.len(), 9);
+        assert_eq!(ds2.ops.len(), 12);
         let mut hide = false;
         let mut show = false;
         let mut hide_user_experience = false;
@@ -3486,6 +3486,9 @@ value = false
         let mut suggestion_complete = false;
         let mut suggestion_finished = false;
         let mut search_deindex_variants = 0usize;
+        let mut hide_network_accelerate = false;
+        let mut hide_pen_market_footer = false;
+        let mut battery_health_gate = false;
         for op in &ds2.ops {
             match op {
                 DbpOp::MethodConstInt {
@@ -3543,14 +3546,22 @@ value = false
                     value,
                     ..
                 } => {
-                    assert_eq!(
-                        class,
-                        "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
-                    );
-                    assert_eq!(method, "isSuggestionComplete");
-                    assert_eq!(proto, "(Landroid/content/Context;)Z");
-                    assert!(*value);
-                    suggestion_complete = true;
+                    if class == "Lcom/lenovo/settings/battery/ZuiChargingOptimization;" {
+                        // Charging optimization: always show battery health/cycles.
+                        assert_eq!(method, "isSupportBatteryHealthAndCycles");
+                        assert_eq!(proto, "()Z");
+                        assert!(*value);
+                        battery_health_gate = true;
+                    } else {
+                        assert_eq!(
+                            class,
+                            "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+                        );
+                        assert_eq!(method, "isSuggestionComplete");
+                        assert_eq!(proto, "(Landroid/content/Context;)Z");
+                        assert!(*value);
+                        suggestion_complete = true;
+                    }
                 }
                 DbpOp::MethodCodePatch {
                     class,
@@ -3577,22 +3588,40 @@ value = false
                     donor_proto,
                     ..
                 } => {
-                    assert_eq!(
-                        class,
-                        "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;"
-                    );
                     assert_eq!(method, "getAvailabilityStatus");
                     assert_eq!(proto, "()I");
                     assert_eq!(donor_proto, "()I");
-                    assert!(
-                        (donor_class
-                            == "Lcom/lenovo/settings/widget/UnsupportedPreferenceController;"
-                            && donor_method == "getAvailabilityStatus")
-                            || (donor_class
-                                == "Lcom/google/android/material/sidesheet/SideSheetDialog;"
-                                && donor_method == "getStateOnStart")
-                    );
-                    search_deindex_variants += 1;
+                    if class == "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;" {
+                        assert!(
+                            (donor_class
+                                == "Lcom/lenovo/settings/widget/UnsupportedPreferenceController;"
+                                && donor_method == "getAvailabilityStatus")
+                                || (donor_class
+                                    == "Lcom/google/android/material/sidesheet/SideSheetDialog;"
+                                    && donor_method == "getStateOnStart")
+                        );
+                        search_deindex_variants += 1;
+                    } else if class == "Lcom/lenovo/settings/sim/NetworkAccelerationController;" {
+                        assert_eq!(
+                            donor_class,
+                            "Lcom/lenovo/settings/widget/UnsupportedPreferenceController;"
+                        );
+                        assert_eq!(donor_method, "getAvailabilityStatus");
+                        hide_network_accelerate = true;
+                    } else {
+                        panic!("unexpected redirect target in debloat-settings: {class}");
+                    }
+                }
+                DbpOp::ResourceBool {
+                    file,
+                    resource,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(file, "system/priv-app/PenService/PenService.apk");
+                    assert_eq!(resource, "is_prc");
+                    assert!(!*value, "must hide the pen-settings market footer");
+                    hide_pen_market_footer = true;
                 }
                 _ => panic!("unexpected op in debloat-settings"),
             }
@@ -3610,6 +3639,18 @@ value = false
         assert!(
             suggestion_complete && suggestion_finished && search_deindex_variants == 2,
             "must suppress, harden, and deindex the User Experience suggestion"
+        );
+        assert!(
+            hide_network_accelerate,
+            "must hide the Network acceleration entry (-> UnsupportedPreferenceController)"
+        );
+        assert!(
+            hide_pen_market_footer,
+            "must hide the pen-settings Pen apps zone footer (is_prc -> false)"
+        );
+        assert!(
+            battery_health_gate,
+            "must force the Charging optimization battery health/cycles gate open"
         );
 
         let qk = load_dbp(&patches_dir().join("disable-quick-kill.dbp"))
@@ -5143,6 +5184,7 @@ value = false
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         let mut user_experience_landed = 0usize;
+        let mut network_accelerate_landed = 0usize;
         for name in [
             "classes.dex",
             "classes2.dex",
@@ -5168,6 +5210,14 @@ value = false
                     ) {
                         user_experience_landed += 1;
                     }
+                    if matches!(
+                        op,
+                        DbpOp::MethodCodeRedirect { class, .. }
+                            if class
+                                == "Lcom/lenovo/settings/sim/NetworkAccelerationController;"
+                    ) {
+                        network_accelerate_landed += 1;
+                    }
                     modified = true;
                 }
             }
@@ -5183,8 +5233,13 @@ value = false
             "UserExperienceSwitchController visibility override should land exactly once"
         );
         assert_eq!(
-            landed, 8,
-            "eight build-compatible debloat-settings ops should land"
+            network_accelerate_landed, 1,
+            "NetworkAccelerationController redirect should land exactly once"
+        );
+        assert_eq!(
+            landed, 9,
+            "nine build-compatible debloat-settings ops should land \
+             (SideSheetDialog donor and isRowVersion site are absent in this build)"
         );
     }
 
@@ -5488,6 +5543,54 @@ value = false
             Some((TYPE_DIMENSION, 0x0000_0901))
         );
         if let Ok(out) = std::env::var("DYNOBOX_ZUICAMERA_ARSC_OUT") {
+            std::fs::write(&out, &arsc).unwrap();
+        }
+    }
+
+    /// Apply the debloat-settings PenService `resource_bool` op to a real
+    /// PenService `resources.arsc` (STORED APK entry, extract it verbatim).
+    /// Set `DYNOBOX_PENSERVICE_ARSC`; optionally `DYNOBOX_PENSERVICE_ARSC_OUT`
+    /// to dump the patched arsc.
+    #[test]
+    fn bundled_debloat_settings_penservice_bool_lands_on_real_arsc() {
+        let Ok(path) = std::env::var("DYNOBOX_PENSERVICE_ARSC") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("debloat-settings.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::ResourceBool { .. }))
+            .expect("debloat-settings must carry the PenService resource_bool op");
+        let DbpOp::ResourceBool {
+            file,
+            resource,
+            value,
+            ..
+        } = op
+        else {
+            unreachable!()
+        };
+        assert_eq!(file, "system/priv-app/PenService/PenService.apk");
+        assert_eq!(resource, "is_prc");
+        assert!(!*value, "the pen-settings market footer must be hidden");
+        let mut arsc = std::fs::read(&path).unwrap();
+        // Stock value is `true`: the eight pen settings layouts gate their
+        // market footer on this flag and nothing else in the build reads it.
+        let before = arsc_raw_value(&arsc, resource)
+            .unwrap()
+            .expect("is_prc must exist");
+        assert_eq!(before.0, TYPE_INT_BOOLEAN, "stock value must be a boolean");
+        assert_ne!(before.1, 0, "stock is_prc must be true");
+        assert!(
+            patch_resources_arsc_bool(&mut arsc, resource, *value).unwrap(),
+            "resource_bool op should land"
+        );
+        assert_eq!(
+            arsc_raw_value(&arsc, resource).unwrap(),
+            Some((TYPE_INT_BOOLEAN, 0))
+        );
+        if let Ok(out) = std::env::var("DYNOBOX_PENSERVICE_ARSC_OUT") {
             std::fs::write(&out, &arsc).unwrap();
         }
     }
