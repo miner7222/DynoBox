@@ -231,6 +231,35 @@ property-file edits where growing the ext4 file would be unnecessary risk.
 | `to`   | yes      | replacement text/bytes; same byte length as `from` |
 | `all`  | no       | replace every match instead of just the first (default `false`) |
 
+### `layout_collapse`
+
+Collapse layout nodes with `android:id == node_id` inside `.xml` entries of
+a zip archive: `layout_height` (or `layout_weight`) goes to zero plus any
+vertical margins, so the node takes no space. Nodes already gone, or whose
+height is `match_parent`/`wrap_content`, are skipped. The archive length
+never changes (recompressed entries absorb slack in the local extra field).
+Exactly `expected` nodes must be patched or nothing is written — a mismatch
+means the layout changed shape and the op skips with a warning instead of
+half-hiding a screen.
+
+| field      | required | meaning                                                     |
+|------------|----------|-------------------------------------------------------------|
+| `node_id`  | yes      | view id to collapse, e.g. `0x7f090404`                      |
+| `expected` | no       | total nodes that must be patched; defaults to `1`           |
+
+### `layout_background`
+
+Swap the `android:background` reference of layout nodes with
+`android:id == node_id` to `drawable`. Same size-preserving machinery as
+`layout_collapse`. Intended for repairing card visuals after hiding rows
+(e.g. restoring the rounded closures a hidden row used to provide).
+
+| field      | required | meaning                                                     |
+|------------|----------|-------------------------------------------------------------|
+| `node_id`  | yes      | view id whose background is swapped, e.g. `0x7f0903fe`      |
+| `drawable` | yes      | replacement drawable id, e.g. `0x7f0804ab`                  |
+| `expected` | no       | total nodes that must be patched; defaults to `1`           |
+
 ### `zip_entry_replace`
 
 Overwrite the data of STORED zip entries with `payload` (whitespace-separated

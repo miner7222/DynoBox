@@ -45,11 +45,14 @@
 //! resolvers are the `pub(crate)` `fuck_lgsi::dex_walker` helpers.
 
 use std::collections::BTreeSet;
+use std::io::{Read, Write};
 
 use anyhow::{Result, anyhow};
+use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 
 use crate::fuck_lgsi::{
-    crc32_ieee, dex_walker, parse_zip_central_directory, read_u16_le, read_u32_le, write_u32_le,
+    crc32_ieee, dex_walker, parse_axml_elements, parse_zip_central_directory, read_u16_le,
+    read_u32_le, write_u16_le, write_u32_le,
 };
 
 // ---------------------------------------------------------------------------
@@ -3564,6 +3567,511 @@ pub fn force_zip_entry_replace(
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// primitive 8: patch binary-XML (AXML) layout nodes inside a zip
+// ---------------------------------------------------------------------------
+
+const AXML_ANDROID_NS: &str = "http://schemas.android.com/apk/res/android";
+// Typed-value data types (android.util.TypedValue subset).
+const AXML_TYPE_REFERENCE: u8 = 0x01;
+const AXML_TYPE_FLOAT: u8 = 0x04;
+const AXML_TYPE_DIMENSION: u8 = 0x05;
+
+/// One in-place typed-value rewrite inside inflated entry bytes.
+struct AxmlEdit {
+    type_off: usize,
+    new_type: u8,
+    new_data: u32,
+}
+
+/// A zip entry whose inflated bytes carry validated edits, not yet committed.
+struct AxmlEntryWork {
+    entry_idx: usize,
+    inflated: Vec<u8>,
+    edits: Vec<AxmlEdit>,
+    was_deflated: bool,
+    patched_nodes: usize,
+    /// Data-descriptor (CRC, compressed-size) field offsets, if the entry
+    /// uses one. Resolved during collection so a surprising layout fails
+    /// the op before anything is written.
+    descriptor: Option<(usize, usize)>,
+}
+
+fn axml_attr<'a>(
+    attrs: &'a [crate::fuck_lgsi::AxmlAttr],
+    name: &str,
+) -> Option<&'a crate::fuck_lgsi::AxmlAttr> {
+    attrs
+        .iter()
+        .find(|a| a.ns.as_deref() == Some(AXML_ANDROID_NS) && a.name.as_deref() == Some(name))
+}
+
+/// Zero a dimension-ish attribute (literal dimension keeps its type with data
+/// 0; a `@dimen` reference becomes a literal 0px dimension). Returns false
+/// when the attribute is absent (nothing to do) or has any other shape, in
+/// which case the caller skips the node.
+fn axml_zero_dim(attr: &crate::fuck_lgsi::AxmlAttr, edits: &mut Vec<AxmlEdit>) -> bool {
+    match attr.data_type {
+        AXML_TYPE_DIMENSION => {
+            edits.push(AxmlEdit {
+                type_off: attr.type_off,
+                new_type: AXML_TYPE_DIMENSION,
+                new_data: 0,
+            });
+            true
+        }
+        AXML_TYPE_REFERENCE => {
+            edits.push(AxmlEdit {
+                type_off: attr.type_off,
+                new_type: AXML_TYPE_DIMENSION,
+                new_data: 0,
+            });
+            true
+        }
+        _ => false,
+    }
+}
+
+enum AxmlEditKind {
+    /// Collapse the node: zero layout_height (or layout_weight) plus any
+    /// vertical margins. Nodes already gone, or whose height is
+    /// match_parent/wrap_content, are skipped, not counted.
+    Collapse,
+    /// Swap the node's android:background reference to `drawable`.
+    Background { drawable: u32 },
+}
+
+/// Collect validated per-entry edit plans for every `.xml` entry containing
+/// a node with `android:id == node_id`. Pure: touches nothing. Nodes that
+/// are already gone, or whose shape does not fit the edit kind, are skipped.
+/// Any structural surprise fails the whole op (empty plan) rather than
+/// writing a partial one.
+fn collect_axml_works(
+    zip_bytes: &[u8],
+    layout: &crate::fuck_lgsi::ZipLayout,
+    node_id: u32,
+    kind: &AxmlEditKind,
+) -> Result<Vec<AxmlEntryWork>> {
+    let mut works = Vec::new();
+    for (entry_idx, entry) in layout.entries.iter().enumerate() {
+        if !entry.name.ends_with(".xml") {
+            continue;
+        }
+        if entry.compression_method != 0 && entry.compression_method != 8 {
+            continue;
+        }
+        // Data descriptors are fine here (unlike dex ops): sizes come from
+        // the central directory and the descriptor itself is updated below.
+        // Zip64 stays refused.
+        if entry.is_zip64 {
+            continue;
+        }
+        let data_end = entry
+            .data_start
+            .checked_add(entry.compressed_size)
+            .filter(|&end| end <= zip_bytes.len());
+        let Some(data_end) = data_end else {
+            continue;
+        };
+        let raw = &zip_bytes[entry.data_start..data_end];
+        let inflated: Vec<u8> = if entry.compression_method == 8 {
+            let mut out = Vec::with_capacity(raw.len() * 2);
+            // Unparseable entry: skip it like any non-AXML file.
+            let mut decoder = DeflateDecoder::new(raw);
+            match decoder.read_to_end(&mut out) {
+                Ok(_) => out,
+                Err(_) => continue,
+            }
+        } else {
+            raw.to_vec()
+        };
+        let elements = match parse_axml_elements(&inflated) {
+            // Not a binary XML (plaintext assets share the extension) or
+            // corrupt: skip the entry, never abort the op on it.
+            Ok(elements) => elements,
+            Err(_) => continue,
+        };
+        let mut edits = Vec::new();
+        let mut patched_nodes = 0usize;
+        for el in &elements {
+            let Some(id_attr) = axml_attr(&el.attrs, "id") else {
+                continue;
+            };
+            if id_attr.data_type != AXML_TYPE_REFERENCE || id_attr.data != node_id {
+                continue;
+            }
+            let before = edits.len();
+            match kind {
+                AxmlEditKind::Collapse => {
+                    if el.attrs.iter().any(|a| {
+                        a.ns.as_deref() == Some(AXML_ANDROID_NS)
+                            && a.name.as_deref() == Some("minHeight")
+                    }) {
+                        return Ok(Vec::new());
+                    }
+                    let mut node_edits = Vec::new();
+                    let mut sized = match axml_attr(&el.attrs, "layout_height") {
+                        None => return Ok(Vec::new()),
+                        Some(h) => match h.data_type {
+                            AXML_TYPE_DIMENSION | AXML_TYPE_REFERENCE => {
+                                node_edits.push(AxmlEdit {
+                                    type_off: h.type_off,
+                                    new_type: AXML_TYPE_DIMENSION,
+                                    new_data: 0,
+                                });
+                                true
+                            }
+                            // match_parent/wrap_content: weight may still
+                            // collapse the node; decide below.
+                            _ => false,
+                        },
+                    };
+                    match axml_attr(&el.attrs, "layout_weight") {
+                        None => {}
+                        Some(w) if w.data_type == AXML_TYPE_FLOAT => {
+                            node_edits.push(AxmlEdit {
+                                type_off: w.type_off,
+                                new_type: AXML_TYPE_FLOAT,
+                                new_data: 0,
+                            });
+                            sized = true;
+                        }
+                        Some(_) => continue,
+                    }
+                    if !sized {
+                        continue;
+                    }
+                    for margin in ["layout_marginTop", "layout_marginBottom", "layout_margin"] {
+                        match axml_attr(&el.attrs, margin) {
+                            None => {}
+                            Some(m) => {
+                                if !axml_zero_dim(m, &mut node_edits) {
+                                    // Unexpected margin shape: skip the node.
+                                    node_edits.clear();
+                                    sized = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if sized {
+                        edits.extend(node_edits);
+                    }
+                }
+                AxmlEditKind::Background { drawable } => {
+                    let Some(bg) = axml_attr(&el.attrs, "background") else {
+                        return Ok(Vec::new());
+                    };
+                    if bg.data_type != AXML_TYPE_REFERENCE {
+                        return Ok(Vec::new());
+                    }
+                    if bg.data == *drawable {
+                        continue;
+                    }
+                    edits.push(AxmlEdit {
+                        type_off: bg.type_off,
+                        new_type: AXML_TYPE_REFERENCE,
+                        new_data: *drawable,
+                    });
+                }
+            }
+            if edits.len() > before {
+                patched_nodes += 1;
+            }
+        }
+        if !edits.is_empty() {
+            let data_end = entry
+                .data_start
+                .checked_add(entry.compressed_size)
+                .filter(|&end| end <= zip_bytes.len());
+            let Some(data_end) = data_end else {
+                continue;
+            };
+            let descriptor = match axml_descriptor_offsets(zip_bytes, entry, data_end) {
+                Ok(descriptor) => descriptor,
+                Err(_) => return Ok(Vec::new()),
+            };
+            works.push(AxmlEntryWork {
+                entry_idx,
+                inflated,
+                edits,
+                was_deflated: entry.compression_method == 8,
+                patched_nodes,
+                descriptor,
+            });
+        }
+    }
+    Ok(works)
+}
+
+fn axml_apply_edits(inflated: &mut [u8], edits: &[AxmlEdit]) -> Result<()> {
+    for edit in edits {
+        // Typed value layout: u16 size, u8 res0, u8 type, u32 data.
+        let type_at = inflated
+            .get_mut(edit.type_off..edit.type_off + 8)
+            .ok_or_else(|| anyhow!("axml edit out of bounds"))?;
+        type_at[3] = edit.new_type;
+        type_at[4..8].copy_from_slice(&edit.new_data.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn axml_deflate_fit(data: &[u8], budget: usize) -> Option<Vec<u8>> {
+    for level in [
+        Compression::default(),
+        Compression::best(),
+        Compression::fast(),
+        Compression::none(),
+    ] {
+        let mut enc = DeflateEncoder::new(Vec::new(), level);
+        if enc.write_all(data).is_err() {
+            continue;
+        }
+        if let Ok(out) = enc.finish()
+            && out.len() <= budget
+        {
+            return Some(out);
+        }
+    }
+    // Last resort: zopfli squeezes a few percent more out of small files at
+    // a steep CPU cost; only reached when flate2 cannot fit the budget.
+    let mut out = Vec::new();
+    if zopfli::compress(
+        zopfli::Options::default(),
+        zopfli::Format::Deflate,
+        data,
+        &mut out,
+    )
+    .is_ok()
+        && out.len() <= budget
+    {
+        return Some(out);
+    }
+    None
+}
+
+fn read_u16_at(bytes: &[u8], off: usize) -> Result<u16> {
+    bytes
+        .get(off..off + 2)
+        .ok_or_else(|| anyhow!("zip header truncated at {off}"))
+        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+}
+
+fn read_u32_at(bytes: &[u8], off: usize) -> Result<u32> {
+    bytes
+        .get(off..off + 4)
+        .ok_or_else(|| anyhow!("zip header truncated at {off}"))
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+}
+
+const ZIP_DD_SIG: u32 = 0x08074b50;
+const ZIP_LOCAL_SIG: u32 = 0x04034b50;
+const ZIP_CENTRAL_SIG: u32 = 0x02014b50;
+const ZIP_EOCD_SIG: u32 = 0x06054b50;
+
+/// Locate a data descriptor's CRC field for an entry whose data ends at
+/// `data_end`. Returns `None` when the entry uses no descriptor. Refuses
+/// anything unexpected rather than writing a half-updated archive.
+fn axml_descriptor_offsets(
+    zip_bytes: &[u8],
+    entry: &crate::fuck_lgsi::ZipEntry,
+    data_end: usize,
+) -> Result<Option<(usize, usize)>> {
+    if !entry.uses_data_descriptor {
+        return Ok(None);
+    }
+    let first = read_u32_at(zip_bytes, data_end)?;
+    let crc_off = if first == ZIP_DD_SIG {
+        data_end + 4
+    } else {
+        data_end
+    };
+    let after = crc_off
+        .checked_add(12)
+        .ok_or_else(|| anyhow!("axml descriptor overruns file"))?;
+    if after > zip_bytes.len() {
+        return Err(anyhow!("axml descriptor overruns file"));
+    }
+    match read_u32_at(zip_bytes, after)? {
+        ZIP_LOCAL_SIG | ZIP_CENTRAL_SIG | ZIP_EOCD_SIG => {
+            // Descriptor body: crc32, compressed size, uncompressed size.
+            Ok(Some((crc_off, crc_off + 4)))
+        }
+        other => Err(anyhow!(
+            "axml descriptor of {} not followed by a zip header ({other:#010x})",
+            entry.name
+        )),
+    }
+}
+
+/// Commit validated entry works: rewrite entry bytes in place (growing the
+/// local extra field with zero padding when recompression shrank the data,
+/// so the file length never changes), then fix CRCs and compressed sizes.
+fn commit_axml_works(
+    zip_bytes: &mut [u8],
+    layout: &crate::fuck_lgsi::ZipLayout,
+    works: Vec<AxmlEntryWork>,
+) -> Result<bool> {
+    // Phase 1: apply edits to copies and fit recompression; nothing written.
+    struct Staged {
+        entry_idx: usize,
+        payload: Vec<u8>,
+        extra_pad: usize,
+        was_deflated: bool,
+        descriptor: Option<(usize, usize)>,
+        /// CRC32 over the INFLATED (uncompressed) content — what zip CRCs
+        /// always cover, regardless of the storage method.
+        uncomp_crc: u32,
+    }
+    let mut staged = Vec::with_capacity(works.len());
+    for mut work in works {
+        axml_apply_edits(&mut work.inflated, &work.edits)?;
+        let uncomp_crc = crc32_ieee(&work.inflated);
+        let entry = &layout.entries[work.entry_idx];
+        if !work.was_deflated {
+            staged.push(Staged {
+                entry_idx: work.entry_idx,
+                payload: work.inflated,
+                extra_pad: 0,
+                was_deflated: false,
+                descriptor: work.descriptor,
+                uncomp_crc,
+            });
+            continue;
+        }
+        let old_extra_len = read_u16_at(zip_bytes, entry.local_header_offset + 28)? as usize;
+        // The local data region is exactly `compressed_size` bytes long; the
+        // slack left by a smaller recompressed payload is absorbed by GROWING
+        // the local extra field, which pushes the data start forward while the
+        // whole entry footprint (extra + data) stays the same.
+        let budget = entry.compressed_size;
+        let Some(payload) = axml_deflate_fit(&work.inflated, budget) else {
+            return Ok(false);
+        };
+        let extra_pad = budget - payload.len();
+        // Refuse (skip, never half-write) when the grown extra field cannot be
+        // represented by the u16 length in the local header.
+        if old_extra_len + extra_pad > u16::MAX as usize {
+            return Ok(false);
+        }
+        staged.push(Staged {
+            entry_idx: work.entry_idx,
+            payload,
+            extra_pad,
+            was_deflated: true,
+            descriptor: work.descriptor,
+            uncomp_crc,
+        });
+    }
+    // Phase 2: write everything (infallible after phase 1).
+    let mut patched = 0usize;
+    for item in staged {
+        let entry = &layout.entries[item.entry_idx];
+        let data_end = entry.data_start + entry.compressed_size;
+        if !item.was_deflated {
+            let region = zip_bytes
+                .get_mut(entry.data_start..data_end)
+                .ok_or_else(|| anyhow!("axml entry range out of bounds"))?;
+            if region.len() != item.payload.len() {
+                return Err(anyhow!("axml stored entry length changed"));
+            }
+            region.copy_from_slice(&item.payload);
+        } else {
+            let name_len = read_u16_at(zip_bytes, entry.local_header_offset + 26)? as usize;
+            let old_extra_len = read_u16_at(zip_bytes, entry.local_header_offset + 28)? as usize;
+            let extra_start = entry
+                .local_header_offset
+                .checked_add(30 + name_len)
+                .ok_or_else(|| anyhow!("axml header offset overflow"))?;
+            let extra_end = extra_start
+                .checked_add(old_extra_len + item.extra_pad)
+                .ok_or_else(|| anyhow!("axml header offset overflow"))?;
+            zip_bytes
+                .get_mut(extra_start + old_extra_len..extra_end)
+                .ok_or_else(|| anyhow!("axml extra range out of bounds"))?
+                .fill(0);
+            let new_data_start = extra_end;
+            let new_data_end = new_data_start
+                .checked_add(item.payload.len())
+                .ok_or_else(|| anyhow!("axml data offset overflow"))?;
+            if new_data_end != data_end {
+                return Err(anyhow!("axml entry footprint changed"));
+            }
+            zip_bytes[new_data_start..new_data_end].copy_from_slice(&item.payload);
+            let new_extra_len = u16::try_from(old_extra_len + item.extra_pad)
+                .map_err(|_| anyhow!("axml extra length overflow"))?;
+            let new_comp_len = u32::try_from(item.payload.len())
+                .map_err(|_| anyhow!("axml data length overflow"))?;
+            write_u16_le(zip_bytes, entry.local_header_offset + 28, new_extra_len);
+            write_u32_le(zip_bytes, entry.local_header_comp_size_offset, new_comp_len);
+            write_u32_le(zip_bytes, entry.cd_comp_size_offset, new_comp_len);
+        }
+        // CRC covers the inflated content (zip CRCs are always over the
+        // uncompressed bytes, whatever the storage method).
+        let new_crc = item.uncomp_crc;
+        write_u32_le(zip_bytes, entry.local_header_crc_offset, new_crc);
+        write_u32_le(zip_bytes, entry.cd_crc_offset, new_crc);
+        if let Some((dd_crc_off, dd_comp_off)) = item.descriptor {
+            let comp_len = if item.was_deflated {
+                item.payload.len()
+            } else {
+                entry.compressed_size
+            };
+            let comp_len =
+                u32::try_from(comp_len).map_err(|_| anyhow!("axml data length overflow"))?;
+            write_u32_le(zip_bytes, dd_crc_off, new_crc);
+            write_u32_le(zip_bytes, dd_comp_off, comp_len);
+        }
+        patched += 1;
+    }
+    Ok(patched > 0)
+}
+
+/// Collapse every layout node with `android:id == node_id` inside `.xml`
+/// entries of a zip archive: `layout_height` (or `layout_weight`) goes to
+/// zero plus any vertical margins, so the node takes no space. Nodes whose
+/// height is match_parent/wrap_content are skipped. The archive length never
+/// changes (recompressed entries absorb slack in the local extra field);
+/// exactly `expected` nodes must be patched or nothing is written.
+pub fn force_axml_collapse(zip_bytes: &mut [u8], node_id: u32, expected: usize) -> Result<bool> {
+    if node_id == 0 || expected == 0 {
+        return Ok(false);
+    }
+    let layout = parse_zip_central_directory(zip_bytes)?;
+    let works = collect_axml_works(zip_bytes, &layout, node_id, &AxmlEditKind::Collapse)?;
+    let patched: usize = works.iter().map(|w| w.patched_nodes).sum();
+    if patched != expected {
+        return Ok(false);
+    }
+    commit_axml_works(zip_bytes, &layout, works)
+}
+
+/// Swap the `android:background` reference of every layout node with
+/// `android:id == node_id` to `drawable`. Same size-preserving machinery as
+/// [`force_axml_collapse`]; exactly `expected` nodes must be patched.
+pub fn force_axml_background(
+    zip_bytes: &mut [u8],
+    node_id: u32,
+    drawable: u32,
+    expected: usize,
+) -> Result<bool> {
+    if node_id == 0 || drawable == 0 || expected == 0 {
+        return Ok(false);
+    }
+    let layout = parse_zip_central_directory(zip_bytes)?;
+    let works = collect_axml_works(
+        zip_bytes,
+        &layout,
+        node_id,
+        &AxmlEditKind::Background { drawable },
+    )?;
+    let patched: usize = works.iter().map(|w| w.patched_nodes).sum();
+    if patched != expected {
+        return Ok(false);
+    }
+    commit_axml_works(zip_bytes, &layout, works)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4669,7 +5177,7 @@ mod tests {
         };
         let apk = std::fs::read(path).expect("read ZuiSecurity.apk");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
-        let (mut list_sites, mut map_sites) = (0usize, 0usize);
+        let (mut list_sites, mut update_sites) = (0usize, 0usize);
         for entry in zip.entries.iter().filter(|e| {
             e.name.ends_with(".dex")
                 && e.compression_method == 0
@@ -4686,26 +5194,23 @@ mod tests {
                 "add",
                 "Z",
                 &["Ljava/lang/Object;"],
-                NopAnchor::Int(0x7f12006d),
+                NopAnchor::Int(0x7f12003a),
             )
             .expect("list");
-            map_sites += force_nop_anchored_invoke(
+            update_sites += force_nop_anchored_invoke(
                 &mut dex,
-                "Lcom/lenovo/xuipermissionmanager/model/BasePermissionGroup;",
-                "<clinit>",
-                "Landroid/util/ArrayMap;",
-                "put",
-                "Ljava/lang/Object;",
-                &["Ljava/lang/Object;", "Ljava/lang/Object;"],
-                NopAnchor::Str("android.permission.RECEIVE_BOOT_COMPLETED"),
+                "Lcom/lenovo/performance/autorun/services/AutoRunPkgReceiver;",
+                "processAdd",
+                "Lcom/lenovo/performance/autorun/AutoRunDataLayerManager;",
+                "updateEntryIntoDb",
+                "V",
+                &["Lcom/lenovo/performance/autorun/AutoRunItem;"],
+                NopAnchor::Str("InstallApp "),
             )
-            .expect("map");
+            .expect("update");
         }
-        assert_eq!(list_sites, 1, "autostart list item add nopped once");
-        assert_eq!(
-            map_sites, 1,
-            "RECEIVE_BOOT_COMPLETED->boot_start_up put nopped once"
-        );
+        assert_eq!(list_sites, 1, "antivirus list item add nopped once");
+        assert_eq!(update_sites, 1, "autorun update-preserve call nopped once");
     }
 
     // ---- force_view_gone -------------------------------------------------
@@ -4866,12 +5371,12 @@ mod tests {
                 &mut dex,
                 "Lcom/zui/safecenter/ui/MainNavigationActivity;",
                 "initView",
-                &[0x7f0903f1, 0x7f0903d7],
+                &[0x7f0903fe, 0x7f090413],
                 1,
             )
             .expect("hide");
         }
-        assert_eq!(hidden, 2, "permission + autostart nav entries hidden");
+        assert_eq!(hidden, 2, "permission + antivirus nav entries hidden");
     }
 
     /// `invoke_const_bool` forces `isRowVersion()` at the single call site in
@@ -4957,37 +5462,6 @@ mod tests {
 
         assert!(!ok, "wrong shape must not be rewritten");
         assert_eq!(buf, original, "buffer untouched");
-    }
-
-    /// `force_remoteviews_gone` hides the "Autostart Apps" widget item on the
-    /// real ZuiSecurity.apk. Set DYNOBOX_ZUISECURITY_APK.
-    #[test]
-    fn remoteviews_gone_lands_on_real_zuisecurity() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISECURITY_APK") else {
-            return;
-        };
-        let apk = std::fs::read(path).expect("read ZuiSecurity.apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
-        let mut hit = 0usize;
-        for entry in zip.entries.iter().filter(|e| {
-            e.name.ends_with(".dex")
-                && e.compression_method == 0
-                && !e.uses_data_descriptor
-                && !e.is_zip64
-                && e.data_start + e.compressed_size <= apk.len()
-        }) {
-            let mut dex = apk[entry.data_start..entry.data_start + entry.compressed_size].to_vec();
-            hit += force_remoteviews_gone(
-                &mut dex,
-                "Lcom/zui/safecenter/SafecenterWidget;",
-                "refreshWidget",
-                0x7f09009e,
-                8,
-                1,
-            )
-            .expect("hide");
-        }
-        assert_eq!(hit, 1, "autostart-apps widget item hidden once");
     }
 
     /// `force_method_return_void` neutralizes the antivirus engine init on the

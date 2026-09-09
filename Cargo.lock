@@ -951,6 +951,7 @@ dependencies = [
  "dynobox-super",
  "dynobox-xml",
  "ed25519-dalek",
+ "flate2",
  "getrandom 0.4.3",
  "memchr",
  "pkcs8 0.11.0",
@@ -961,6 +962,7 @@ dependencies = [
  "thiserror 2.0.20",
  "toml",
  "zerocopy",
+ "zopfli",
 ]
 
 [[package]]

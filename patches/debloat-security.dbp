@@ -1,6 +1,6 @@
 
 name = "debloat-security"
-description = "Remove ZUI security surfaces."
+description = "Remove ZUI security surfaces; default autorun and relative starts to allowed."
 
 [[op]]
 kind = "method_nop"
@@ -64,53 +64,6 @@ proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)I"
 value = 0
 
 [[op]]
-kind = "method_const_int"
-partition = "system"
-file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
-class = "Lcom/lenovo/settings/emergency/SelfStartPreferenceController;"
-method = "getAvailabilityStatus"
-value = 3
-
-[[op]]
-kind = "fragment_hide"
-partition = "system"
-file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
-class = "Lcom/lenovo/safecenter/main/ui/fragment/HomepageAutoStartFragment;"
-layout = 0x7f0c0118
-
-[[op]]
-kind = "nop_invoke"
-partition = "system"
-file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
-scan_class = "Lcom/zui/safecenter/ui/PhoneMainViewModel;"
-scan_method = "<init>"
-target_class = "Ljava/util/List;"
-target_method = "add"
-proto = "(Ljava/lang/Object;)Z"
-anchor_int = 0x7f12006d
-
-[[op]]
-kind = "nop_invoke"
-partition = "system"
-file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
-scan_class = "Lcom/lenovo/xuipermissionmanager/model/BasePermissionGroup;"
-scan_method = "<clinit>"
-target_class = "Landroid/util/ArrayMap;"
-target_method = "put"
-proto = "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;"
-anchor_string = "android.permission.RECEIVE_BOOT_COMPLETED"
-
-[[op]]
-kind = "remoteviews_hide"
-partition = "system"
-file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
-scan_class = "Lcom/zui/safecenter/SafecenterWidget;"
-scan_method = "refreshWidget"
-view_id = 0x7f09009e
-rv_reg = 8
-scratch_reg = 1
-
-[[op]]
 kind = "invoke_const_bool"
 partition = "system"
 file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
@@ -125,7 +78,18 @@ partition = "system"
 file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
 scan_class = "Lcom/zui/safecenter/ui/MainNavigationActivity;"
 scan_method = "initView"
-view_ids = [0x7f0903f1, 0x7f090406, 0x7f0903d7]
+view_ids = [0x7f0903f1, 0x7f090406]
+scratch_reg = 1
+
+# Same rows on current builds (permission 0x7f0903fe still field-backed and
+# anchors; virus 0x7f090413).
+[[op]]
+kind = "force_view_gone"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+scan_class = "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+scan_method = "initView"
+view_ids = [0x7f0903fe, 0x7f090413]
 scratch_reg = 1
 
 [[op]]
@@ -152,3 +116,126 @@ file = "system/priv-app/ZuiPackageInstaller/ZuiPackageInstaller.apk"
 class = "Lcom/android/packageinstaller/InstallInstallingExtra;"
 method = "getRecommendApp"
 proto = "()V"
+
+# Smart Optimization virus card (layout_root_virus) is visible by XML
+# default with no code gate, and hiding it needs new code that does not fit
+# size-preserving dex ops — collapse it in the layout binaries instead
+# (height/weight + margins to zero in every variant that carries it).
+[[op]]
+kind = "layout_collapse"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+node_id = 0x7f090404
+expected = 6
+
+# Hiding rows leaves the neighboring card boundaries square (the rounded
+# top/bottom closures belonged to the hidden rows). Restore them by swapping
+# the boundary rows' backgrounds to the rounded variants.
+[[op]]
+kind = "layout_background"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+node_id = 0x7f090401
+drawable = 0x7f0804ab
+expected = 2
+
+[[op]]
+kind = "layout_background"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+node_id = 0x7f0903fa
+drawable = 0x7f0804ac
+expected = 2
+
+# Fallback for the collapse above: if a build's layout does not match the
+# collapse op (it is all-or-nothing and skips as a whole), the virus card
+# would still be visible and tappable. Nop its setOnClickListener invoke
+# (the iget stays, harmless) so the card then renders but does nothing when
+# tapped. The setEnabled calls elsewhere keep working.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/zui/safecenter/ui/SmartOptimizationActivity;"
+method = "initView"
+proto = "()V"
+
+[[op.replacement]]
+from = "54 60 23 87 6e 20 a3 05 60 00"
+to = "54 60 23 87 00 00 00 00 00 00"
+expected = 1
+
+# Clicking any home card used to mark it "selected" (onClick ->
+# setSelectedView) so its bg_home_card background stayed highlighted until
+# another card was pressed. Cards whose action is inert (Anti-spam / Find My
+# Tablet without their target apps) never open a pane, so the highlight just
+# stuck. The split listener still re-selects the card whose pane actually
+# opened, so drop only the click-time selection; the pressed-state ripple is
+# untouched and now clears on release like a normal tap.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+method = "onClick"
+proto = "(Landroid/view/View;)V"
+
+[[op.symbol]]
+name = "set_selected_view"
+kind = "method"
+class = "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+method = "setSelectedView"
+proto = "(I)V"
+
+[[op.replacement]]
+from = "70 20 ${set_selected_view:u16} 02 00"
+to = "00 00 00 00 00 00"
+expected = 1
+
+# ============================ AUTORUN DEFAULTS ============================
+# Keep the Autostart Manager entry points, but flip its defaults to "allowed
+# unless chosen otherwise". New installs are seeded enabled (the framework
+# reads that state through ZuiSecurityService.getAutorunAppStatus -> 1, which
+# isAllowStart allows), while an app update no longer rewrites the stored
+# state and relative (app-to-app) starts default to allowed.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/lenovo/performance/autorun/utils/AutoRunDataUtils;"
+method = "appInfoConvertToAutoRunItem"
+proto = "(Lcom/lenovo/performance/autorun/beans/AppInfo;)Lcom/lenovo/performance/autorun/AutoRunItem;"
+
+[[op.replacement]]
+from = "12 02"
+to = "12 12"
+expected = 1
+
+# processAdd() calls updateEntryIntoDb() for packages that already have a row;
+# drop that call so updating an app keeps its stored autorun on/off state.
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+scan_class = "Lcom/lenovo/performance/autorun/services/AutoRunPkgReceiver;"
+scan_method = "processAdd"
+target_class = "Lcom/lenovo/performance/autorun/AutoRunDataLayerManager;"
+target_method = "updateEntryIntoDb"
+proto = "(Lcom/lenovo/performance/autorun/AutoRunItem;)V"
+anchor_string = "InstallApp "
+
+# getRelativeAppStatus() returns 0 for pairs the user never chose, which
+# isAllowStart treats as "blocked unless the caller is top"; seed the default
+# with 1 so unlisted pairs are allowed. An explicit block (2) still wins.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/ZuiSecurityService$ZuiSecurityServiceBinder;"
+method = "getRelativeAppStatus"
+proto = "(Ljava/lang/String;Ljava/lang/String;)I"
+
+[[op.replacement]]
+from = "12 00"
+to = "12 10"
+expected = 1

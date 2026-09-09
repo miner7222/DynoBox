@@ -45,13 +45,14 @@ use serde::Deserialize;
 
 use crate::dex_patch::{
     DexMethodRef, DexPoolSymbol, DexPoolSymbolKind, MethodCodeReplacement, MethodCodeTemplateSlot,
-    NopAnchor, force_field_const_bool, force_fragment_render_gone, force_invoke_const_bool,
-    force_invoke_const_bool_at, force_invoke_const_int, force_method_broadcast_finish,
-    force_method_return_bool, force_method_return_const_string, force_method_return_int,
-    force_method_return_void, force_nop_anchored_invoke, force_preference_controller_hidden,
-    force_remoteviews_gone, force_view_gone, force_zip_entry_replace, parse_method_descriptor,
-    patch_method_code, redirect_intent_action_to_broadcast, redirect_method_code,
-    resolve_dex_pool_symbol, validate_method_code_template_slots,
+    NopAnchor, force_axml_background, force_axml_collapse, force_field_const_bool,
+    force_fragment_render_gone, force_invoke_const_bool, force_invoke_const_bool_at,
+    force_invoke_const_int, force_method_broadcast_finish, force_method_return_bool,
+    force_method_return_const_string, force_method_return_int, force_method_return_void,
+    force_nop_anchored_invoke, force_preference_controller_hidden, force_remoteviews_gone,
+    force_view_gone, force_zip_entry_replace, parse_method_descriptor, patch_method_code,
+    redirect_intent_action_to_broadcast, redirect_method_code, resolve_dex_pool_symbol,
+    validate_method_code_template_slots,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
 use crate::fuck_lgsi::{
@@ -286,6 +287,30 @@ pub enum DbpOp {
         entries: Vec<String>,
         payload: String,
     },
+    /// Collapse layout nodes with `android:id == node_id` inside `.xml`
+    /// entries of a zip archive: `layout_height` (or `layout_weight`) goes
+    /// to zero plus any vertical margins, so the node takes no space.
+    /// Exactly `expected` nodes must be patched or nothing is written.
+    /// Size-preserving: recompressed entries absorb slack in the local extra
+    /// field, so the file length never changes.
+    LayoutCollapse {
+        partition: String,
+        file: String,
+        node_id: i32,
+        #[serde(default = "default_expected_matches")]
+        expected: usize,
+    },
+    /// Swap the `android:background` reference of layout nodes with
+    /// `android:id == node_id` to `drawable`. Same size-preserving machinery
+    /// as [`DbpOp::LayoutCollapse`]; exactly `expected` nodes must be patched.
+    LayoutBackground {
+        partition: String,
+        file: String,
+        node_id: i32,
+        drawable: i32,
+        #[serde(default = "default_expected_matches")]
+        expected: usize,
+    },
     /// Force `invoke-static target_class.target_method()Z` results to `value`
     /// inside `scan_class` (optionally one `scan_method` and zero-based site).
     InvokeConstBool {
@@ -419,6 +444,8 @@ impl DbpOp {
             | DbpOp::ResourceDimen { partition, .. }
             | DbpOp::TextReplace { partition, .. }
             | DbpOp::ZipEntryReplace { partition, .. }
+            | DbpOp::LayoutCollapse { partition, .. }
+            | DbpOp::LayoutBackground { partition, .. }
             | DbpOp::InvokeConstBool { partition, .. }
             | DbpOp::InvokeConstInt { partition, .. }
             | DbpOp::FieldConstBool { partition, .. }
@@ -444,6 +471,8 @@ impl DbpOp {
             | DbpOp::ResourceDimen { file, .. }
             | DbpOp::TextReplace { file, .. }
             | DbpOp::ZipEntryReplace { file, .. }
+            | DbpOp::LayoutCollapse { file, .. }
+            | DbpOp::LayoutBackground { file, .. }
             | DbpOp::InvokeConstBool { file, .. }
             | DbpOp::InvokeConstInt { file, .. }
             | DbpOp::FieldConstBool { file, .. }
@@ -829,6 +858,42 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
                 if parsed.bytes.is_empty() {
                     return Err(bail(
                         "zip_entry_replace `payload` must not be empty".to_string(),
+                    ));
+                }
+            }
+            DbpOp::LayoutCollapse {
+                node_id, expected, ..
+            } => {
+                if *node_id <= 0 {
+                    return Err(bail(
+                        "layout_collapse `node_id` must be a positive resource id".to_string(),
+                    ));
+                }
+                if *expected == 0 {
+                    return Err(bail(
+                        "layout_collapse `expected` must be non-zero".to_string(),
+                    ));
+                }
+            }
+            DbpOp::LayoutBackground {
+                node_id,
+                drawable,
+                expected,
+                ..
+            } => {
+                if *node_id <= 0 {
+                    return Err(bail(
+                        "layout_background `node_id` must be a positive resource id".to_string(),
+                    ));
+                }
+                if *drawable <= 0 {
+                    return Err(bail(
+                        "layout_background `drawable` must be a positive resource id".to_string(),
+                    ));
+                }
+                if *expected == 0 {
+                    return Err(bail(
+                        "layout_background `expected` must be non-zero".to_string(),
                     ));
                 }
             }
@@ -1480,6 +1545,37 @@ fn apply_ops_to_apk(
         }
     }
 
+    // Binary-XML layout ops run against the same whole-archive bytes.
+    for (i, op) in ops.iter().enumerate() {
+        let (landed, label) = match op {
+            DbpOp::LayoutCollapse {
+                node_id, expected, ..
+            } => (
+                force_axml_collapse(&mut apk_bytes, *node_id as u32, *expected)?,
+                format!("axml-collapse:{node_id:#x}"),
+            ),
+            DbpOp::LayoutBackground {
+                node_id,
+                drawable,
+                expected,
+                ..
+            } => (
+                force_axml_background(
+                    &mut apk_bytes,
+                    *node_id as u32,
+                    *drawable as u32,
+                    *expected,
+                )?,
+                format!("axml-background:{node_id:#x}"),
+            ),
+            _ => (false, String::new()),
+        };
+        if landed {
+            op_landed[i] = true;
+            patched_entries.push(label);
+        }
+    }
+
     let ops_applied = op_landed.iter().filter(|&&b| b).count();
     if ops_applied > 0 {
         write_via_extents(image_path, &apk_bytes, &apk_extents, block_size)?;
@@ -1797,9 +1893,10 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
         }
         DbpOp::ResourceBool { .. } | DbpOp::ResourceDimen { .. } => Ok(false),
         DbpOp::TextReplace { .. } => Ok(false),
-        // File-level op: handled against whole-archive bytes in
+        // File-level ops: handled against whole-archive bytes in
         // `apply_ops_to_apk`, never against a dex slice.
         DbpOp::ZipEntryReplace { .. } => Ok(false),
+        DbpOp::LayoutCollapse { .. } | DbpOp::LayoutBackground { .. } => Ok(false),
     }
 }
 
@@ -2168,6 +2265,224 @@ proto = "(Landroid/content/Context;Z)V"
     }
 
     #[test]
+    fn axml_collapse_and_background_round_trip() {
+        use crate::fuck_lgsi::{build_test_axml, parse_axml_elements};
+
+        let xml = build_test_axml();
+        let zip = build_test_zip(&[("res/layout.xml", &xml, 0, 0)]);
+        let mut patched = zip.clone();
+        // Collapse the synthetic node (id 0x7f090001, dim height + ref
+        // margin): height and margin go to zero.
+        assert!(force_axml_collapse(&mut patched, 0x7f090001, 1).unwrap());
+        let layout = parse_zip_central_directory(&patched).unwrap();
+        let entry = layout
+            .entries
+            .iter()
+            .find(|e| e.name == "res/layout.xml")
+            .unwrap();
+        let data = &patched[entry.data_start..entry.data_start + entry.compressed_size];
+        let elements = parse_axml_elements(data).expect("patched parses");
+        assert_eq!(elements.len(), 1);
+        let get = |name: &str| {
+            elements[0]
+                .attrs
+                .iter()
+                .find(|a| {
+                    a.ns.as_deref() == Some("http://schemas.android.com/apk/res/android")
+                        && a.name.as_deref() == Some(name)
+                })
+                .expect("attr present")
+                .clone()
+        };
+        let height = get("layout_height");
+        assert_eq!((height.data_type, height.data), (0x05, 0));
+        let margin = get("layout_marginTop");
+        assert_eq!((margin.data_type, margin.data), (0x05, 0));
+        // Same size: STORED entry keeps its length.
+        assert_eq!(patched.len(), zip.len());
+
+        // Background swap on the same node.
+        let mut patched_bg = zip.clone();
+        assert!(force_axml_background(&mut patched_bg, 0x7f090001, 0x7f080099, 1).unwrap());
+        let layout_bg = parse_zip_central_directory(&patched_bg).unwrap();
+        let entry_bg = layout_bg
+            .entries
+            .iter()
+            .find(|e| e.name == "res/layout.xml")
+            .unwrap();
+        let data_bg =
+            &patched_bg[entry_bg.data_start..entry_bg.data_start + entry_bg.compressed_size];
+        let elements_bg = parse_axml_elements(data_bg).expect("patched parses");
+        let bg = elements_bg[0]
+            .attrs
+            .iter()
+            .find(|a| a.name.as_deref() == Some("background"))
+            .expect("bg present");
+        assert_eq!((bg.data_type, bg.data), (0x01, 0x7f080099));
+
+        // Refusals: unknown node, wrong count, zero ids.
+        let mut untouched = zip.clone();
+        assert!(!force_axml_collapse(&mut untouched, 0x7f090002, 1).unwrap());
+        assert_eq!(untouched, zip);
+        assert!(!force_axml_collapse(&mut patched.clone(), 0x7f090001, 2).unwrap());
+        assert!(!force_axml_collapse(&mut untouched, 0, 1).unwrap());
+        assert!(!force_axml_background(&mut untouched, 0x7f090001, 0, 1).unwrap());
+
+        // Data-descriptor entries get their descriptor CRC/sizes updated too.
+        // Use a DEFLATED entry so comp and uncomp sizes differ (this is what
+        // catches a misplaced descriptor write).
+        use std::io::{Read as _, Write as _};
+        let mut enc =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&xml).unwrap();
+        let deflated = enc.finish().unwrap();
+        assert_ne!(deflated.len(), xml.len());
+        let mut zip_dd = build_test_zip(&[("res/layout.xml", &deflated, 8, 0x08)]);
+        // The builder records raw lengths; fix the uncompressed sizes to the
+        // inflated length (local + central + descriptor).
+        {
+            let layout0 = parse_zip_central_directory(&zip_dd).unwrap();
+            let e0 = layout0
+                .entries
+                .iter()
+                .find(|e| e.name == "res/layout.xml")
+                .unwrap();
+            let uncomp = xml.len() as u32;
+            for off in [
+                e0.local_header_offset + 22,
+                e0.cd_comp_size_offset + 4,
+                // Builder writes the descriptor with signature.
+                e0.data_start + e0.compressed_size + 12,
+            ] {
+                zip_dd[off..off + 4].copy_from_slice(&uncomp.to_le_bytes());
+            }
+        }
+        // Patch the stored-central view of the entry to describe deflated
+        // bytes: the builder writes raw sizes, so fix up comp/uncomp.
+        let mut patched_dd = zip_dd.clone();
+        assert!(force_axml_collapse(&mut patched_dd, 0x7f090001, 1).unwrap());
+        assert_eq!(patched_dd.len(), zip_dd.len());
+        let layout_dd = parse_zip_central_directory(&patched_dd).unwrap();
+        let entry_dd = layout_dd
+            .entries
+            .iter()
+            .find(|e| e.name == "res/layout.xml")
+            .unwrap();
+        assert!(entry_dd.uses_data_descriptor);
+        assert_eq!(entry_dd.compression_method, 8);
+        // Inflated content is patched.
+        let inflated = {
+            let mut out = Vec::new();
+            flate2::read::DeflateDecoder::new(
+                &patched_dd[entry_dd.data_start..entry_dd.data_start + entry_dd.compressed_size],
+            )
+            .read_to_end(&mut out)
+            .unwrap();
+            out
+        };
+        assert_eq!(inflated.len(), xml.len());
+        let elements_dd = parse_axml_elements(&inflated).expect("patched parses");
+        let height_dd = elements_dd[0]
+            .attrs
+            .iter()
+            .find(|a| a.name.as_deref() == Some("layout_height"))
+            .expect("height present");
+        assert_eq!((height_dd.data_type, height_dd.data), (0x05, 0));
+        // Descriptor body (sig + crc + sizes) sits right after the data.
+        let dd_at = entry_dd.data_start + entry_dd.compressed_size;
+        let read_crc =
+            |off: usize| u32::from_le_bytes(patched_dd[off..off + 4].try_into().unwrap());
+        assert_eq!(read_crc(dd_at), 0x08074B50);
+        assert_eq!(
+            read_crc(dd_at + 4),
+            read_crc(entry_dd.local_header_crc_offset)
+        );
+        // Comp slot tracks the new compressed size; uncomp slot is untouched.
+        assert_eq!(read_crc(dd_at + 8) as usize, entry_dd.compressed_size);
+        assert_eq!(read_crc(dd_at + 12) as usize, xml.len());
+        // Local + central + descriptor CRCs track the INFLATED content (zip
+        // CRCs are always over uncompressed bytes).
+        assert_eq!(
+            read_crc(entry_dd.local_header_crc_offset),
+            crc32_ieee(&inflated)
+        );
+        assert_eq!(read_crc(entry_dd.cd_crc_offset), crc32_ieee(&inflated));
+        assert_eq!(read_crc(dd_at + 4), crc32_ieee(&inflated));
+    }
+
+    #[test]
+    fn axml_edit_keeps_footprint_with_local_extra_field() {
+        use crate::fuck_lgsi::{build_test_axml, parse_axml_elements};
+        use std::io::{Read as _, Write as _};
+
+        let xml = build_test_axml();
+        let mut enc =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&xml).unwrap();
+        let deflated = enc.finish().unwrap();
+
+        // Deflated entry carrying a non-empty local extra field, as
+        // zipalign/aapt2-padded real APK entries do. The builder records raw
+        // lengths, so pin the uncompressed size afterwards.
+        let mut zip = build_test_zip_ex(&[("res/layout.xml", &deflated, 8, 0, 8)]);
+        {
+            let layout0 = parse_zip_central_directory(&zip).unwrap();
+            let e0 = layout0
+                .entries
+                .iter()
+                .find(|e| e.name == "res/layout.xml")
+                .unwrap();
+            let uncomp = xml.len() as u32;
+            for off in [e0.local_header_offset + 22, e0.cd_comp_size_offset + 4] {
+                zip[off..off + 4].copy_from_slice(&uncomp.to_le_bytes());
+            }
+        }
+
+        let original_len = zip.len();
+        let mut patched = zip.clone();
+        assert!(
+            force_axml_collapse(&mut patched, 0x7f090001, 1).unwrap(),
+            "collapse must land when the entry has a local extra field"
+        );
+        assert_eq!(patched.len(), original_len, "archive footprint preserved");
+
+        // The headers still describe the stored data: inflating the entry
+        // yields the edited AXML.
+        let layout = parse_zip_central_directory(&patched).unwrap();
+        let entry = layout
+            .entries
+            .iter()
+            .find(|e| e.name == "res/layout.xml")
+            .unwrap();
+        // Single-entry archive: the entry data must still end exactly where the
+        // central directory begins (nothing shifted by the grown extra field).
+        let eocd = patched.len() - 22;
+        let cd_off = u32::from_le_bytes(patched[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        assert_eq!(entry.data_start + entry.compressed_size, cd_off);
+        let mut out = Vec::new();
+        flate2::read::DeflateDecoder::new(
+            &patched[entry.data_start..entry.data_start + entry.compressed_size],
+        )
+        .read_to_end(&mut out)
+        .unwrap();
+        assert_eq!(out.len(), xml.len());
+        let elements = parse_axml_elements(&out).expect("patched parses");
+        let height = elements[0]
+            .attrs
+            .iter()
+            .find(|a| a.name.as_deref() == Some("layout_height"))
+            .expect("height present");
+        assert_eq!((height.data_type, height.data), (0x05, 0));
+
+        // Re-applying to an entry whose local extra field was already grown by
+        // a previous run (a resign re-run over an already-patched image) must
+        // stay footprint-preserving too.
+        let mut again = patched.clone();
+        assert!(force_axml_collapse(&mut again, 0x7f090001, 1).unwrap());
+        assert_eq!(again.len(), original_len);
+    }
+
+    #[test]
     fn parse_zip_entry_replace_op() {
         let doc: DbpDocument = toml::from_str(
             r#"
@@ -2247,8 +2562,20 @@ payload = "{payload}"
     }
 
     /// Minimal STORED-only zip builder for `force_zip_entry_replace` tests:
-    /// `(name, data, method)` triples, no extra fields, no comment.
-    fn build_test_zip(entries: &[(&str, &[u8], u16)]) -> Vec<u8> {
+    /// `(name, data, method, flags)` tuples, no extra fields, no comment.
+    /// Entries with the data-descriptor flag (0x08) get zeroed local
+    /// sizes/CRC plus a trailing descriptor, like aapt output.
+    fn build_test_zip(entries: &[(&str, &[u8], u16, u16)]) -> Vec<u8> {
+        let with_extra: Vec<(&str, &[u8], u16, u16, u16)> = entries
+            .iter()
+            .map(|(name, data, method, flags)| (*name, *data, *method, *flags, 0))
+            .collect();
+        build_test_zip_ex(&with_extra)
+    }
+
+    /// Like [`build_test_zip`], but each entry may carry a zero-filled local
+    /// extra field (real APK entries get these from zipalign / aapt2 padding).
+    fn build_test_zip_ex(entries: &[(&str, &[u8], u16, u16, u16)]) -> Vec<u8> {
         fn u16le(v: u16, out: &mut Vec<u8>) {
             out.extend_from_slice(&v.to_le_bytes());
         }
@@ -2257,26 +2584,34 @@ payload = "{payload}"
         }
         let mut zip = Vec::new();
         let mut central = Vec::new();
-        for (name, data, method) in entries {
+        for (name, data, method, flags, extra_len) in entries {
             let crc = crc32_ieee(data);
+            let descriptor = flags & 0x08 != 0;
             let local_off = zip.len() as u32;
             zip.extend_from_slice(&0x04034B50u32.to_le_bytes());
             u16le(20, &mut zip);
-            u16le(0, &mut zip);
+            u16le(*flags, &mut zip);
             u16le(*method, &mut zip);
             u16le(0, &mut zip);
             u16le(0, &mut zip);
-            u32le(crc, &mut zip);
-            u32le(data.len() as u32, &mut zip);
-            u32le(data.len() as u32, &mut zip);
+            u32le(if descriptor { 0 } else { crc }, &mut zip);
+            u32le(if descriptor { 0 } else { data.len() as u32 }, &mut zip);
+            u32le(if descriptor { 0 } else { data.len() as u32 }, &mut zip);
             u16le(name.len() as u16, &mut zip);
-            u16le(0, &mut zip);
+            u16le(*extra_len, &mut zip);
             zip.extend_from_slice(name.as_bytes());
+            zip.resize(zip.len() + *extra_len as usize, 0);
             zip.extend_from_slice(data);
+            if descriptor {
+                zip.extend_from_slice(&0x08074B50u32.to_le_bytes());
+                u32le(crc, &mut zip);
+                u32le(data.len() as u32, &mut zip);
+                u32le(data.len() as u32, &mut zip);
+            }
             central.extend_from_slice(&0x02014B50u32.to_le_bytes());
             u16le(20, &mut central);
             u16le(20, &mut central);
-            u16le(0, &mut central);
+            u16le(*flags, &mut central);
             u16le(*method, &mut central);
             u16le(0, &mut central);
             u16le(0, &mut central);
@@ -2310,7 +2645,7 @@ payload = "{payload}"
     fn zip_entry_replace_swaps_stored_data() {
         let data_a: Vec<u8> = (0..32u8).collect();
         let data_b: Vec<u8> = (100..112u8).collect();
-        let mut zip = build_test_zip(&[("a.bin", &data_a, 0), ("b.bin", &data_b, 0)]);
+        let mut zip = build_test_zip(&[("a.bin", &data_a, 0, 0), ("b.bin", &data_b, 0, 0)]);
         let payload = vec![0x89, 0x50, 0x4E, 0x47];
         let targets = ["a.bin".to_string(), "b.bin".to_string()];
         assert!(force_zip_entry_replace(&mut zip, &targets, &payload).unwrap());
@@ -2344,7 +2679,7 @@ payload = "{payload}"
     #[test]
     fn zip_entry_replace_is_all_or_nothing() {
         let data_a: Vec<u8> = (0..32u8).collect();
-        let mut zip = build_test_zip(&[("a.bin", &data_a, 0)]);
+        let mut zip = build_test_zip(&[("a.bin", &data_a, 0, 0)]);
         let before = zip.clone();
         // Unknown entry: refused, buffer untouched.
         assert!(
@@ -2357,12 +2692,12 @@ payload = "{payload}"
         );
         assert_eq!(zip, before);
         // Deflated entry: refused even though the name resolves.
-        let mut deflated = build_test_zip(&[("a.bin", &data_a, 8)]);
+        let mut deflated = build_test_zip(&[("a.bin", &data_a, 8, 0)]);
         assert!(
             !force_zip_entry_replace(&mut deflated, &["a.bin".to_string()], &[0x89, 0x50],)
                 .unwrap()
         );
-        assert_eq!(deflated, build_test_zip(&[("a.bin", &data_a, 8)]));
+        assert_eq!(deflated, build_test_zip(&[("a.bin", &data_a, 8, 0)]));
         // Oversized payload: refused.
         let big = vec![0u8; 33];
         assert!(!force_zip_entry_replace(&mut zip, &["a.bin".to_string()], &big).unwrap());
@@ -3298,23 +3633,26 @@ value = false
             _ => panic!("disable-quick-kill must use a text_replace op"),
         }
 
-        // The merged security patch (former antivirus / autostart /
-        // permission-manager / url-security / app-recommendation patches).
+        // The merged security patch (former antivirus / permission-manager /
+        // url-security / app-recommendation patches).
         let ds =
             load_dbp(&patches_dir().join("debloat-security.dbp")).expect("debloat-security.dbp");
         assert_eq!(ds.name, "debloat-security");
-        assert_eq!(ds.ops.len(), 17);
+        assert_eq!(ds.ops.len(), 21);
         let mut av_nops = 0usize; // AntiVirusInterface hub method_nops
         let mut got_getrecommendapp_nop = false;
         let mut got_install_scan = false; // invoke_const_int getInt -> 0
         let mut got_apprec_hide = false; // isRowVersion in ZuiEmergencyDashboardFragment.onCreate
         let mut got_perm_route = false; // isRowVersion in AppPermissionPreferenceController
         let mut got_perm_viewgone = false;
+        let mut got_axml_collapse = false;
         let mut got_url_security = false;
+        let mut got_virus_click_kill = false;
+        let mut got_selection_nop = false;
+        let mut got_autorun_default_on = false;
+        let mut got_relative_default_on = false;
         let mut nop_invokes = 0usize;
         let mut const_int_hides = 0usize;
-        let mut fragment_hides = 0usize;
-        let mut remoteviews_hides = 0usize;
         for op in &ds.ops {
             match op {
                 DbpOp::MethodNop {
@@ -3378,7 +3716,12 @@ value = false
                     ..
                 } => {
                     assert!(scan_class.contains("MainNavigationActivity"));
-                    assert_eq!(view_ids, &vec![0x7f0903f1, 0x7f090406, 0x7f0903d7]);
+                    // Old and current resource-ID generations coexist; each
+                    // build lands exactly one variant.
+                    assert!(
+                        view_ids == &vec![0x7f0903f1, 0x7f090406]
+                            || view_ids == &vec![0x7f0903fe, 0x7f090413]
+                    );
                     got_perm_viewgone = true;
                 }
                 DbpOp::TextReplace { file, from, to, .. } => {
@@ -3387,32 +3730,127 @@ value = false
                     assert_eq!(from.len(), to.len(), "must stay size-preserving");
                     got_url_security = true;
                 }
-                DbpOp::NopInvoke { .. } => nop_invokes += 1,
+                DbpOp::NopInvoke {
+                    scan_class,
+                    target_method,
+                    anchor_int,
+                    ..
+                } => {
+                    if scan_class.contains("PhoneMainViewModel") {
+                        assert_eq!(target_method, "add");
+                        // Antivirus card.
+                        assert_eq!(*anchor_int, Some(0x7f12003a));
+                    } else {
+                        // Autorun: app updates must not rewrite the stored state.
+                        assert!(scan_class.contains("AutoRunPkgReceiver"));
+                        assert_eq!(target_method, "updateEntryIntoDb");
+                    }
+                    nop_invokes += 1;
+                }
                 DbpOp::MethodConstInt { method, value, .. } => {
                     assert_eq!(method, "getAvailabilityStatus");
                     assert_eq!(*value, 3);
                     const_int_hides += 1;
                 }
-                DbpOp::FragmentHide { .. } => fragment_hides += 1,
-                DbpOp::RemoteviewsHide { .. } => remoteviews_hides += 1,
+                DbpOp::LayoutCollapse {
+                    file,
+                    node_id,
+                    expected,
+                    ..
+                } => {
+                    // Smart Optimization virus card across screen variants.
+                    assert_eq!(file, "system/priv-app/ZuiSecurity/ZuiSecurity.apk");
+                    assert_eq!(*node_id, 0x7f090404);
+                    assert_eq!(*expected, 6);
+                    got_axml_collapse = true;
+                }
+                DbpOp::LayoutBackground {
+                    file,
+                    node_id,
+                    drawable,
+                    expected,
+                    ..
+                } => {
+                    // Rounded card closures next to the hidden nav rows.
+                    assert_eq!(file, "system/priv-app/ZuiSecurity/ZuiSecurity.apk");
+                    assert!(
+                        (*node_id == 0x7f090401 && *drawable == 0x7f0804ab)
+                            || (*node_id == 0x7f0903fa && *drawable == 0x7f0804ac)
+                    );
+                    assert_eq!(*expected, 2);
+                }
+                DbpOp::MethodCodePatch {
+                    class,
+                    method,
+                    proto,
+                    replacements,
+                    ..
+                } => {
+                    if class.contains("SmartOptimizationActivity") {
+                        // Smart Optimization virus-card click kill only (hiding
+                        // needs new code that does not fit size-preserving ops).
+                        assert_eq!(method, "initView");
+                        assert_eq!(proto, "()V");
+                        assert_eq!(replacements.len(), 1);
+                        assert_eq!(replacements[0].from, "54 60 23 87 6e 20 a3 05 60 00");
+                        assert_eq!(replacements[0].to, "54 60 23 87 00 00 00 00 00 00");
+                        assert_eq!(replacements[0].expected, 1);
+                        got_virus_click_kill = true;
+                    } else if class.contains("AutoRunDataUtils") {
+                        // New installs seed the autorun row as enabled.
+                        assert_eq!(method, "appInfoConvertToAutoRunItem");
+                        assert_eq!(
+                            proto,
+                            "(Lcom/lenovo/performance/autorun/beans/AppInfo;)Lcom/lenovo/performance/autorun/AutoRunItem;"
+                        );
+                        assert_eq!(replacements.len(), 1);
+                        assert_eq!(replacements[0].from, "12 02");
+                        assert_eq!(replacements[0].to, "12 12");
+                        assert_eq!(replacements[0].expected, 1);
+                        got_autorun_default_on = true;
+                    } else if class.contains("ZuiSecurityServiceBinder") {
+                        // Relative starts default to allowed in the framework.
+                        assert_eq!(method, "getRelativeAppStatus");
+                        assert_eq!(proto, "(Ljava/lang/String;Ljava/lang/String;)I");
+                        assert_eq!(replacements.len(), 1);
+                        assert_eq!(replacements[0].from, "12 00");
+                        assert_eq!(replacements[0].to, "12 10");
+                        assert_eq!(replacements[0].expected, 1);
+                        got_relative_default_on = true;
+                    } else {
+                        // Click-time selection nop: MainNavigationActivity
+                        // onClick -> setSelectedView (symbol-resolved).
+                        assert_eq!(class, "Lcom/zui/safecenter/ui/MainNavigationActivity;");
+                        assert_eq!(method, "onClick");
+                        assert_eq!(proto, "(Landroid/view/View;)V");
+                        assert_eq!(replacements.len(), 1);
+                        assert_eq!(replacements[0].from, "70 20 ${set_selected_view:u16} 02 00");
+                        assert_eq!(replacements[0].to, "00 00 00 00 00 00");
+                        assert_eq!(replacements[0].expected, 1);
+                        got_selection_nop = true;
+                    }
+                }
                 _ => panic!("unexpected op kind in debloat-security"),
             }
         }
         assert_eq!(av_nops, 3, "3 AntiVirusInterface hub method_nops");
-        assert_eq!(nop_invokes, 3, "antivirus item + 2 autostart nop_invokes");
         assert_eq!(
-            const_int_hides, 3,
-            "KillVirus + AppInstallationGuard + SelfStart -> 3"
+            nop_invokes, 2,
+            "antivirus card nop + autorun update-preserve nop"
         );
-        assert_eq!(fragment_hides, 1);
-        assert_eq!(remoteviews_hides, 1);
+        assert_eq!(const_int_hides, 2, "KillVirus + AppInstallationGuard -> 2");
         assert!(
             got_getrecommendapp_nop
                 && got_install_scan
                 && got_apprec_hide
                 && got_perm_route
                 && got_perm_viewgone
-                && got_url_security,
+                && got_url_security
+                && got_virus_click_kill
+                && got_selection_nop
+                && got_autorun_default_on
+                && got_relative_default_on
+                && got_axml_collapse,
             "all new/key debloat-security ops must be present"
         );
 
@@ -4818,6 +5256,62 @@ value = false
         }
     }
 
+    /// Apply the bundled layout_collapse / layout_background ops to the real
+    /// ZuiSecurity APK. Set `DYNOBOX_ZUISECURITY_APK`; optionally
+    /// `DYNOBOX_AXML_OUT` to dump per-op patched APKs for disassembly.
+    #[test]
+    fn axml_ops_land_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_ZUISECURITY_APK") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("debloat-security.dbp")).unwrap();
+        let apk = std::fs::read(&path).expect("read apk");
+        for (i, op) in doc.ops.iter().enumerate() {
+            let landed = match op {
+                DbpOp::LayoutCollapse {
+                    node_id, expected, ..
+                } => {
+                    let mut b = apk.clone();
+                    let hit = force_axml_collapse(&mut b, *node_id as u32, *expected).unwrap();
+                    if hit {
+                        if let Ok(out) = std::env::var("DYNOBOX_AXML_OUT") {
+                            std::fs::write(
+                                std::path::Path::new(&out).join(format!("op{i}.apk")),
+                                &b,
+                            )
+                            .unwrap();
+                        }
+                    }
+                    hit
+                }
+                DbpOp::LayoutBackground {
+                    node_id,
+                    drawable,
+                    expected,
+                    ..
+                } => {
+                    let mut b = apk.clone();
+                    let hit =
+                        force_axml_background(&mut b, *node_id as u32, *drawable as u32, *expected)
+                            .unwrap();
+                    if hit {
+                        if let Ok(out) = std::env::var("DYNOBOX_AXML_OUT") {
+                            std::fs::write(
+                                std::path::Path::new(&out).join(format!("op{i}.apk")),
+                                &b,
+                            )
+                            .unwrap();
+                        }
+                    }
+                    hit
+                }
+                _ => continue,
+            };
+            eprintln!("op[{i}] landed={landed}");
+            assert!(landed, "axml op[{i}] must land");
+        }
+    }
+
     /// Land debloat-telephony ops on the real ZuiTelecom/ZuiDialer/ZuiContacts/
     /// ZuiMessage/ZuiCallSettings dex dumps. Set `DYNOBOX_ZUITELE_DEX_DIR`,
     /// `DYNOBOX_ZUIDIALER_DEX_DIR`, `DYNOBOX_ZUICONTACTS_DEX_DIR`,
@@ -5028,11 +5522,11 @@ value = false
         );
     }
 
-    /// Apply the debloat-security `fragment_hide` op to the real ZuiSecurity
-    /// dexes. Set `DYNOBOX_ZUISECURITY_DEX_DIR`; optionally
-    /// `DYNOBOX_ZUISECURITY_DEX_OUT` to dump patched dexes for disassembly.
+    /// The click-time `setSelectedView` nop lands in exactly one ZuiSecurity
+    /// dex. Set `DYNOBOX_ZUISECURITY_DEX_DIR`; optionally
+    /// `DYNOBOX_ZUISECURITY_DEX_OUT` to dump the patched dex for disassembly.
     #[test]
-    fn bundled_fragment_hide_lands_on_real_dex() {
+    fn bundled_selection_nop_lands_on_real_dex() {
         let Ok(dir) = std::env::var("DYNOBOX_ZUISECURITY_DEX_DIR") else {
             return;
         };
@@ -5040,8 +5534,15 @@ value = false
         let op = doc
             .ops
             .iter()
-            .find(|o| matches!(o, DbpOp::FragmentHide { .. }))
-            .expect("fragment_hide op");
+            .find(|o| {
+                matches!(
+                    o,
+                    DbpOp::MethodCodePatch { class, method, .. }
+                        if class == "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+                            && method == "onClick"
+                )
+            })
+            .expect("selection nop op");
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         for name in [
@@ -5061,7 +5562,7 @@ value = false
                 }
             }
         }
-        assert_eq!(landed, 1, "fragment_hide should land in exactly one dex");
+        assert_eq!(landed, 1, "selection nop should land in exactly one dex");
     }
 
     /// Every debloat-setupwizard op lands in exactly one dex of its real APK;
@@ -5431,14 +5932,19 @@ value = false
         }
 
         if let Ok(p) = std::env::var("DYNOBOX_ZUISECURITY_APK") {
-            let nav = doc
+            // Old and current ID generations coexist; each build lands
+            // exactly one of them in one dex.
+            let navs: Vec<_> = doc
                 .ops
                 .iter()
-                .find(|o| matches!(o, DbpOp::ForceViewGone { scan_class, .. } if scan_class.contains("MainNavigationActivity")))
-                .expect("nav force_view_gone op");
-            assert_eq!(land(&p, nav), 1, "nav row hide should land in one dex");
-            // Emit the ZuiSecurity dex with the nav op applied for dexdump check
-            // (permission + antivirus + autostart rows -> 3 setVisibility(GONE)).
+                .filter(|o| matches!(o, DbpOp::ForceViewGone { scan_class, .. } if scan_class.contains("MainNavigationActivity")))
+                .collect();
+            assert_eq!(navs.len(), 2, "old + current nav ops");
+            let total: usize = navs.iter().map(|nav| land(&p, nav)).sum();
+            assert_eq!(total, 1, "exactly one nav variant should land in one dex");
+            // Emit the ZuiSecurity dex with the landing nav op applied for
+            // dexdump check (permission + antivirus rows ->
+            // 2 setVisibility(GONE)).
             if let Ok(out) = std::env::var("DYNOBOX_ZUISECURITY_NAV_DEX_OUT") {
                 let apk = std::fs::read(&p).expect("read apk");
                 let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
@@ -5447,10 +5953,12 @@ value = false
                     .iter()
                     .filter(|e| e.name.ends_with(".dex") && e.compression_method == 0)
                 {
-                    let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
-                    if apply_one_op(&mut dex, nav).unwrap() {
-                        crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
-                        std::fs::write(std::path::Path::new(&out).join(&e.name), &dex).unwrap();
+                    for nav in &navs {
+                        let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
+                        if apply_one_op(&mut dex, nav).unwrap() {
+                            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                            std::fs::write(std::path::Path::new(&out).join(&e.name), &dex).unwrap();
+                        }
                     }
                 }
             }
@@ -5488,6 +5996,63 @@ value = false
                 crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
                 std::fs::write(std::path::Path::new(&out).join("classes.dex"), &dex).unwrap();
             }
+        }
+    }
+
+    /// Land the debloat-security autorun-default ops on the real ZuiSecurity
+    /// APK and services.jar: the seed patch, the update-preserve nop, and the
+    /// relative-start default. Set `DYNOBOX_ZUISECURITY_APK` and/or
+    /// `DYNOBOX_SERVICES_JAR`.
+    #[test]
+    fn debloat_security_autorun_defaults_land_on_real_apks() {
+        fn land(apk_path: &str, op: &DbpOp) -> usize {
+            let apk = std::fs::read(apk_path).expect("read apk");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let mut hits = 0usize;
+            for e in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            }) {
+                let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    hits += 1;
+                }
+            }
+            hits
+        }
+        let doc = load_dbp(&patches_dir().join("debloat-security.dbp")).unwrap();
+        if let Ok(p) = std::env::var("DYNOBOX_ZUISECURITY_APK") {
+            let seed = doc
+                .ops
+                .iter()
+                .find(|o| matches!(o, DbpOp::MethodCodePatch { class, .. } if class.contains("AutoRunDataUtils")))
+                .expect("autorun seed op");
+            assert_eq!(land(&p, seed), 1, "autorun seed patch should land once");
+            let keep = doc
+                .ops
+                .iter()
+                .find(|o| matches!(o, DbpOp::NopInvoke { scan_class, .. } if scan_class.contains("AutoRunPkgReceiver")))
+                .expect("autorun update-preserve op");
+            assert_eq!(
+                land(&p, keep),
+                1,
+                "autorun update-preserve nop should land once"
+            );
+        }
+        if let Ok(p) = std::env::var("DYNOBOX_SERVICES_JAR") {
+            let rel = doc
+                .ops
+                .iter()
+                .find(|o| matches!(o, DbpOp::MethodCodePatch { class, .. } if class.contains("ZuiSecurityServiceBinder")))
+                .expect("relative-start default op");
+            assert_eq!(
+                land(&p, rel),
+                1,
+                "relative-start default patch should land once"
+            );
         }
     }
 
