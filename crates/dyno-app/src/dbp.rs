@@ -3744,6 +3744,241 @@ value = false
             _ => panic!("disable-dolby-atmos op[3] must use method_code_patch"),
         }
 
+        let tc =
+            load_dbp(&patches_dir().join("debloat-telephony.dbp")).expect("debloat-telephony.dbp");
+        assert_eq!(tc.name, "debloat-telephony");
+        assert_eq!(tc.ops.len(), 12);
+        match &tc.ops[0] {
+            DbpOp::MethodNop {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiTelecom/ZuiTelecom.apk");
+                assert_eq!(class, "Lcom/ted/number/TedServiceHelper;");
+                assert_eq!(method, "bindService");
+                assert_eq!(proto, "()V");
+            }
+            _ => panic!("debloat-telephony op[0] must nop TedServiceHelper.bindService"),
+        }
+        match &tc.ops[1] {
+            DbpOp::MethodConstBool {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                value,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiTelecom/ZuiTelecom.apk");
+                assert_eq!(
+                    class,
+                    "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
+                );
+                assert_eq!(method, "isAntiSpamEnabled");
+                assert_eq!(proto, "(Landroid/content/Context;)Z");
+                assert!(!*value);
+            }
+            _ => panic!("debloat-telephony op[1] must force isAntiSpamEnabled false"),
+        }
+        match &tc.ops[2] {
+            DbpOp::MethodNop {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiDialer/ZuiDialer.apk");
+                assert_eq!(class, "Ls5/a;");
+                assert_eq!(method, "f");
+                assert_eq!(proto, "()V");
+            }
+            _ => panic!("debloat-telephony op[2] must nop the dialer ted bind"),
+        }
+        match &tc.ops[3] {
+            DbpOp::MethodConstBool {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                value,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiDialer/ZuiDialer.apk");
+                assert_eq!(class, "Lm2/h;");
+                assert_eq!(method, "a");
+                assert_eq!(proto, "()Z");
+                assert!(!*value);
+            }
+            _ => panic!("debloat-telephony op[3] must hide the mark-number toggle"),
+        }
+        match &tc.ops[4] {
+            DbpOp::MethodNop {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiContacts/ZuiContacts.apk");
+                assert_eq!(class, "Ld1/a;");
+                assert_eq!(method, "f");
+                assert_eq!(proto, "()V");
+            }
+            _ => panic!("debloat-telephony op[4] must nop the contacts ted bind"),
+        }
+        match &tc.ops[5] {
+            DbpOp::MethodNop {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiMessage/ZuiMessage.apk");
+                assert_eq!(class, "Lcom/ted/number/TedServiceHelper;");
+                assert_eq!(method, "bindService");
+                assert_eq!(proto, "()V");
+            }
+            _ => panic!("debloat-telephony op[5] must nop the message ted bind"),
+        }
+        match &tc.ops[6] {
+            DbpOp::MethodConstBool {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                value,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk");
+                assert_eq!(class, "Lcom/zui/callsettings/OperatorFunctionUtil;");
+                assert_eq!(method, "isEnableMarkNumber");
+                assert_eq!(proto, "(Landroid/content/Context;)Z");
+                assert!(!*value);
+            }
+            _ => panic!("debloat-telephony op[6] must pin isEnableMarkNumber false"),
+        }
+        match &tc.ops[7] {
+            DbpOp::MethodNop {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk");
+                assert_eq!(class, "Lcom/zui/callsettings/OperatorFunctionUtil;");
+                assert_eq!(method, "setEnableMarkNumber");
+                assert_eq!(proto, "(Landroid/content/Context;Z)V");
+            }
+            _ => panic!("debloat-telephony op[7] must nop the mark-number write"),
+        }
+        match &tc.ops[8] {
+            DbpOp::MethodConstBool {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                value,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiDialer/ZuiDialer.apk");
+                assert_eq!(class, "Lcom/android/incallui/InCallPresenter;");
+                assert_eq!(method, "isSupportAI");
+                assert_eq!(proto, "()Z");
+                assert!(!*value);
+            }
+            _ => panic!("debloat-telephony op[8] must disable the AI in-call pills"),
+        }
+
+        // The missing com.lenovoconnect.aoac.pad app (DongDe) must not kill
+        // SystemUI or Settings; those ops live at the end of the same file.
+        match &tc.ops[9] {
+            DbpOp::InvokeConstBool {
+                partition,
+                file,
+                scan_class,
+                scan_method,
+                target_class,
+                target_method,
+                value,
+                ..
+            } => {
+                assert_eq!(partition, "system_ext");
+                assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
+                assert_eq!(
+                    scan_class,
+                    "Lcom/android/systemui/statusbar/phone/ZuiCentralSurfacesImpl;"
+                );
+                assert_eq!(scan_method.as_deref(), Some("start"));
+                assert_eq!(target_class, "Lcom/android/systemui/util/XSystemUtil;");
+                assert_eq!(target_method, "isDevicePrc");
+                assert!(!*value);
+            }
+            _ => panic!("debloat-telephony op[9] must pin isDevicePrc false in start"),
+        }
+        match &tc.ops[10] {
+            DbpOp::NopInvoke {
+                partition,
+                file,
+                scan_class,
+                scan_method,
+                target_class,
+                target_method,
+                anchor_string,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                assert_eq!(
+                    scan_class,
+                    "Lcom/zui/simsettings/preference/SimAccountPreference$1;"
+                );
+                assert_eq!(scan_method, "onClick");
+                assert_eq!(target_class, "Landroid/content/pm/PackageManager;");
+                assert_eq!(target_method, "setComponentEnabledSetting");
+                assert_eq!(anchor_string.as_deref(), Some("com.lenovoconnect.aoac.pad"));
+            }
+            _ => panic!(
+                "debloat-telephony op[10] must drop the unchecked setComponentEnabledSetting"
+            ),
+        }
+        match &tc.ops[11] {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+                assert_eq!(
+                    class,
+                    "Lcom/zui/simsettings/preference/SimAccountPreference;"
+                );
+                assert_eq!(method, "onBindViewHolder");
+                assert_eq!(proto, "(Landroidx/preference/PreferenceViewHolder;)V");
+                assert_eq!(replacements.len(), 2);
+            }
+            _ => panic!("debloat-telephony op[11] must grey out sim_account2"),
+        }
+
         let adb =
             load_dbp(&patches_dir().join("enable-adb-debug.dbp")).expect("enable-adb-debug.dbp");
         assert_eq!(adb.name, "enable-adb-debug");
@@ -4583,6 +4818,52 @@ value = false
         }
     }
 
+    /// Land debloat-telephony ops on the real ZuiTelecom/ZuiDialer/ZuiContacts/
+    /// ZuiMessage/ZuiCallSettings dex dumps. Set `DYNOBOX_ZUITELE_DEX_DIR`,
+    /// `DYNOBOX_ZUIDIALER_DEX_DIR`, `DYNOBOX_ZUICONTACTS_DEX_DIR`,
+    /// `DYNOBOX_ZUIMESSAGE_DEX_DIR`, `DYNOBOX_ZUICALLSETTINGS_DEX_DIR` to
+    /// directories holding the extracted STORED `classes*.dex` (each check is
+    /// skipped when its env var is unset).
+    #[test]
+    fn bundled_debloat_telephony_land_on_real_dex() {
+        let doc = load_dbp(&patches_dir().join("debloat-telephony.dbp")).unwrap();
+        assert_eq!(doc.ops.len(), 12);
+        let cases: [(&str, &[usize], usize); 5] = [
+            ("DYNOBOX_ZUITELE_DEX_DIR", &[0, 1], 2),
+            ("DYNOBOX_ZUIDIALER_DEX_DIR", &[2, 3], 2),
+            ("DYNOBOX_ZUICONTACTS_DEX_DIR", &[4], 1),
+            ("DYNOBOX_ZUIMESSAGE_DEX_DIR", &[5], 1),
+            ("DYNOBOX_ZUICALLSETTINGS_DEX_DIR", &[6, 7], 2),
+        ];
+        for (var, op_indexes, expected) in cases {
+            let Ok(dir) = std::env::var(var) else {
+                continue;
+            };
+            let dir = std::path::Path::new(&dir);
+            let mut landed = 0usize;
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|e| e.to_str()) != Some("dex") {
+                    continue;
+                }
+                let Ok(mut dex) = std::fs::read(&path) else {
+                    continue;
+                };
+                let mut modified = false;
+                for &index in op_indexes {
+                    if apply_one_op(&mut dex, &doc.ops[index]).unwrap() {
+                        landed += 1;
+                        modified = true;
+                    }
+                }
+                if modified {
+                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                }
+            }
+            assert_eq!(landed, expected, "{var} should land {expected} op(s)");
+        }
+    }
+
     /// Land the disable-dolby-atmos `DolbySwitchPreferenceController.updateState`
     /// branch nop on the real ZuiSettings dex. Set `DYNOBOX_ZUISETTINGS_DEX_DIR`
     /// to the extracted STORED dex dir (skipped when unset).
@@ -4617,6 +4898,7 @@ value = false
         }
         assert_eq!(landed, 1, "updateState branch nop should land exactly once");
     }
+
     /// The deduplicated-code-item guard: forcing the "Service hotline"
     /// `LenovoServicePreferenceController.getAvailabilityStatus()` (a trivial
     /// `return 0` R8-shared with `ImmutableMap.isHashCodeFast():Z`) must be

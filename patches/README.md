@@ -440,6 +440,7 @@ while still advancing the setup wizard.
 * **`debloat-security.dbp`**
 * **`debloat-settings.dbp`**
 * **`debloat-setupwizard.dbp`**
+* **`debloat-telephony.dbp`**
 * **`debloat-theme.dbp`**
 * **`disable-dolby-atmos.dbp`**
 * **`disable-quick-kill.dbp`**

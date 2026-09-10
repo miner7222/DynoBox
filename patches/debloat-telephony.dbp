@@ -1,0 +1,168 @@
+name = "debloat-telephony"
+description = "Cut TeddyMobile/YeddyMobile number-ID/spam services and AI in-call pills from the phone apps, and survive a missing com.lenovoconnect.aoac.pad app (DongDe) without SystemUI/Settings crashes."
+
+# ZuiTelecom binds com.ted.number.service on calls (plus rebind attempts);
+# without the service every query fails gracefully (null-checked onFail
+# paths), so nopping the single bind site stops all traffic.
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
+class = "Lcom/ted/number/TedServiceHelper;"
+method = "bindService"
+proto = "()V"
+
+# Master gate of the incoming-call filter pipeline (reads xui_harass_on).
+# Forcing false keeps the filter fail-open without touching normal calls.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
+class = "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
+method = "isAntiSpamEnabled"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+# Same bind kill for the dialer's bundled helper copy (obfuscated s5/a;
+# f() holds the single bindService call site, callers null-check results).
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Ls5/a;"
+method = "f"
+proto = "()V"
+
+# The "Smart unknown number identification" toggle removes itself via
+# removePreference when this gate is false; forcing false hides it.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Lm2/h;"
+method = "a"
+proto = "()Z"
+value = false
+
+# Same bind kill for the contacts helper copy (obfuscated d1/a).
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiContacts/ZuiContacts.apk"
+class = "Ld1/a;"
+method = "f"
+proto = "()V"
+
+# Message embeds the same ted client (in classes2.dex) and binds the service
+# for sender number recognition; nop its single bind site too. The client is
+# already built to run with an unbound service (ensurePkgInstalled short
+# circuit + null mPageService checks), so queries just go unanswered.
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/ted/number/TedServiceHelper;"
+method = "bindService"
+proto = "()V"
+
+# Call Settings keeps its own "Mark unknown number" switch (pref_mark_number),
+# shown unconditionally by both the regular and compat fragments. Its checked
+# state reads OperatorFunctionUtil.isEnableMarkNumber (setting
+# call_setting_mark_number); pin that read to false and nop the companion
+# setEnableMarkNumber write so the dead switch can never be turned on.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk"
+class = "Lcom/zui/callsettings/OperatorFunctionUtil;"
+method = "isEnableMarkNumber"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk"
+class = "Lcom/zui/callsettings/OperatorFunctionUtil;"
+method = "setEnableMarkNumber"
+proto = "(Landroid/content/Context;Z)V"
+
+# InCallFragment.updateAiButtonVisibility hides the whole ai_button_container
+# (both AI Meeting and Live Translate pills) unless InCallPresenter.isSupportAI()
+# is true. That predicate has exactly one caller and only gates this container,
+# so forcing it false removes both features at the source with no other
+# behavior change. The startAiMeeting/startLiveTranslate entry points are
+# reachable only through these buttons, and the manifest declares no AI call
+# receivers or services.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Lcom/android/incallui/InCallPresenter;"
+method = "isSupportAI"
+proto = "()Z"
+value = false
+
+# ZuiCentralSurfacesImpl.start() enables/disables the
+# com.lenovoconnect.aoac.pad UniAppActivity component through
+# PackageManager.setComponentEnabledSetting, which throws
+# IllegalArgumentException (killing SystemUI/Keyguard) when the app was
+# debloated. That block is already gated on XSystemUtil.isDevicePrc(), so
+# forcing the gate false inside start() takes the existing early-out and
+# the missing component is never touched. isDevicePrc() is called exactly
+# once in this class, so the method-scoped force changes nothing else.
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/statusbar/phone/ZuiCentralSurfacesImpl;"
+scan_method = "start"
+target_class = "Lcom/android/systemui/util/XSystemUtil;"
+target_method = "isDevicePrc"
+value = false
+
+# Same crash in Settings: tapping sim_account2 calls setComponentEnabledSetting
+# on com.lenovoconnect.aoac.pad OUTSIDE the try/catch (only startActivity is
+# guarded), so a missing app kills Settings. Nop that one call, anchored on
+# the package string; the tap then falls through to the stock
+# "application_not_install" toast. The sim_account1 path in the same onClick
+# is a different invoke and is untouched. Only lenovoconnect reference in
+# all of ZuiSettings (smali, res, manifest surveyed).
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/zui/simsettings/preference/SimAccountPreference$1;"
+scan_method = "onClick"
+target_class = "Landroid/content/pm/PackageManager;"
+target_method = "setComponentEnabledSetting"
+proto = "(Landroid/content/ComponentName;II)V"
+anchor_string = "com.lenovoconnect.aoac.pad"
+
+# Grey out sim_account2 instead of removing it: the row stays visible but
+# inactive (stock disabled look), matching a device whose second slot has
+# no usable card. Two single-instruction swaps in onBindViewHolder, each
+# unique in the method (verified by disassembly):
+# 1. xor-int v0,v3 (airplane-derived enable) -> const/4 v0,#0, so the row
+#    view is always setEnabled(false) and never fires onClick.
+# 2. if-eqz v8,:cond (preference-enabled color branch) -> goto, so the
+#    sim2 texts always take the title_color_disable path.
+# (A GONE variant was validated and then dropped per review; isHasSim2
+# forcing alone only hides the number/state texts, not the row.)
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/zui/simsettings/preference/SimAccountPreference;"
+method = "onBindViewHolder"
+proto = "(Landroidx/preference/PreferenceViewHolder;)V"
+
+[[op.replacement]]
+from = "b7 30"
+to = "12 00"
+expected = 1
+
+[[op.replacement]]
+from = "38 08 3c 00"
+to = "28 3c 00 00"
+expected = 1
