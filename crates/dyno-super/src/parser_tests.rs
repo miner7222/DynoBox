@@ -56,4 +56,84 @@ mod tests {
 
         Ok(())
     }
+
+    /// OEM layouts may name the split chunks after the logical partitions they
+    /// carry (e.g. ALLDOCUBE U880: `system.img` is a `label="super"` chunk).
+    /// After an OTA resizes a partition, the patched standalone image replaces
+    /// the chunk and no longer matches the XML size. Repack only needs the
+    /// metadata chunk, so its parser must accept the resized record while the
+    /// strict parser keeps refusing it.
+    #[test]
+    fn repack_layout_accepts_chunks_replaced_by_resized_partitions()
+    -> dynobox_core::error::Result<()> {
+        use crate::metadata::{
+            LP_TARGET_TYPE_LINEAR, SuperBlockDevice, SuperExtent, SuperGeometry, SuperGroup,
+            SuperLayout, SuperPartition,
+        };
+        use crate::{parse_super_layout_for_repack, serialize_metadata};
+        use dynobox_xml::PartitionRecord;
+
+        fn record(filename: &str, start_sector: u64, num_sectors: u64) -> PartitionRecord {
+            PartitionRecord {
+                label: "super".to_string(),
+                filename: filename.to_string(),
+                lun: None,
+                start_sector: Some(start_sector.to_string()),
+                num_sectors: Some(num_sectors.to_string()),
+                source_xml: "rawprogram_all.xml".to_string(),
+                size_in_kb: None,
+                sector_size_bytes: Some("4096".to_string()),
+            }
+        }
+
+        let temp = tempfile::tempdir()?;
+        let metadata_prefix = serialize_metadata(&SuperLayout {
+            geometry: SuperGeometry {
+                metadata_max_size: 4096,
+                metadata_slot_count: 2,
+                logical_block_size: 4096,
+            },
+            header_flags: 0,
+            block_devices: vec![SuperBlockDevice {
+                name: "super".to_string(),
+                size: 4096 * 1024,
+            }],
+            groups: vec![SuperGroup {
+                name: "default".to_string(),
+                maximum_size: 4096 * 1024,
+            }],
+            partitions: vec![SuperPartition {
+                name: "system_a".to_string(),
+                attributes: 1,
+                group_name: "default".to_string(),
+                extents: vec![SuperExtent {
+                    num_sectors: 16,
+                    target_type: LP_TARGET_TYPE_LINEAR,
+                    target_data: 2048,
+                    target_source: 0,
+                }],
+            }],
+            chunks: Vec::new(),
+        })?;
+        std::fs::write(temp.path().join("super_empty.img"), &metadata_prefix)?;
+        // The OTA-updated standalone image is twice the declared chunk size.
+        std::fs::write(temp.path().join("system.img"), vec![0u8; 32 * 4096])?;
+
+        let records = vec![
+            record("super_empty.img", 0, (metadata_prefix.len() / 4096) as u64),
+            record("system.img", 2048, 16),
+        ];
+
+        assert!(
+            parse_super_layout(&records, temp.path()).is_err(),
+            "strict parser must reject the resized chunk record"
+        );
+
+        let layout = parse_super_layout_for_repack(&records, temp.path())?;
+        assert_eq!(layout.chunks.len(), 1, "only the metadata chunk is needed");
+        assert_eq!(layout.chunks[0].filename, "super_empty.img");
+        assert_eq!(layout.dynamic_partition_names(), vec!["system".to_string()]);
+
+        Ok(())
+    }
 }

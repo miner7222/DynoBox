@@ -425,10 +425,10 @@ pub fn parse_full_super_image(super_path: &Path) -> Result<SuperLayout> {
     })
 }
 
-pub fn parse_super_layout(
-    super_records: &[PartitionRecord],
-    image_dir: &Path,
-) -> Result<SuperLayout> {
+/// Order the `<program label="super">` records by flash offset, drop the
+/// file-less ones, and remove exact duplicates. Shared by the strict and
+/// repack-oriented layout parsers.
+fn ordered_usable_super_records(super_records: &[PartitionRecord]) -> Result<Vec<PartitionRecord>> {
     if super_records.is_empty() {
         return Err(DynoError::MissingFile(
             "super partition records not found in rawprogram XML".into(),
@@ -454,7 +454,14 @@ pub fn parse_super_layout(
         ));
     }
 
-    let usable = dedupe_super_records(&usable);
+    Ok(dedupe_super_records(&usable))
+}
+
+pub fn parse_super_layout(
+    super_records: &[PartitionRecord],
+    image_dir: &Path,
+) -> Result<SuperLayout> {
+    let usable = ordered_usable_super_records(super_records)?;
 
     // Drop records whose file is not physically present on disk. Lenovo OEM
     // images ship a sparse whole-super placeholder (e.g. `super.img`,
@@ -562,6 +569,81 @@ pub fn parse_super_layout(
         groups,
         partitions,
         chunks,
+    })
+}
+
+/// Parse the layout a repack needs: geometry + partition metadata (read from
+/// the first flash chunk) and that chunk's flash placement.
+///
+/// Repack takes the partition payloads from standalone `<partition>.img`
+/// files, so the remaining `<program>` records do not have to exist on disk
+/// or match their declared sizes. Unlike [`parse_super_layout`] this parser
+/// therefore validates only the first (metadata-bearing) chunk: some OEM
+/// images declare the split chunks under the logical partition names
+/// themselves, and after an OTA resizes a partition the image directory holds
+/// the patched standalone image under that name — the strict size check would
+/// abort a perfectly repackable set.
+pub fn parse_super_layout_for_repack(
+    super_records: &[PartitionRecord],
+    image_dir: &Path,
+) -> Result<SuperLayout> {
+    let usable = ordered_usable_super_records(super_records)?;
+
+    let Some(record) = usable
+        .into_iter()
+        .find(|r| image_dir.join(&r.filename).exists())
+    else {
+        return Err(DynoError::MissingFile(
+            "no super chunk files were found on disk".into(),
+        ));
+    };
+
+    let chunk_path = image_dir.join(&record.filename);
+    let start_sector = record
+        .start_sector
+        .clone()
+        .unwrap_or_else(|| "0".to_string())
+        .parse::<u64>()
+        .unwrap_or(0);
+    let num_sectors = record
+        .num_sectors
+        .clone()
+        .unwrap_or_else(|| "0".to_string())
+        .parse::<u64>()
+        .unwrap_or(0);
+    let sector_size_bytes = record
+        .sector_size_bytes
+        .clone()
+        .unwrap_or_else(|| "512".to_string())
+        .parse::<u64>()
+        .unwrap_or(LP_SECTOR_SIZE);
+    let start_byte = start_sector.checked_mul(sector_size_bytes).ok_or_else(|| {
+        DynoError::Tool(format!(
+            "super chunk start offset overflow for {}",
+            chunk_path.display()
+        ))
+    })?;
+    let actual_size_bytes = std::fs::metadata(&chunk_path)?.len();
+
+    let geometry = parse_geometry(&read_header_region(&chunk_path)?)?;
+    let (header_flags, block_devices, groups, partitions) = parse_metadata(&chunk_path)?;
+
+    Ok(SuperLayout {
+        geometry,
+        header_flags,
+        block_devices,
+        groups,
+        partitions,
+        chunks: vec![SuperChunk {
+            filename: record.filename.clone(),
+            path: chunk_path,
+            start_sector,
+            num_sectors,
+            sector_size_bytes,
+            start_byte,
+            size_bytes: actual_size_bytes,
+            relative_start_byte: 0,
+        }],
     })
 }
 

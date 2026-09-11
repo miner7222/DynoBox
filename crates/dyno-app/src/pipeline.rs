@@ -582,7 +582,7 @@ where
     }
 
     if request.complete {
-        complete_output_from_input(input_dir, &request.output, events)?;
+        complete_output_from_input(input_dir, &request.output, request.repack, events)?;
     }
 
     if let Some(dir) = &staged_resign_dir {
@@ -680,7 +680,7 @@ where
     }
 
     if request.complete {
-        complete_output_from_input(input_dir, &request.output, events)?;
+        complete_output_from_input(input_dir, &request.output, request.repack, events)?;
     }
 
     if let Some(dir) = &staged_resign_dir {
@@ -1684,6 +1684,23 @@ fn load_super_layout(
     };
     let records: Vec<_> = group.records().into_iter().cloned().collect();
     Ok(Some(dynobox_super::parse_super_layout(&records, dir)?))
+}
+
+/// Like [`load_super_layout`], but tolerant of chunk records whose files were
+/// replaced by standalone partition images (OEM images that name the split
+/// chunks after the partitions, then an OTA resizes them). Only the metadata
+/// chunk is required; see [`dynobox_super::parse_super_layout_for_repack`].
+fn load_super_layout_for_repack(
+    catalog: &dynobox_xml::XmlCatalog,
+    dir: &Path,
+) -> anyhow::Result<Option<dynobox_super::SuperLayout>> {
+    let Some(group) = catalog.group_for("super") else {
+        return Ok(None);
+    };
+    let records: Vec<_> = group.records().into_iter().cloned().collect();
+    Ok(Some(dynobox_super::parse_super_layout_for_repack(
+        &records, dir,
+    )?))
 }
 
 fn resolve_partition_source_candidates(
@@ -3502,7 +3519,7 @@ where
         }
     }
 
-    let source_layout = load_super_layout(&catalog, input)?
+    let source_layout = load_super_layout_for_repack(&catalog, input)?
         .ok_or_else(|| anyhow::anyhow!("Super partition group not found in XML catalog."))?;
     dynobox_super::repack_super_image(&source_layout, input, out_dir, &xml_paths)?;
 
@@ -3559,7 +3576,7 @@ where
     // Remove standalone dynamic partition images from output — they are now
     // packed inside the super_*.img chunks produced by repack.
     let catalog = dynobox_xml::XmlCatalog::from_dir(&repack_stage_dir)?;
-    if let Ok(Some(layout)) = load_super_layout(&catalog, &repack_stage_dir) {
+    if let Ok(Some(layout)) = load_super_layout_for_repack(&catalog, &repack_stage_dir) {
         let mut removed = 0usize;
         for name in layout.dynamic_partition_names() {
             let img_path = final_output_dir.join(format!("{name}.img"));
@@ -3648,6 +3665,23 @@ fn image_has_parseable_descriptors(path: &Path) -> bool {
 
 use crate::verify::collect_split_fragment_filenames;
 
+/// Lowercased filenames referenced by the `<program label="super">` records.
+/// Used to recognise split-super chunks that are not named `super_*.img`.
+fn super_chunk_filenames(dir: &Path) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    if let Ok(catalog) = dynobox_xml::XmlCatalog::from_dir(dir)
+        && let Some(group) = catalog.group_for("super")
+    {
+        for record in group.records() {
+            let filename = record.filename.trim();
+            if !filename.is_empty() {
+                names.insert(filename.to_ascii_lowercase());
+            }
+        }
+    }
+    names
+}
+
 fn prepare_repack_stage(
     base_input_dir: &Path,
     image_dir: &Path,
@@ -3656,6 +3690,11 @@ fn prepare_repack_stage(
     let mut copied_xml = 0usize;
     let mut copied_super = 0usize;
     let mut transfers = TransferStats::default();
+    // Split-super chunks are normally named `super_*.img`, but some OEM
+    // rawprogram XMLs name them after the logical partitions themselves. Copy
+    // every filename the `label="super"` records reference so those layouts
+    // reach the repack stage too.
+    let declared_super_chunks = super_chunk_filenames(base_input_dir);
 
     for entry in std::fs::read_dir(base_input_dir)? {
         let entry = entry?;
@@ -3669,7 +3708,9 @@ fn prepare_repack_stage(
             .and_then(|n| n.to_str())
             .unwrap_or_default();
         let copy_to_stage = (name.starts_with("rawprogram") && name.ends_with(".xml"))
-            || (name.starts_with("super_") && name.ends_with(".img"));
+            || (name.ends_with(".img")
+                && (name.starts_with("super_")
+                    || declared_super_chunks.contains(&name.to_ascii_lowercase())));
 
         if copy_to_stage {
             transfers.record(materialize_file_with_fallback(
@@ -4074,11 +4115,24 @@ fn materialize_file_with_fallback(
 
 /// Copy all files from input directory to output that are not already present,
 /// so the output mirrors the original firmware structure.
-fn complete_output_from_input<S>(input: &Path, output: &Path, events: &mut S) -> anyhow::Result<()>
+fn complete_output_from_input<S>(
+    input: &Path,
+    output: &Path,
+    skip_repacked_super_chunks: bool,
+    events: &mut S,
+) -> anyhow::Result<()>
 where
     S: EventSink + ?Sized,
 {
     workspace_prepare_output_dir(output)?;
+    // With `--repack` the super chunks were regenerated into the output; the
+    // input's chunks are stale (and may be named after the logical partitions
+    // when the OEM declared them that way), so they must not be copied back.
+    let declared_super_chunks = if skip_repacked_super_chunks {
+        super_chunk_filenames(input)
+    } else {
+        std::collections::HashSet::new()
+    };
     let mut copied = 0usize;
     for entry in std::fs::read_dir(input)? {
         let entry = entry?;
@@ -4087,10 +4141,12 @@ where
             continue;
         }
         let file_name = path.file_name().unwrap();
-        if file_name
-            .to_string_lossy()
-            .to_ascii_lowercase()
-            .ends_with(".x")
+        let name_lower = file_name.to_string_lossy().to_ascii_lowercase();
+        if name_lower.ends_with(".x") {
+            continue;
+        }
+        if skip_repacked_super_chunks
+            && (name_lower.starts_with("super_") || declared_super_chunks.contains(&name_lower))
         {
             continue;
         }
@@ -6257,6 +6313,85 @@ mod tests {
     fn format_unix_timestamp_utc_epoch() {
         let s = format_unix_timestamp_utc(0);
         assert_eq!(s, "Thu Jan  1 00:00:00 UTC 1970");
+    }
+
+    /// OEM rawprogram files sometimes declare the split-super chunks under the
+    /// logical partition names instead of `super_*.img` (e.g. ALLDOCUBE U880).
+    /// The repack stage must stage those declared chunks so the metadata chunk
+    /// survives, while the patched standalone image wins for the data ones.
+    #[test]
+    fn prepare_repack_stage_copies_declared_super_chunks_with_partition_names() {
+        let temp = tempdir().unwrap();
+        let base = temp.path().join("base");
+        let images = temp.path().join("images");
+        let stage = temp.path().join("stage");
+        fs::create_dir_all(&base).unwrap();
+        fs::create_dir_all(&images).unwrap();
+        fs::write(
+            base.join("rawprogram_all.xml"),
+            r#"<?xml version="1.0"?>
+<data>
+  <program label="super" filename="super_empty.img" start_sector="8712" num_partition_sectors="99" SECTOR_SIZE_IN_BYTES="4096" />
+  <program label="super" filename="system.img" start_sector="8968" num_partition_sectors="100" SECTOR_SIZE_IN_BYTES="4096" />
+</data>"#,
+        )
+        .unwrap();
+        fs::write(base.join("super_empty.img"), vec![0u8; 99 * 4096]).unwrap();
+        fs::write(base.join("system.img"), vec![1u8; 100 * 4096]).unwrap();
+        // The apply output carries the patched standalone system image, which
+        // no longer matches the chunk record's size.
+        fs::write(images.join("system.img"), vec![2u8; 200 * 4096]).unwrap();
+
+        let stats = prepare_repack_stage(&base, &images, &stage).unwrap();
+        assert_eq!(stats.xml_count, 1);
+        assert_eq!(stats.super_count, 2, "both declared chunks must be staged");
+        assert_eq!(fs::read(stage.join("super_empty.img")).unwrap()[0], 0);
+        assert_eq!(
+            fs::read(stage.join("system.img")).unwrap()[0],
+            2,
+            "the patched standalone image must replace the stale chunk copy"
+        );
+    }
+
+    /// `--complete --repack` must not copy the input's stale super chunks back
+    /// into an output whose super was just regenerated under different names.
+    #[test]
+    fn complete_output_skips_repacked_super_chunks() {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("in");
+        let output = temp.path().join("out");
+        fs::create_dir_all(&input).unwrap();
+        fs::create_dir_all(&output).unwrap();
+        fs::write(
+            input.join("rawprogram_all.xml"),
+            r#"<?xml version="1.0"?>
+<data>
+  <program label="super" filename="system.img" start_sector="0" num_partition_sectors="1" SECTOR_SIZE_IN_BYTES="4096" />
+</data>"#,
+        )
+        .unwrap();
+        fs::write(input.join("system.img"), b"stale-chunk").unwrap();
+        fs::write(input.join("super_1.img"), b"stale-chunk").unwrap();
+        fs::write(input.join("boot.img"), b"boot").unwrap();
+
+        let mut sink = NoopEventSink;
+        complete_output_from_input(&input, &output, true, &mut sink).unwrap();
+        assert!(
+            !output.join("system.img").exists(),
+            "declared chunk must be skipped after repack"
+        );
+        assert!(
+            !output.join("super_1.img").exists(),
+            "super_* must be skipped"
+        );
+        assert_eq!(fs::read(output.join("boot.img")).unwrap(), b"boot");
+
+        // Without `--repack` the input is mirrored verbatim (minus `.x`).
+        let plain = temp.path().join("out-plain");
+        fs::create_dir_all(&plain).unwrap();
+        complete_output_from_input(&input, &plain, false, &mut sink).unwrap();
+        assert!(plain.join("system.img").exists());
+        assert!(plain.join("super_1.img").exists());
     }
 
     fn assert_no_stage_dirs(parent: &Path) {
