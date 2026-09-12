@@ -1,0 +1,49 @@
+name = "fix-hiddenapps-npe"
+description = "Stop the ZuiHiddenApps process check from throwing on a null package name."
+
+# ActiveServices.stopServiceLocked(IApplicationThread, ...) intentionally passes
+# a null calling package (the caller is identified by thread, not by name), and
+# stock retrieveServiceLocked then calls
+# getApplicationInfoAsUser(callingPackage, ...) inside a
+# try/catch (NameNotFoundException). With the ZuiHiddenApps hook installed,
+# ComputerEngine.isAppHidden() forwards that null straight into
+# ZuiHiddenAppsManager.isPackageMainProcessRunning(), whose server side runs
+# str.equals(entry.getValue()) over the pid->package map. That NPE is caught by
+# the client helper and logged as "isPackageMainProcessRunning failed." with a
+# full stack (about 35 lines) on every app-initiated stopService. The message is
+# harmless, but it is the largest E-tag spam source in a boot log.
+#
+# Rewire the lambda's equals to java.util.Objects.equals (already in this dex's
+# pool): identical results for a non-null package name, false instead of a
+# throw for null. The invoke's move-result consumer is part of the replacement
+# because the primitive refuses to overwrite a consumed invoke otherwise; the
+# final body is then re-checked so every move-result still follows a
+# result-producing instruction. Pool indexes move between builds, so both
+# method references are resolved by symbol; only the register shape ({v1, v0})
+# and the trailing move-result v1 are pinned.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/zui/server/pm/ZuiHiddenAppsService;"
+method = "$r8$lambda$uoQ3J380nW_sr1I4_wL-x4q-pDY"
+proto = "(Ljava/lang/String;ILjava/util/Map$Entry;)Z"
+
+[[op.symbol]]
+name = "object_equals"
+kind = "method"
+class = "Ljava/lang/Object;"
+method = "equals"
+proto = "(Ljava/lang/Object;)Z"
+
+[[op.symbol]]
+name = "objects_equals"
+kind = "method"
+class = "Ljava/util/Objects;"
+method = "equals"
+proto = "(Ljava/lang/Object;Ljava/lang/Object;)Z"
+
+[[op.replacement]]
+from = "6e 20 ${object_equals:u16} 01 00 0a 01"
+to = "71 20 ${objects_equals:u16} 01 00 0a 01"
+expected = 1

@@ -4509,6 +4509,101 @@ value = false
             }
             _ => panic!("enable-adb-debug op[2] must reseed persist.sys.usb.config=adb"),
         }
+
+        let ha = load_dbp(&patches_dir().join("fix-hiddenapps-npe.dbp"))
+            .expect("fix-hiddenapps-npe.dbp");
+        assert_eq!(ha.name, "fix-hiddenapps-npe");
+        assert_eq!(ha.ops.len(), 1);
+        match &ha.ops[0] {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                class,
+                method,
+                proto,
+                symbols,
+                replacements,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(class, "Lcom/zui/server/pm/ZuiHiddenAppsService;");
+                assert_eq!(method, "$r8$lambda$uoQ3J380nW_sr1I4_wL-x4q-pDY");
+                assert_eq!(proto, "(Ljava/lang/String;ILjava/util/Map$Entry;)Z");
+                assert_eq!(symbols.len(), 2);
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(
+                    replacements[0].from,
+                    "6e 20 ${object_equals:u16} 01 00 0a 01"
+                );
+                assert_eq!(
+                    replacements[0].to,
+                    "71 20 ${objects_equals:u16} 01 00 0a 01"
+                );
+                assert_eq!(replacements[0].expected, 1);
+            }
+            _ => panic!("fix-hiddenapps-npe must use method_code_patch"),
+        }
+    }
+
+    /// Rewire the ZuiHiddenApps null-name NPE to java.util.Objects.equals on
+    /// the real services.jar. Set the TB324ZC ZUXOS 2.0.10.223 services.jar via
+    /// `DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_SERVICES_JAR`; optionally
+    /// `DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_DEX_OUT` to dump the patched dex for
+    /// disassembly.
+    #[test]
+    fn bundled_hiddenapps_npe_fix_lands_on_real_services_jar() {
+        use sha2::{Digest, Sha256};
+
+        let Ok(path) = std::env::var("DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_SERVICES_JAR") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("fix-hiddenapps-npe.dbp")).unwrap();
+        assert_eq!(doc.ops.len(), 1);
+        let op = &doc.ops[0];
+        assert!(matches!(
+            op,
+            DbpOp::MethodCodePatch { class, method, .. }
+                if class == "Lcom/zui/server/pm/ZuiHiddenAppsService;"
+                    && method == "$r8$lambda$uoQ3J380nW_sr1I4_wL-x4q-pDY"
+        ));
+
+        let jar = std::fs::read(path).expect("read services.jar");
+        assert_eq!(jar.len(), 25_460_514, "unexpected services.jar size");
+        let digest = Sha256::digest(&jar)
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "EB348E3AEAF9A1E28DBC0D7913BECB6D44B9340CEDBD15078EFF9CFE2084E8EF",
+            "unexpected services.jar digest"
+        );
+
+        let zip =
+            crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("parse services.jar zip");
+        let mut landed = 0usize;
+        let mut changed_entries = Vec::new();
+        for entry in zip.entries.iter().filter(|entry| {
+            entry.name.ends_with(".dex")
+                && entry.compression_method == 0
+                && !entry.uses_data_descriptor
+                && !entry.is_zip64
+                && entry.data_start + entry.compressed_size <= jar.len()
+        }) {
+            let original = &jar[entry.data_start..entry.data_start + entry.compressed_size];
+            let mut dex = original.to_vec();
+            if apply_one_op(&mut dex, op).unwrap() {
+                landed += 1;
+                assert_eq!(dex.len(), original.len(), "DEX size changed");
+                assert_ne!(dex, original, "reported landing without a byte change");
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                changed_entries.push(entry.name.clone());
+                if let Ok(out) = std::env::var("DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_DEX_OUT") {
+                    std::fs::write(&out, &dex).expect("write patched services DEX");
+                }
+            }
+        }
+        assert_eq!(landed, 1, "hiddenapps NPE fix must land exactly once");
+        assert_eq!(changed_entries, ["classes3.dex"]);
     }
 
     #[test]
