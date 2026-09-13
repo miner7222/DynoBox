@@ -4226,7 +4226,7 @@ value = false
         let tc =
             load_dbp(&patches_dir().join("debloat-telephony.dbp")).expect("debloat-telephony.dbp");
         assert_eq!(tc.name, "debloat-telephony");
-        assert_eq!(tc.ops.len(), 12);
+        assert_eq!(tc.ops.len(), 15);
         match &tc.ops[0] {
             DbpOp::MethodNop {
                 partition,
@@ -5471,12 +5471,12 @@ value = false
     #[test]
     fn bundled_debloat_telephony_land_on_real_dex() {
         let doc = load_dbp(&patches_dir().join("debloat-telephony.dbp")).unwrap();
-        assert_eq!(doc.ops.len(), 12);
+        assert_eq!(doc.ops.len(), 15);
         let cases: [(&str, &[usize], usize); 5] = [
             ("DYNOBOX_ZUITELE_DEX_DIR", &[0, 1], 2),
             ("DYNOBOX_ZUIDIALER_DEX_DIR", &[2, 3], 2),
             ("DYNOBOX_ZUICONTACTS_DEX_DIR", &[4], 1),
-            ("DYNOBOX_ZUIMESSAGE_DEX_DIR", &[5], 1),
+            ("DYNOBOX_ZUIMESSAGE_DEX_DIR", &[5, 12, 13, 14], 4),
             ("DYNOBOX_ZUICALLSETTINGS_DEX_DIR", &[6, 7], 2),
         ];
         for (var, op_indexes, expected) in cases {

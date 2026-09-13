@@ -1,5 +1,5 @@
 name = "debloat-telephony"
-description = "Cut TeddyMobile/YeddyMobile number-ID/spam services and AI in-call pills from the phone apps, and survive a missing com.lenovoconnect.aoac.pad app (DongDe) without SystemUI/Settings crashes."
+description = "Cut TeddyMobile/YeddyMobile number-ID/spam services and AI in-call pills from the phone apps, and survive a missing com.lenovoconnect.aoac.pad app (DongDe) without SystemUI/Settings crashes, plus repair the Messaging per-subscription screen's preference cast and null disable and keep its Wireless alerts row visible."
 
 # ZuiTelecom binds com.ted.number.service on calls (plus rebind attempts);
 # without the service every query fails gracefully (null-checked onFail
@@ -166,3 +166,98 @@ expected = 1
 from = "38 08 3c 00"
 to = "28 3c 00 00"
 expected = 1
+
+# preferences_per_subscription.xml declares the per-subscription "Advanced" rows
+# as zui.appcompat.preference.SwitchPreference, but the fragment assigns
+# findPreference() results to zui.appcompat.preference.Preference locals, so the
+# compiler emits a checkcast to that class. ZUI's SwitchPreference extends
+# android.support.v14.preference.SwitchPreference, a sibling of ZUI's Preference
+# (both descend from android.support.v7.preference.Preference directly), so the
+# checkcast throws ClassCastException and the Messaging per-subscription screen
+# can never open. Both sites only pass the value on to
+# PreferenceCategory.removePreference(android.support.v7.preference.Preference),
+# so retarget the two `check-cast v2` instructions to that shared v7 Preference:
+# the verifier accepts the argument and the removals behave exactly as before.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.symbol]]
+kind = "type"
+name = "zui_preference"
+descriptor = "Lzui/appcompat/preference/Preference;"
+
+[[op.symbol]]
+kind = "type"
+name = "support_preference"
+descriptor = "Landroid/support/v7/preference/Preference;"
+
+[[op.replacement]]
+from = "1f 02 ${zui_preference:u16}"
+to = "1f 02 ${support_preference:u16}"
+expected = 2
+
+# A few statements later the screen disables the auto-retrieve and delivery-report
+# rows whenever the Messaging app is not the default SMS app. The delivery-report
+# row was already removed above when MmsConfig reports MMS delivery reports as
+# unsupported, so that second findPreference returns null and its setEnabled(false)
+# throws NullPointerException. Nop just that one call site: the row is absent from
+# the screen either way, and the auto-retrieve disable above it is untouched.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.symbol]]
+kind = "method"
+name = "get_string"
+class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+method = "getString"
+proto = "(I)Ljava/lang/String;"
+
+[[op.symbol]]
+kind = "method"
+name = "find_preference"
+class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+method = "findPreference"
+proto = "(Ljava/lang/CharSequence;)Landroid/support/v7/preference/Preference;"
+
+[[op.symbol]]
+kind = "type"
+name = "switch_preference"
+descriptor = "Lzui/appcompat/preference/SwitchPreference;"
+
+[[op.symbol]]
+kind = "method"
+name = "set_enabled"
+class = "Lzui/appcompat/preference/SwitchPreference;"
+method = "setEnabled"
+proto = "(Z)V"
+
+[[op.replacement]]
+from = "6e 20 ${get_string:u16} 37 00 0c 08 6e 20 ${find_preference:u16} 87 00 0c 08 1f 08 ${switch_preference:u16} 6e 20 ${set_enabled:u16} 48 00"
+to = "6e 20 ${get_string:u16} 37 00 0c 08 6e 20 ${find_preference:u16} 87 00 0c 08 1f 08 ${switch_preference:u16} 00 00 00 00 00 00"
+expected = 1
+
+# preferences_per_subscription.xml also declares the "Wireless alerts" row, and
+# this screen removes it unconditionally right after the retargeted casts above
+# (the only place wireless_alerts_key is used). Nop that anchored removePreference
+# so the row stays on screen; its click wiring is dead code in this build, so it
+# is presentational only.
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+scan_class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+scan_method = "onCreate"
+target_class = "Lzui/appcompat/preference/PreferenceCategory;"
+target_method = "removePreference"
+proto = "(Landroid/support/v7/preference/Preference;)Z"
+anchor_int = 2131886882
