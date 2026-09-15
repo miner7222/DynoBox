@@ -419,3 +419,31 @@ value = "assistant"
 from = "1a 01 ${voice_interaction_service:u16}"
 to = "1a 01 ${assistant:u16}"
 expected = 1
+
+# PRC/ROW-gated AOSP rows that already have working backends once the region
+# gate is removed: notification dots (Launcher3 SettingsCache observer), media
+# controls (SystemUI qs_media_resumption / media_controls_lock_screen) and the
+# Wi-Fi band filter (framework WifiNl80211Manager reads settings_select_band).
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/android/settings/notification/BadgingNotificationPreferenceController;"
+method = "getAvailabilityStatus"
+value = 0
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/android/settings/sound/MediaControlsParentPreferenceController;"
+method = "getAvailabilityStatus"
+value = 0
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/wifi/WifiSelectBandChannelsController;"
+method = "getAvailabilityStatus"
+value = 0

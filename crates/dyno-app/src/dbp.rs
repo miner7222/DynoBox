@@ -3139,7 +3139,7 @@ value = false
         assert_eq!(dc.ops.len(), 57);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 37);
+        assert_eq!(uc.ops.len(), 40);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 11);
@@ -5850,6 +5850,55 @@ value = false
                 "{label} shared return-0 body must refuse in-place rewriting"
             );
         }
+    }
+
+    /// Land the unlocked region-gated rows (notification dots, media controls,
+    /// Wi-Fi band filter) on the real ZuiSettings dexes. Set
+    /// `DYNOBOX_ZUISETTINGS_DEX_DIR`.
+    #[test]
+    fn bundled_unlock_region_rows_land_on_real_dex() {
+        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
+            return;
+        };
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let targets = [
+            "Lcom/android/settings/notification/BadgingNotificationPreferenceController;",
+            "Lcom/android/settings/sound/MediaControlsParentPreferenceController;",
+            "Lcom/lenovo/settings/wifi/WifiSelectBandChannelsController;",
+        ];
+        let dir = std::path::Path::new(&dir);
+        let mut landed = vec![0usize; targets.len()];
+        for name in [
+            "classes.dex",
+            "classes2.dex",
+            "classes3.dex",
+            "classes4.dex",
+            "classes5.dex",
+            "classes6.dex",
+            "classes7.dex",
+        ] {
+            let Ok(mut dex) = std::fs::read(dir.join(name)) else {
+                continue;
+            };
+            for (index, class) in targets.iter().enumerate() {
+                let op = uc
+                    .ops
+                    .iter()
+                    .find(|op| {
+                        matches!(op, DbpOp::MethodConstInt { class: c, method, value, .. }
+                            if c == class && method == "getAvailabilityStatus" && *value == 0)
+                    })
+                    .unwrap_or_else(|| panic!("unlock-common must carry {class}"));
+                if apply_one_op(&mut dex, op).unwrap() {
+                    landed[index] += 1;
+                }
+            }
+        }
+        assert_eq!(
+            landed,
+            vec![1, 1, 1],
+            "each region-gated row must land exactly once"
+        );
     }
 
     /// Apply the merged debloat-settings ops (debloat-common + unlock-common)
