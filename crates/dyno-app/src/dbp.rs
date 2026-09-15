@@ -6081,6 +6081,55 @@ value = false
         assert_eq!(hits, 1, "country-code pin must land in exactly one dex");
     }
 
+    /// Land the bundled change-name ops on a real vendor build.prop. Set
+    /// `DYNOBOX_VENDOR_BUILD_PROP`; optionally set
+    /// `DYNOBOX_VENDOR_BUILD_PROP_OUT` to write the patched bytes.
+    #[test]
+    fn change_name_lands_on_real_vendor_build_prop() {
+        let Ok(path) = std::env::var("DYNOBOX_VENDOR_BUILD_PROP") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("change-name.dbp")).unwrap();
+        let ops: Vec<&DbpOp> = doc
+            .ops
+            .iter()
+            .filter(|op| matches!(op, DbpOp::TextReplace { .. }))
+            .collect();
+        assert_eq!(ops.len(), 3, "change-name must patch every market name");
+        let bytes = std::fs::read(&path).expect("read build.prop");
+        let text = String::from_utf8_lossy(&bytes);
+        let mut patched = bytes.clone();
+        for op in &ops {
+            let DbpOp::TextReplace { from, to, all, .. } = op else {
+                unreachable!("filtered text ops only")
+            };
+            assert_eq!(
+                text.matches(from.as_str()).count(),
+                1,
+                "`{from}` must appear exactly once in the stock file"
+            );
+            assert_eq!(
+                patch_text_replacement(&mut patched, from.as_bytes(), to.as_bytes(), *all),
+                1,
+                "`{from}` must be replaced exactly once"
+            );
+        }
+        assert_eq!(
+            patched.len(),
+            bytes.len(),
+            "text_replace must preserve the file length"
+        );
+        let patched_text = String::from_utf8_lossy(&patched);
+        assert_eq!(
+            patched_text.matches("Legion Tab Y700 5G").count(),
+            3,
+            "all three market names must read Legion Tab Y700 5G"
+        );
+        if let Ok(out) = std::env::var("DYNOBOX_VENDOR_BUILD_PROP_OUT") {
+            std::fs::write(out, &patched).expect("write patched build.prop");
+        }
+    }
+
     /// Land the three new debloat-security ops (app-recommendation hide +
     /// disable, install-scan disable) on the real apks. Set
     /// `DYNOBOX_ZUISETTINGS_APK` and/or `DYNOBOX_ZUIPACKAGEINSTALLER_APK`.

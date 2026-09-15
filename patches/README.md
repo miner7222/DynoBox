@@ -464,6 +464,7 @@ while still advancing the setup wizard.
 
 ## Bundled patches
 
+* **`change-name.dbp`**
 * **`debloat-bootanim.dbp`**
 * **`debloat-launcher.dbp`**
 * **`debloat-security.dbp`**
