@@ -3136,7 +3136,7 @@ value = false
     fn bundled_dbp_files_inventory() {
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
         assert_eq!(dc.name, "debloat-common");
-        assert_eq!(dc.ops.len(), 59);
+        assert_eq!(dc.ops.len(), 58);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
         assert_eq!(uc.ops.len(), 42);
@@ -7110,6 +7110,103 @@ value = false
             }
         }
         assert_eq!(hits, 1, "country-code pin must land in exactly one dex");
+    }
+
+    /// Land the debloat-common Game Assistant feature-key op (the WeChat, QQ
+    /// and network-acceleration WUJI tiles repointed at `key_floating_info`) on
+    /// the real ZuiGameHelper APK. Set `DYNOBOX_GAMEHELPER_APK`; optionally set
+    /// `DYNOBOX_GAMEHELPER_DEX_OUT` to dump the patched dex for disassembly.
+    #[test]
+    fn bundled_debloat_gamehelper_lands_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_GAMEHELPER_APK") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class.contains("FeaturesBaseOnRomKt"))
+            })
+            .expect("debloat-common must carry the Game Helper feature-key op");
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let entries: Vec<_> = zip
+            .entries
+            .iter()
+            .filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            })
+            .collect();
+
+        let mut landed = Vec::new();
+        for entry in entries {
+            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+            let mut dex = original.to_vec();
+            if apply_one_op(&mut dex, op).unwrap() {
+                assert_eq!(dex.len(), original.len(), "patch must preserve dex length");
+                landed.push((entry.name.clone(), dex));
+            }
+        }
+        assert_eq!(landed.len(), 1, "the feature-key op must land in one dex");
+        let (name, mut dex) = landed.pop().expect("one dex carries the feature-key op");
+        if let Ok(out_dir) = std::env::var("DYNOBOX_GAMEHELPER_DEX_OUT") {
+            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+            std::fs::create_dir_all(&out_dir).expect("create dex out dir");
+            std::fs::write(std::path::Path::new(&out_dir).join(&name), &dex)
+                .expect("write patched dex");
+        }
+    }
+
+    /// Shape of the Game Assistant feature-key op: the three WUJI keys are
+    /// repointed at `key_floating_info` through string symbols.
+    #[test]
+    fn bundled_debloat_gamehelper_feature_key_op_shape() {
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let op = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class.contains("FeaturesBaseOnRomKt"))
+            })
+            .expect("debloat-common must carry the Game Helper feature-key op");
+        match op {
+            DbpOp::MethodCodePatch {
+                file,
+                method,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk");
+                assert_eq!(method, "<clinit>");
+                assert_eq!(proto, "()V");
+                for name in [
+                    "key_we_chat",
+                    "key_qq",
+                    "key_network_acceleration",
+                    "key_floating_info",
+                ] {
+                    assert!(
+                        symbols.iter().any(|symbol| symbol.name() == name),
+                        "symbol {name} must be declared"
+                    );
+                }
+                assert_eq!(replacements.len(), 3, "three WUJI tiles");
+                for r in replacements {
+                    assert_eq!(r.expected, 1);
+                    assert!(r.to.contains("${key_floating_info:u16}"));
+                }
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// Land the debloat-wuji market-name ops on a real vendor build.prop. Set

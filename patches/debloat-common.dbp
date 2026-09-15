@@ -660,29 +660,57 @@ target_method = "isBusinessProject"
 proto = "(Landroid/content/Context;)Z"
 value = true
 
-# Every Game Helper tool tile is gated by
-# KeyContainer.isFeatureOpened(romFeatures), i.e. RomFeatures.isFeatureOpen(getKEY()).
-# Making these two companion getters return a string that is in no feature key
-# list keeps the WeChat/QQ tiles out of the assistant grid, the floating panel
-# and the floating notices, while the item instances keep their real
-# "key_we_chat"/"key_qq" state keys.
-[[op]]
-kind = "method_const_string"
-partition = "system"
-file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
-class = "Lcom/zui/game/service/sys/item/ItemWeChat$Companion;"
-method = "getKEY"
-proto = "()Ljava/lang/String;"
-value = "WeChat"
+# The WeChat, QQ and network-acceleration tiles come straight from the device
+# feature list (RomFeatures.keyList -> Repository.keys() -> findItemByKey), so
+# the companion getKEY decoys never removed them. Repoint the three WUJI
+# profile keys at "key_floating_info" instead: its item (ItemFloatingData) is
+# dropped from the floating tile list by GameHelperViewController.deleteFloatingItem,
+# and the original keys fall out of every isFeatureOpen() gate at the same
+# time. Only the WUJI profile carries key_network_acceleration; the WeChat/QQ
+# pairs in the other profiles are left untouched.
 
 [[op]]
-kind = "method_const_string"
+kind = "method_code_patch"
 partition = "system"
 file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
-class = "Lcom/zui/game/service/sys/item/ItemQQ$Companion;"
-method = "getKEY"
-proto = "()Ljava/lang/String;"
-value = "QQ"
+class = "Lcom/zui/game/service/FeaturesBaseOnRomKt;"
+method = "<clinit>"
+proto = "()V"
+
+[[op.symbol]]
+name = "key_we_chat"
+kind = "string"
+value = "key_we_chat"
+
+[[op.symbol]]
+name = "key_qq"
+kind = "string"
+value = "key_qq"
+
+[[op.symbol]]
+name = "key_network_acceleration"
+kind = "string"
+value = "key_network_acceleration"
+
+[[op.symbol]]
+name = "key_floating_info"
+kind = "string"
+value = "key_floating_info"
+
+[[op.replacement]]
+from = "1a 1a ${key_we_chat:u16} 4d 1a 08 04"
+to = "1a 1a ${key_floating_info:u16} 4d 1a 08 04"
+expected = 1
+
+[[op.replacement]]
+from = "1a 1a ${key_qq:u16} 4d 1a 08 0f"
+to = "1a 1a ${key_floating_info:u16} 4d 1a 08 0f"
+expected = 1
+
+[[op.replacement]]
+from = "1a 1b ${key_network_acceleration:u16} 4d 1b 08 1a"
+to = "1a 1b ${key_floating_info:u16} 4d 1b 08 1a"
+expected = 1
 
 # ============================ ANTISPAM ============================
 # The smart SMS check runs the bundled TMS engine online while the network is
