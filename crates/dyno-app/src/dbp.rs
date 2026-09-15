@@ -3139,7 +3139,7 @@ value = false
         assert_eq!(dc.ops.len(), 57);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 40);
+        assert_eq!(uc.ops.len(), 42);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 11);
@@ -5898,6 +5898,60 @@ value = false
             landed,
             vec![1, 1, 1],
             "each region-gated row must land exactly once"
+        );
+    }
+
+    /// Land the APN editor unlock ops (the PRC `DISABLE_EDITOR` gate nop and
+    /// the `onCreate` read-only branch patch) on the real ZuiSettings dexes.
+    /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
+    #[test]
+    fn bundled_unlock_apn_editor_lands_on_real_dex() {
+        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
+            return;
+        };
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let gate = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodNop { class, method, .. }
+                    if class == "Lcom/android/settings/network/apn/ApnEditor;"
+                        && method == "disableFieldForRowandPrc")
+            })
+            .expect("unlock-common must carry the APN editor gate nop");
+        let branch = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/android/settings/network/apn/ApnEditor;"
+                        && method == "onCreate")
+            })
+            .expect("unlock-common must carry the APN editor onCreate patch");
+        let dir = std::path::Path::new(&dir);
+        let mut landed = [0usize; 2];
+        for name in [
+            "classes.dex",
+            "classes2.dex",
+            "classes3.dex",
+            "classes4.dex",
+            "classes5.dex",
+            "classes6.dex",
+            "classes7.dex",
+        ] {
+            let Ok(mut dex) = std::fs::read(dir.join(name)) else {
+                continue;
+            };
+            for (index, op) in [gate, branch].into_iter().enumerate() {
+                if apply_one_op(&mut dex, op).unwrap() {
+                    landed[index] += 1;
+                }
+            }
+        }
+        assert_eq!(
+            landed,
+            [1, 1],
+            "the APN gate nop and the onCreate branch patch must each land once"
         );
     }
 

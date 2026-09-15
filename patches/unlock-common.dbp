@@ -447,3 +447,28 @@ file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
 class = "Lcom/lenovo/settings/wifi/WifiSelectBandChannelsController;"
 method = "getAvailabilityStatus"
 value = 0
+
+# APN editor: shipped (edited==0) carriers are read-only on PRC. Nop the gate
+# that consumes the ZUI list's DISABLE_EDITOR extra, and force the onCreate
+# "edited==1" branch so user_editable=0 / read-only-type rows stay editable.
+# Both targets live in the image's ZuiSettings and have unshared code items;
+# saving writes edited=1, which the provider never filters.
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/android/settings/network/apn/ApnEditor;"
+method = "disableFieldForRowandPrc"
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/android/settings/network/apn/ApnEditor;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.replacement]]
+from = "33 30 04 00 01 30 28 02 01 10"
+to = "33 30 04 00 01 30 28 02 01 30"
+expected = 1
