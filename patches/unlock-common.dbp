@@ -472,3 +472,52 @@ proto = "(Landroid/os/Bundle;)V"
 from = "33 30 04 00 01 30 28 02 01 10"
 to = "33 30 04 00 01 30 28 02 01 30"
 expected = 1
+
+
+# Launcher settings: the auto-reorder row is removed on commercial projects
+# and the Blue Point row only when the config feature is absent, so pin both
+# gates open.
+#
+# The layout dialog lists only the profiles whose `canBeShown` column the grid
+# provider reports true, which on the pad profile is 8x4 alone; every other
+# grid (6x4, 6x5, 5x4 and the learning 4x6 profile) stays hidden behind
+# canBeShown="false" in res/xml/device_profiles_row_new_rotation. The fragment
+# reads that column as "true".equalsIgnoreCase(cursor.getString(canBeShown)) and
+# then skips the row when false, so force the comparison result to true: every
+# n x n profile is listed and the "custom" row keeps the stock fragment-level
+# filter that drops it by name.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/zui/launcher/settings/ZuiLauncherFragment;"
+scan_method = "L"
+target_class = "Lcom/zui/launcher/utils/TaskbarUtilities;"
+target_method = "isCommercialProject"
+proto = "()Z"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/zui/launcher/settings/ZuiLauncherFragment;"
+scan_method = "M"
+target_class = "Lcom/zui/launcher/BluePoint;"
+target_method = "hasBluePointFunction"
+proto = "(Landroid/content/Context;)Z"
+value = true
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/android/launcher3/Utilities;"
+method = "queryGridOptions"
+proto = "(Landroid/content/Context;)Ljava/util/List;"
+
+[[op.replacement]]
+from = "72 20 a5 04 57 00 0c 08 6e 20 86 f6 80 00 0a 08"
+to = "72 20 a5 04 57 00 0c 08 6e 20 86 f6 80 00 12 18"
+expected = 1

@@ -1160,3 +1160,19 @@ proto = "(Ljava/lang/Object;)Ljava/lang/Object;"
 from = "71 10 3f 36 01 00 0c 02 6e 20 c0 48 32 00"
 to = "71 10 3f 36 01 00 0c 02 00 00 00 00 00 00"
 expected = 1
+
+
+# The launcher's cloud-switch row is kept only while the Lenovo cloud folder
+# service is online; pin that read false inside the settings fragment so the
+# row is removed like the other unsupported ones.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/zui/launcher/settings/ZuiLauncherFragment;"
+scan_method = "N"
+target_class = "Lcom/zui/launcher/cloudfolder/CloudUtils;"
+target_method = "isCloudFolderOnLine"
+proto = "(Landroid/content/Context;)Z"
+value = false

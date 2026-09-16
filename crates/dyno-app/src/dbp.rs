@@ -3136,10 +3136,10 @@ value = false
     fn bundled_dbp_files_inventory() {
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
         assert_eq!(dc.name, "debloat-common");
-        assert_eq!(dc.ops.len(), 73);
+        assert_eq!(dc.ops.len(), 74);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 42);
+        assert_eq!(uc.ops.len(), 45);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 12);
@@ -7487,6 +7487,105 @@ value = false
             })
             .count();
         assert_eq!(summaries, 1, "both row summaries must be dropped");
+    }
+
+    /// Launcher settings ops: the cloud row hides, the auto-reorder and Blue
+    /// Point rows survive their gates, and the layout dialog lists every n x n
+    /// profile. Set `DYNOBOX_ZUILAUNCHER_APK`.
+    #[test]
+    fn bundled_launcher_settings_ops_land_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_ZUILAUNCHER_APK") else {
+            return;
+        };
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let cloud = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_method, .. }
+                    if scan_method.as_deref() == Some("N"))
+            })
+            .expect("cloud row op");
+        let reorder = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_method, .. }
+                    if scan_method.as_deref() == Some("L"))
+            })
+            .expect("auto reorder op");
+        let blue = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_method, .. }
+                    if scan_method.as_deref() == Some("M"))
+            })
+            .expect("blue point op");
+        let grids = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class == "Lcom/android/launcher3/Utilities;")
+            })
+            .expect("grid options op");
+        for (op, want) in [(cloud, false), (reorder, false), (blue, true)] {
+            match op {
+                DbpOp::InvokeConstBool { file, value, .. } => {
+                    assert_eq!(file, "system/priv-app/ZuiLauncher/ZuiLauncher.apk");
+                    assert_eq!(*value, want);
+                }
+                _ => unreachable!(),
+            }
+        }
+        match grids {
+            DbpOp::MethodCodePatch {
+                method,
+                proto,
+                replacements,
+                ..
+            } => {
+                assert_eq!(method, "queryGridOptions");
+                assert_eq!(proto, "(Landroid/content/Context;)Ljava/util/List;");
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(replacements[0].expected, 1);
+                assert_eq!(
+                    replacements[0].from,
+                    "72 20 a5 04 57 00 0c 08 6e 20 86 f6 80 00 0a 08"
+                );
+                assert_eq!(
+                    replacements[0].to,
+                    "72 20 a5 04 57 00 0c 08 6e 20 86 f6 80 00 12 18"
+                );
+            }
+            _ => unreachable!(),
+        }
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let mut landed = vec![0usize; 4];
+        for entry in zip.entries.iter().filter(|e| {
+            e.name.ends_with(".dex")
+                && e.compression_method == 0
+                && !e.uses_data_descriptor
+                && !e.is_zip64
+                && e.data_start + e.compressed_size <= apk.len()
+        }) {
+            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+            for (index, op) in [cloud, reorder, blue, grids].iter().enumerate() {
+                let mut dex = original.to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    assert_eq!(dex.len(), original.len(), "patch must preserve dex length");
+                    landed[index] += 1;
+                }
+            }
+        }
+        assert_eq!(
+            landed,
+            vec![1, 1, 1, 1],
+            "each launcher op must land exactly once"
+        );
     }
 
     /// Land the NetworkAccelerate ops on the real app dex. Set
