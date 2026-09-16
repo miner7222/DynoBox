@@ -3142,7 +3142,7 @@ value = false
         assert_eq!(uc.ops.len(), 45);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
-        assert_eq!(fc.ops.len(), 12);
+        assert_eq!(fc.ops.len(), 13);
         let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
         assert_eq!(wj.name, "debloat-wuji");
         assert_eq!(wj.ops.len(), 4);
@@ -7867,6 +7867,89 @@ value = false
         let (name, mut dex) = landed.pop().expect("one dex carries the AOD date op");
         assert_eq!(name, "classes.dex", "the AOD op lands in the first dex");
         if let Ok(out) = std::env::var("DYNOBOX_ZUISYSTEMUI_AOD_DEX_OUT") {
+            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+            std::fs::write(&out, &dex).expect("write patched dex");
+        }
+    }
+
+    /// Shape check for the fix-common sidebar op: one whole-instruction swap
+    /// of the `const/16 v2, 0x7f6` type load in `FloatService.initSideBarView`
+    /// to `const/16 v2, 0x7d3` (TYPE_SYSTEM_ALERT).
+    #[test]
+    fn bundled_fix_common_sidebar_window_type_op_shape() {
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let op = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class == "Lcom/zui/freeform/sidebar/FloatService;")
+            })
+            .expect("fix-common must carry the sidebar window type op");
+        match op {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                method,
+                proto,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiFreeformBar/ZuiFreeformBar.apk");
+                assert_eq!(method, "initSideBarView");
+                assert_eq!(proto, "()V");
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(replacements[0].from, "13 02 f6 07");
+                assert_eq!(replacements[0].to, "13 02 d3 07");
+                assert_eq!(replacements[0].expected, 1);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Retype the sidebar hover bar from APPLICATION_OVERLAY to
+    /// TYPE_SYSTEM_ALERT on the real ZuiFreeformBar APK. Set
+    /// `DYNOBOX_FREEFORMBAR_APK`; optionally set `DYNOBOX_FREEFORMBAR_DEX_OUT`
+    /// to write the patched dex file.
+    #[test]
+    fn bundled_fix_common_sidebar_window_type_lands_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_FREEFORMBAR_APK") else {
+            return;
+        };
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let op = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class == "Lcom/zui/freeform/sidebar/FloatService;")
+            })
+            .expect("sidebar window type op");
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let mut landed = Vec::new();
+        for entry in zip.entries.iter().filter(|e| {
+            e.name.ends_with(".dex")
+                && e.compression_method == 0
+                && !e.uses_data_descriptor
+                && !e.is_zip64
+                && e.data_start + e.compressed_size <= apk.len()
+        }) {
+            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+            let mut dex = original.to_vec();
+            if apply_one_op(&mut dex, op).unwrap() {
+                assert_eq!(dex.len(), original.len(), "patch must preserve dex length");
+                landed.push((entry.name.clone(), dex));
+            }
+        }
+        assert_eq!(landed.len(), 1, "the sidebar op must land in one dex");
+        let (name, mut dex) = landed.pop().expect("one dex carries the sidebar op");
+        assert!(
+            name == "classes.dex" || name == "classes2.dex",
+            "the sidebar op lands in one of the two app dex files"
+        );
+        if let Ok(out) = std::env::var("DYNOBOX_FREEFORMBAR_DEX_OUT") {
             crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
             std::fs::write(&out, &dex).expect("write patched dex");
         }

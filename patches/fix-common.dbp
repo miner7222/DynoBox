@@ -1,6 +1,6 @@
 
 name = "fix-common"
-description = "Crash and behavior repairs: hidden-apps NPE, storage stats, third-party Recents, LE Audio and the ZuiMessage screens."
+description = "Crash and behavior repairs: hidden-apps NPE, storage stats, third-party Recents, LE Audio, the ZuiMessage screens and the freeform sidebar's window type."
 
 [[op]]
 kind = "nop_invoke"
@@ -889,4 +889,28 @@ expected = 1
 [[op.replacement]]
 from = "38 06 03 00 28 29"
 to = "38 06 03 00 28 2c"
+expected = 1
+
+# The freeform sidebar's hover bar is created as an application-overlay window
+# (type 2038), so the system hides it and blocks its touch strip whenever a
+# sensitive window such as a permission dialog asks for non-system overlays to
+# be hidden (SYSTEM_FLAG_HIDE_NON_SYSTEM_OVERLAY_WINDOWS). com.zui.freeform.sidebar
+# is a platform-signed system app (sharedUserId android.uid.system) that already
+# holds INTERNAL_SYSTEM_WINDOW, so retyping the bar to TYPE_SYSTEM_ALERT (2003)
+# keeps it out of that hide set: the bar stays visible and touchable while such
+# dialogs are up. One const/16 in initSideBarView carries the type; the rest of
+# the method (format, flags, x/y, gravity) is untouched. Trade-off: the bar
+# becomes a trusted system window that normal app windows cannot cover.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiFreeformBar/ZuiFreeformBar.apk"
+class = "Lcom/zui/freeform/sidebar/FloatService;"
+method = "initSideBarView"
+proto = "()V"
+
+[[op.replacement]]
+from = "13 02 f6 07"
+to = "13 02 d3 07"
 expected = 1
