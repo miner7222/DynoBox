@@ -953,3 +953,63 @@ class = "Lcom/android/server/telecom/zui/ZuiTelephonyUtil$SettingsConfig;"
 method = "getAntiEnabledMarks"
 proto = "()I"
 value = 0
+
+
+# The lighting-effect applied-app lists are region arrays. Music, video and
+# notification pick between framework's config_prc_effectAppsOf* and
+# config_row_effectAppsOf*; the game scene picks its own
+# config_prc_effectAppsOfGame against the framework ROW array, and the same
+# pair seeds the first-run enabled set the service stores. Read the ROW array
+# in every case so the lists and the applied set match the ROW build. Nothing
+# else reads those arrays: the light ring service applies whatever per-scene
+# app list the settings persist, and its first-run defaults come from the
+# initializer patched below.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/light/data/config/LightConfig;"
+method = "getPresetAppList"
+proto = "(Landroid/content/Context;Lcom/lenovo/settings/light/data/config/LightScene;)Ljava/util/Map;"
+
+[[op.replacement]]
+from = "60 02 a8 2c"
+to = "60 02 ad 2c"
+expected = 1
+
+[[op.replacement]]
+from = "60 02 aa 2c"
+to = "60 02 af 2c"
+expected = 1
+
+[[op.replacement]]
+from = "60 02 a9 2c"
+to = "60 02 ae 2c"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/light/data/config/LightConfig;"
+method = "getGameAppList"
+proto = "(Landroid/content/Context;)Ljava/util/Map;"
+
+[[op.replacement]]
+from = "60 02 d8 1b"
+to = "60 02 ac 2c"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/light/data/manager/LightSceneDataInitializer;"
+method = "initGameSceneData"
+proto = "(Landroid/content/Context;)Lcom/lenovo/settings/light/data/model/GameSceneData;"
+
+[[op.replacement]]
+from = "60 02 d8 1b"
+to = "60 02 ac 2c"
+expected = 1

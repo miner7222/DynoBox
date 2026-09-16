@@ -3136,7 +3136,7 @@ value = false
     fn bundled_dbp_files_inventory() {
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
         assert_eq!(dc.name, "debloat-common");
-        assert_eq!(dc.ops.len(), 58);
+        assert_eq!(dc.ops.len(), 61);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
         assert_eq!(uc.ops.len(), 42);
@@ -6136,6 +6136,127 @@ value = false
             landed,
             [1, 1],
             "the APN gate nop and the onCreate branch patch must each land once"
+        );
+    }
+
+    /// The lighting-effect applied-app lists are region arrays: the three
+    /// `LightConfig` selections and the `LightSceneDataInitializer` default
+    /// must all read the framework ROW arrays so the lists match the ROW
+    /// build.
+    #[test]
+    fn bundled_debloat_light_row_lists_op_shape() {
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let picks: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .filter(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class == "Lcom/lenovo/settings/light/data/config/LightConfig;"
+                        || class == "Lcom/lenovo/settings/light/data/manager/LightSceneDataInitializer;")
+            })
+            .collect();
+        assert_eq!(picks.len(), 3, "three lighting app-list ops");
+        let expected: [(&str, &str, &[(&str, &str)]); 3] = [
+            (
+                "getPresetAppList",
+                "(Landroid/content/Context;Lcom/lenovo/settings/light/data/config/LightScene;)Ljava/util/Map;",
+                &[
+                    ("60 02 a8 2c", "60 02 ad 2c"),
+                    ("60 02 aa 2c", "60 02 af 2c"),
+                    ("60 02 a9 2c", "60 02 ae 2c"),
+                ],
+            ),
+            (
+                "getGameAppList",
+                "(Landroid/content/Context;)Ljava/util/Map;",
+                &[("60 02 d8 1b", "60 02 ac 2c")],
+            ),
+            (
+                "initGameSceneData",
+                "(Landroid/content/Context;)Lcom/lenovo/settings/light/data/model/GameSceneData;",
+                &[("60 02 d8 1b", "60 02 ac 2c")],
+            ),
+        ];
+        for (method, proto, pairs) in expected {
+            let op = picks
+                .iter()
+                .find(|op| matches!(op, DbpOp::MethodCodePatch { method: m, .. } if m == method))
+                .unwrap_or_else(|| panic!("debloat-common must carry the {method} light op"));
+            let DbpOp::MethodCodePatch {
+                partition,
+                file,
+                proto: p,
+                replacements,
+                ..
+            } = op
+            else {
+                unreachable!()
+            };
+            assert_eq!(partition, "system");
+            assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+            assert_eq!(p, proto);
+            let got: Vec<(&str, &str)> = replacements
+                .iter()
+                .map(|r| (r.from.as_str(), r.to.as_str()))
+                .collect();
+            assert_eq!(got, pairs, "{method} must select only the PRC arrays");
+            assert!(replacements.iter().all(|r| r.expected == 1));
+        }
+    }
+
+    /// Land the lighting-effect applied-app ops on the real ZuiSettings dexes.
+    /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
+    #[test]
+    fn bundled_debloat_light_row_lists_land_on_real_dex() {
+        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
+            return;
+        };
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let ops: Vec<&DbpOp> = ["getPresetAppList", "getGameAppList", "initGameSceneData"]
+            .iter()
+            .map(|method| {
+                dc.ops
+                    .iter()
+                    .find(
+                        |op| matches!(op, DbpOp::MethodCodePatch { method: m, .. } if m == method),
+                    )
+                    .unwrap_or_else(|| panic!("debloat-common must carry the {method} light op"))
+            })
+            .collect();
+        let dir = std::path::Path::new(&dir);
+        let mut landed = vec![0usize; ops.len()];
+        for name in [
+            "classes.dex",
+            "classes2.dex",
+            "classes3.dex",
+            "classes4.dex",
+            "classes5.dex",
+            "classes6.dex",
+            "classes7.dex",
+        ] {
+            let Ok(original) = std::fs::read(dir.join(name)) else {
+                continue;
+            };
+            let mut patched = original.clone();
+            for (index, op) in ops.iter().enumerate() {
+                if apply_one_op(&mut patched, op).unwrap() {
+                    assert_eq!(name, "classes6.dex", "light ops live in classes6.dex");
+                    landed[index] += 1;
+                }
+            }
+            if patched != original
+                && let Ok(out) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_OUT")
+            {
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+                std::fs::create_dir_all(&out).expect("create dex out dir");
+                std::fs::write(std::path::Path::new(&out).join(name), &patched)
+                    .expect("write patched dex");
+            }
+        }
+        assert_eq!(
+            landed,
+            vec![1, 1, 1],
+            "each lighting app-list op must land exactly once"
         );
     }
 
