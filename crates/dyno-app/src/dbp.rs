@@ -3136,7 +3136,7 @@ value = false
     fn bundled_dbp_files_inventory() {
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
         assert_eq!(dc.name, "debloat-common");
-        assert_eq!(dc.ops.len(), 57);
+        assert_eq!(dc.ops.len(), 59);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
         assert_eq!(uc.ops.len(), 42);
@@ -3154,6 +3154,220 @@ value = false
             load_dbp(&patches_dir().join("show-google-lens.dbp")).expect("show-google-lens.dbp");
         assert_eq!(gl.name, "show-google-lens");
         assert_eq!(gl.ops.len(), 3);
+    }
+
+    /// The antispam ops: offline-only smart SMS check, disabled call
+    /// classification switches and the forced-empty telecom mark gate.
+    #[test]
+    fn bundled_debloat_antispam_ops_shape() {
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+
+        let offline = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
+                    if scan_class.contains("SmsCheckThread"))
+            })
+            .expect("antispam offline op");
+        match offline {
+            DbpOp::InvokeConstBool {
+                file,
+                scan_method,
+                target_class,
+                target_method,
+                proto,
+                value,
+                ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiMessage/ZuiMessage.apk");
+                assert_eq!(scan_method.as_deref(), Some("call"));
+                assert_eq!(
+                    target_class,
+                    "Lcom/android/messaging/util/ConnectivityUtil;"
+                );
+                assert_eq!(target_method, "isNetworkAvailable");
+                assert_eq!(proto, "(Landroid/content/Context;)Z");
+                assert!(!*value, "smart check must always take the offline branch");
+            }
+            _ => unreachable!(),
+        }
+
+        for (class, method_name, set_enabled_class) in [
+            (
+                "Lcom/zui/callsettings/XCallsettingSwitchPerference;",
+                "onAttachedToActivity",
+                "Landroid/preference/Preference;",
+            ),
+            (
+                "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;",
+                "onAttached",
+                "Landroidx/preference/Preference;",
+            ),
+        ] {
+            let op = dc
+                .ops
+                .iter()
+                .find(|op| matches!(op, DbpOp::MethodCodePatch { class: c, .. } if c == class))
+                .unwrap_or_else(|| panic!("missing category switch patch for {class}"));
+            match op {
+                DbpOp::MethodCodePatch {
+                    file,
+                    method,
+                    proto,
+                    symbols,
+                    replacements,
+                    ..
+                } => {
+                    assert_eq!(file, "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk");
+                    assert_eq!(method, method_name);
+                    assert_eq!(proto, "()V");
+                    // The disabled-switch rewrite must call setEnabled on a
+                    // class the switch actually descends from, or class
+                    // verification fails when the screen opens.
+                    let set_enabled = symbols
+                        .iter()
+                        .find(|symbol| symbol.name() == "set_enabled")
+                        .expect("set_enabled symbol");
+                    match set_enabled {
+                        DbpCodeSymbol::Method {
+                            class,
+                            method,
+                            proto,
+                            ..
+                        } => {
+                            assert_eq!(class, set_enabled_class);
+                            assert_eq!(method, "setEnabled");
+                            assert_eq!(proto, "(Z)V");
+                        }
+                        _ => panic!("set_enabled must be a method symbol"),
+                    }
+                    assert_eq!(replacements.len(), 6, "six category switches");
+                    for r in replacements {
+                        assert_eq!(r.expected, 1);
+                        assert!(r.from.contains("${set_checked:u16}"));
+                        assert!(r.to.contains("${set_enabled:u16}"));
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let marks = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstInt { class, .. }
+                    if class.contains("ZuiTelephonyUtil$SettingsConfig"))
+            })
+            .expect("telecom mark gate");
+        match marks {
+            DbpOp::MethodConstInt {
+                file,
+                method,
+                proto,
+                value,
+                ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiTelecom/ZuiTelecom.apk");
+                assert_eq!(method, "getAntiEnabledMarks");
+                assert_eq!(proto, "()I");
+                assert_eq!(*value, 0);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Land the antispam ops on the real APKs: the offline-only smart check
+    /// (`DYNOBOX_ZUIMESSAGE_APK`), the disabled category switches
+    /// (`DYNOBOX_ZUICALLSETTINGS_APK`) and the forced-empty telecom mark gate
+    /// (`DYNOBOX_ZUITELE_APK`). Each check is skipped when its env var is
+    /// unset; `DYNOBOX_ANTISPAM_DEX_OUT` optionally dumps the patched dexes.
+    #[test]
+    fn bundled_debloat_antispam_land_on_real_apks() {
+        fn land(apk_path: &str, op: &DbpOp, dump_name: &str) -> usize {
+            let apk = std::fs::read(apk_path).expect("read apk");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let mut hits = 0usize;
+            for e in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            }) {
+                let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    hits += 1;
+                    if let Ok(dir) = std::env::var("DYNOBOX_ANTISPAM_DEX_OUT") {
+                        crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                        let _ = std::fs::write(std::path::Path::new(&dir).join(dump_name), &dex);
+                    }
+                }
+            }
+            hits
+        }
+
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let offline = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
+                    if scan_class.contains("SmsCheckThread"))
+            })
+            .expect("antispam offline op");
+        let x_patch = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class == "Lcom/zui/callsettings/XCallsettingSwitchPerference;")
+            })
+            .expect("X switch patch");
+        let compat_patch = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class == "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;")
+            })
+            .expect("compat switch patch");
+        let marks = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstInt { class, .. }
+                    if class.contains("ZuiTelephonyUtil$SettingsConfig"))
+            })
+            .expect("telecom mark gate");
+
+        if let Ok(p) = std::env::var("DYNOBOX_ZUIMESSAGE_APK") {
+            assert_eq!(
+                land(&p, offline, "AntiSpamModeUtils-SmsCheckThread.dex"),
+                1,
+                "smart check op should land once"
+            );
+        }
+        if let Ok(p) = std::env::var("DYNOBOX_ZUICALLSETTINGS_APK") {
+            assert_eq!(
+                land(&p, x_patch, "XCallsettingSwitchPerference.dex"),
+                1,
+                "X switch patch should land once"
+            );
+            assert_eq!(
+                land(&p, compat_patch, "CallsettingSwitchPerferenceCompat.dex"),
+                1,
+                "compat switch patch should land once"
+            );
+        }
+        if let Ok(p) = std::env::var("DYNOBOX_ZUITELE_APK") {
+            assert_eq!(
+                land(&p, marks, "ZuiTelephonyUtil-SettingsConfig.dex"),
+                1,
+                "telecom mark gate should land once"
+            );
+        }
     }
 
     #[test]
@@ -3922,11 +4136,7 @@ value = false
                 _ => false,
             })
             .collect();
-        assert_eq!(
-            security_ops.len(),
-            21,
-            "all twenty-one security ops must parse"
-        );
+        assert_eq!(security_ops.len(), 20, "all twenty security ops must parse");
         let mut av_nops = 0usize; // AntiVirusInterface hub method_nops
         let mut got_getrecommendapp_nop = false;
         let mut got_install_scan = false; // invoke_const_int getInt -> 0
@@ -4059,12 +4269,9 @@ value = false
                     expected,
                     ..
                 } => {
-                    // Rounded card closures next to the hidden nav rows.
+                    // Rounded card closure next to the hidden permission row.
                     assert_eq!(file, "system/priv-app/ZuiSecurity/ZuiSecurity.apk");
-                    assert!(
-                        (*node_id == 0x7f090401 && *drawable == 0x7f0804ab)
-                            || (*node_id == 0x7f0903fa && *drawable == 0x7f0804ac)
-                    );
+                    assert!(*node_id == 0x7f090401 && *drawable == 0x7f0804ab);
                     assert_eq!(*expected, 2);
                 }
                 DbpOp::MethodCodePatch {
@@ -4589,36 +4796,6 @@ value = false
                 assert_eq!(proto, "()V");
             }
             _ => panic!("debloat-common ZuiTelecom op must nop TedServiceHelper.bindService"),
-        }
-        let tc = dc
-            .ops
-            .iter()
-            .find(|op| {
-                matches!(op, DbpOp::MethodConstBool { class, method, .. }
-                    if class == "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
-                        && method == "isAntiSpamEnabled")
-            })
-            .expect("debloat-common anti-spam op");
-        match tc {
-            DbpOp::MethodConstBool {
-                partition,
-                file,
-                class,
-                method,
-                proto,
-                value,
-            } => {
-                assert_eq!(partition, "system");
-                assert_eq!(file, "system/priv-app/ZuiTelecom/ZuiTelecom.apk");
-                assert_eq!(
-                    class,
-                    "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
-                );
-                assert_eq!(method, "isAntiSpamEnabled");
-                assert_eq!(proto, "(Landroid/content/Context;)Z");
-                assert!(!*value);
-            }
-            _ => panic!("debloat-common ZuiTelecom op must force isAntiSpamEnabled false"),
         }
         let tc = dc
             .ops
@@ -6211,20 +6388,13 @@ value = false
         let cases: [(&str, Vec<&DbpOp>, usize); 5] = [
             (
                 "DYNOBOX_ZUITELE_DEX_DIR",
-                vec![
-                    find_op(&dc, "ZuiTelecom ted bind nop", |op| {
-                        matches!(op, DbpOp::MethodNop { file, class, method, .. }
-                            if file == "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
-                                && class == "Lcom/ted/number/TedServiceHelper;"
-                                && method == "bindService")
-                    }),
-                    find_op(&dc, "ZuiTelecom anti-spam op", |op| {
-                        matches!(op, DbpOp::MethodConstBool { class, method, .. }
-                            if class == "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
-                                && method == "isAntiSpamEnabled")
-                    }),
-                ],
-                2,
+                vec![find_op(&dc, "ZuiTelecom ted bind nop", |op| {
+                    matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                        if file == "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
+                            && class == "Lcom/ted/number/TedServiceHelper;"
+                            && method == "bindService")
+                })],
+                1,
             ),
             (
                 "DYNOBOX_ZUIDIALER_DEX_DIR",

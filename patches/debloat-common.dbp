@@ -212,9 +212,9 @@ file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
 node_id = 0x7f090404
 expected = 6
 
-# Hiding rows leaves the neighboring card boundaries square (the rounded
-# top/bottom closures belonged to the hidden rows). Restore them by swapping
-# the boundary rows' backgrounds to the rounded variants.
+# Hiding the permission row leaves the last visible row of its card (privacy
+# space) square at the bottom while the rounded closure went away with the
+# hidden row. Swap it back to the rounded variant.
 
 [[op]]
 kind = "layout_background"
@@ -222,14 +222,6 @@ partition = "system"
 file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
 node_id = 0x7f090401
 drawable = 0x7f0804ab
-expected = 2
-
-[[op]]
-kind = "layout_background"
-partition = "system"
-file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
-node_id = 0x7f0903fa
-drawable = 0x7f0804ac
 expected = 2
 
 # Fallback for the collapse above: if a build's layout does not match the
@@ -545,18 +537,6 @@ class = "Lcom/ted/number/TedServiceHelper;"
 method = "bindService"
 proto = "()V"
 
-# Master gate of the incoming-call filter pipeline (reads xui_harass_on).
-# Forcing false keeps the filter fail-open without touching normal calls.
-
-[[op]]
-kind = "method_const_bool"
-partition = "system"
-file = "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
-class = "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
-method = "isAntiSpamEnabled"
-proto = "(Landroid/content/Context;)Z"
-value = false
-
 # Same bind kill for the dialer's bundled helper copy (obfuscated s5/a;
 # f() holds the single bindService call site, callers null-check results).
 
@@ -703,3 +683,245 @@ class = "Lcom/zui/game/service/sys/item/ItemQQ$Companion;"
 method = "getKEY"
 proto = "()Ljava/lang/String;"
 value = "QQ"
+
+# ============================ ANTISPAM ============================
+# The smart SMS check runs the bundled TMS engine online while the network is
+# up (checkSms(entity, true)) and only falls back to the offline engine when
+# offline. Pin the connectivity read at the single check site to false so the
+# check always runs offline.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+scan_class = "Lcom/android/messaging/zui/antispamsettings/AntiSpamModeUtils$SmsCheckThread;"
+scan_method = "call"
+target_class = "Lcom/android/messaging/util/ConnectivityUtil;"
+target_method = "isNetworkAvailable"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+# The call-classification rows only work through the Tencent number service
+# (com.ted.number) that the Wuji build debloats, so the six category switches
+# on the call interception settings screen are disabled: setEnabled replaces
+# the initial setChecked and the value register stays at the off default, so
+# the rows render greyed out and can never be turned on. Same block shape in
+# the compat switch class (compat screen variant); that class sits on the
+# androidx preference stack, so its setEnabled symbol must name
+# androidx.preference.Preference - a framework Preference ref fails class
+# verification (VerifyError on screen entry).
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk"
+class = "Lcom/zui/callsettings/XCallsettingSwitchPerference;"
+method = "onAttachedToActivity"
+proto = "()V"
+
+[[op.symbol]]
+name = "get_int"
+kind = "method"
+class = "Landroid/provider/Settings$System;"
+method = "getInt"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)I"
+
+[[op.symbol]]
+name = "set_checked"
+kind = "method"
+class = "Lcom/zui/callsettings/XCallsettingSwitchPerference;"
+method = "setChecked"
+proto = "(Z)V"
+
+[[op.symbol]]
+name = "set_enabled"
+kind = "method"
+class = "Landroid/preference/Preference;"
+method = "setEnabled"
+proto = "(Z)V"
+
+[[op.symbol]]
+name = "antispam_real_estate_agency"
+kind = "field"
+class = "Lcom/zui/callsettings/XCallsettingSwitchPerference;"
+field = "ANTISPAM_REAL_ESTATE_AGENCY"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_sell"
+kind = "field"
+class = "Lcom/zui/callsettings/XCallsettingSwitchPerference;"
+field = "ANTISPAM_SELL"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_call"
+kind = "field"
+class = "Lcom/zui/callsettings/XCallsettingSwitchPerference;"
+field = "ANTISPAM_CALL"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_bilk_call"
+kind = "field"
+class = "Lcom/zui/callsettings/XCallsettingSwitchPerference;"
+field = "ANTISPAM_BILK_CALL"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_insurance"
+kind = "field"
+class = "Lcom/zui/callsettings/XCallsettingSwitchPerference;"
+field = "ANTISPAM_INSURANCE"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_headhunter"
+kind = "field"
+class = "Lcom/zui/callsettings/XCallsettingSwitchPerference;"
+field = "ANTISPAM_HEADHUNTER"
+ty = "Ljava/lang/String;"
+
+[[op.replacement]]
+from = "62 01 ${antispam_real_estate_agency:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_real_estate_agency:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_sell:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_sell:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_call:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_call:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_bilk_call:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_bilk_call:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_insurance:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_insurance:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_headhunter:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_headhunter:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+method = "onAttached"
+proto = "()V"
+
+[[op.symbol]]
+name = "get_int"
+kind = "method"
+class = "Landroid/provider/Settings$System;"
+method = "getInt"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)I"
+
+[[op.symbol]]
+name = "set_checked"
+kind = "method"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+method = "setChecked"
+proto = "(Z)V"
+
+[[op.symbol]]
+name = "set_enabled"
+kind = "method"
+class = "Landroidx/preference/Preference;"
+method = "setEnabled"
+proto = "(Z)V"
+
+[[op.symbol]]
+name = "antispam_real_estate_agency"
+kind = "field"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+field = "ANTISPAM_REAL_ESTATE_AGENCY"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_sell"
+kind = "field"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+field = "ANTISPAM_SELL"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_call"
+kind = "field"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+field = "ANTISPAM_CALL"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_bilk_call"
+kind = "field"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+field = "ANTISPAM_BILK_CALL"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_insurance"
+kind = "field"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+field = "ANTISPAM_INSURANCE"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "antispam_headhunter"
+kind = "field"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+field = "ANTISPAM_HEADHUNTER"
+ty = "Ljava/lang/String;"
+
+[[op.replacement]]
+from = "62 01 ${antispam_real_estate_agency:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_real_estate_agency:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_sell:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_sell:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_call:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_call:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_bilk_call:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_bilk_call:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_insurance:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_insurance:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+[[op.replacement]]
+from = "62 01 ${antispam_headhunter:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 32 6e 20 ${set_checked:u16} 24 00"
+to = "62 01 ${antispam_headhunter:u16} 71 30 ${get_int:u16} 10 02 0a 00 33 30 03 00 01 22 6e 20 ${set_enabled:u16} 24 00"
+expected = 1
+
+# Belt and braces for the category rows above: even an already-stored gate
+# value must not reach the call filter, so the telecom side always reports no
+# enabled classification marks.
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
+class = "Lcom/android/server/telecom/zui/ZuiTelephonyUtil$SettingsConfig;"
+method = "getAntiEnabledMarks"
+proto = "()I"
+value = 0
