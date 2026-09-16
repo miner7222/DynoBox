@@ -3139,7 +3139,7 @@ value = false
         assert_eq!(dc.ops.len(), 77);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 53);
+        assert_eq!(uc.ops.len(), 54);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 13);
@@ -8422,6 +8422,71 @@ value = false
             if let Ok(p) = std::env::var("DYNOBOX_SERVICES_JAR") {
                 assert_eq!(land(&p, op, dump), 1, "{class} row op should land once");
             }
+        }
+    }
+
+    /// Land the ROW freeze-policy op on the real services.jar: the OomAdjuster
+    /// initializer that seeds isPrcSku (getZuiFreezePolicy's gate). Set
+    /// `DYNOBOX_SERVICES_JAR`; optionally `DYNOBOX_ROW_SERVICES_DEX_OUT`.
+    #[test]
+    fn bundled_row_freeze_policy_lands_on_real_services_jar() {
+        fn land(jar_path: &str, op: &DbpOp, dump: &str) -> usize {
+            let jar = std::fs::read(jar_path).expect("read services.jar");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("zip");
+            let mut hits = 0usize;
+            for e in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= jar.len()
+            }) {
+                let mut dex = jar[e.data_start..e.data_start + e.compressed_size].to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    hits += 1;
+                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    if let Ok(dir) = std::env::var("DYNOBOX_ROW_SERVICES_DEX_OUT") {
+                        let _ = std::fs::write(std::path::Path::new(&dir).join(dump), &dex);
+                    }
+                }
+            }
+            hits
+        }
+
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|o| {
+                matches!(o, DbpOp::InvokeConstBool { scan_class, .. }
+                    if scan_class.contains("OomAdjuster"))
+            })
+            .expect("OomAdjuster row op");
+        match op {
+            DbpOp::InvokeConstBool {
+                file,
+                scan_method,
+                target_class,
+                target_method,
+                proto,
+                value,
+                ..
+            } => {
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(scan_method.as_deref(), Some("<clinit>"));
+                assert_eq!(target_class, "Ljava/lang/Object;");
+                assert_eq!(target_method, "equals");
+                assert_eq!(proto, "(Ljava/lang/Object;)Z");
+                assert!(!*value, "the PRC sku flag must stay off");
+            }
+            _ => unreachable!(),
+        }
+        if let Ok(p) = std::env::var("DYNOBOX_SERVICES_JAR") {
+            assert_eq!(
+                land(&p, op, "row_oom_adjuster.dex"),
+                1,
+                "OomAdjuster row op should land once"
+            );
         }
     }
 

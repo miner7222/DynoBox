@@ -630,3 +630,20 @@ target_class = "Ljava/lang/Object;"
 target_method = "equals"
 proto = "(Ljava/lang/Object;)Z"
 value = true
+
+# OomAdjuster seeds isPrcSku from ro.config.lgsi.region and its only reader is
+# getZuiFreezePolicy, which returns true (apply the ZUI freeze policy) only for
+# a PRC consumer build that is not in test mode and owns the top app. Force the
+# static initializer comparison to false so the policy never selects a process;
+# the field has no other reader in the jar.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/framework/services.jar"
+scan_class = "Lcom/android/server/am/OomAdjuster;"
+scan_method = "<clinit>"
+target_class = "Ljava/lang/Object;"
+target_method = "equals"
+proto = "(Ljava/lang/Object;)Z"
+value = false
