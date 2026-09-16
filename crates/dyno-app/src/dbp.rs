@@ -3136,7 +3136,7 @@ value = false
     fn bundled_dbp_files_inventory() {
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
         assert_eq!(dc.name, "debloat-common");
-        assert_eq!(dc.ops.len(), 74);
+        assert_eq!(dc.ops.len(), 77);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
         assert_eq!(uc.ops.len(), 50);
@@ -3189,6 +3189,65 @@ value = false
                 assert_eq!(target_method, "isNetworkAvailable");
                 assert_eq!(proto, "(Landroid/content/Context;)Z");
                 assert!(!*value, "smart check must always take the offline branch");
+            }
+            _ => unreachable!(),
+        }
+
+        for (method, proto) in [
+            ("isAntiSmsModeEnabled", "(Landroid/content/Context;)Z"),
+            ("setAntiSmsModeEnabled", "(Landroid/content/Context;Z)Z"),
+        ] {
+            let op = dc
+                .ops
+                .iter()
+                .find(|op| matches!(op, DbpOp::MethodConstBool { method: m, .. } if m == method))
+                .unwrap_or_else(|| panic!("missing smart mode op {method}"));
+            match op {
+                DbpOp::MethodConstBool {
+                    file,
+                    class,
+                    proto: p,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(file, "system/priv-app/ZuiMessage/ZuiMessage.apk");
+                    assert_eq!(
+                        class,
+                        "Lcom/android/messaging/zui/antispamsettings/AntiSpamModeUtils;"
+                    );
+                    assert_eq!(p, proto);
+                    assert!(!*value, "smart mode must stay off");
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let tap_conn = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::NopInvoke { target_method, .. }
+                    if target_method == "setAutoConnectionSwitch")
+            })
+            .expect("antispam tap auto-connection nop");
+        match tap_conn {
+            DbpOp::NopInvoke {
+                file,
+                scan_class,
+                scan_method,
+                target_class,
+                proto,
+                anchor_string,
+                anchor_int,
+                ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiMessage/ZuiMessage.apk");
+                assert!(scan_class.contains("ZuiAntiSpamSettingFragment"));
+                assert_eq!(scan_method, "onPreferenceTreeClick");
+                assert_eq!(target_class, "Ltmsdk/common/TMSDKContext;");
+                assert_eq!(proto, "(Z)V");
+                assert_eq!(anchor_string.as_deref(), Some("2"));
+                assert!(anchor_int.is_none());
             }
             _ => unreachable!(),
         }
@@ -3341,12 +3400,63 @@ value = false
                     if class.contains("ZuiTelephonyUtil$SettingsConfig"))
             })
             .expect("telecom mark gate");
+        let smart_reader = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstBool { method, .. }
+                    if method == "isAntiSmsModeEnabled")
+            })
+            .expect("antispam smart mode reader");
+        let smart_writer = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstBool { method, .. }
+                    if method == "setAntiSmsModeEnabled")
+            })
+            .expect("antispam smart mode writer");
+        let tap_conn = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::NopInvoke { target_method, .. }
+                    if target_method == "setAutoConnectionSwitch")
+            })
+            .expect("antispam tap auto-connection nop");
 
         if let Ok(p) = std::env::var("DYNOBOX_ZUIMESSAGE_APK") {
             assert_eq!(
                 land(&p, offline, "AntiSpamModeUtils-SmsCheckThread.dex"),
                 1,
                 "smart check op should land once"
+            );
+            assert_eq!(
+                land(
+                    &p,
+                    smart_reader,
+                    "AntiSpamModeUtils-isAntiSmsModeEnabled.dex"
+                ),
+                1,
+                "smart mode reader op should land once"
+            );
+            assert_eq!(
+                land(
+                    &p,
+                    smart_writer,
+                    "AntiSpamModeUtils-setAntiSmsModeEnabled.dex"
+                ),
+                1,
+                "smart mode writer op should land once"
+            );
+            assert_eq!(
+                land(
+                    &p,
+                    tap_conn,
+                    "AntiSpamSettingFragment-onPreferenceTreeClick.dex"
+                ),
+                1,
+                "tap auto-connection nop should land once"
             );
         }
         if let Ok(p) = std::env::var("DYNOBOX_ZUICALLSETTINGS_APK") {

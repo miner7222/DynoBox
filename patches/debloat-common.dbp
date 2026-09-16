@@ -702,6 +702,53 @@ target_method = "isNetworkAvailable"
 proto = "(Landroid/content/Context;)Z"
 value = false
 
+# The anti-spam screen's "Identify messages intelligently" row (antisms_switch)
+# drives the TMS smart SMS blocking. With the offline pin above the check can
+# only run the bundled engine, whose data is Chinese: parser.dic, the
+# sms_*_stable_regex.db / *.trie sets and the .dat/.sdb rule files carry tens of
+# thousands of CJK strings and essentially no Hangul, so Korean spam is not
+# classified (the online path queries the same Tencent DB). Pin the mode reader
+# and the writer to false instead: the row always renders off, BugleApplication
+# never starts the smart mode, and a tap cannot write the setting (the
+# fragment's own toggle path re-checks with setChecked on the pinned-off value,
+# so the switch stays off).
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/zui/antispamsettings/AntiSpamModeUtils;"
+method = "isAntiSmsModeEnabled"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/zui/antispamsettings/AntiSpamModeUtils;"
+method = "setAntiSmsModeEnabled"
+proto = "(Landroid/content/Context;Z)Z"
+value = false
+
+# A tap on that pinned-off row still runs the handler tail: it re-reads the
+# previous value (now always false) and, with mobile data on, calls
+# TMSDKContext.setAutoConnectionSwitch(true), which would let the bundled
+# Tencent SDK resume connecting for rule/DB refreshes. Drop that single call
+# site; BugleApplication already sets the switch from the pinned reader at
+# startup, so the SDK never gets switched back on.
+
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+scan_class = "Lcom/android/messaging/zui/antispamsettings/AntiSpamSettingActivity$ZuiAntiSpamSettingFragment;"
+scan_method = "onPreferenceTreeClick"
+target_class = "Ltmsdk/common/TMSDKContext;"
+target_method = "setAutoConnectionSwitch"
+proto = "(Z)V"
+anchor_string = "2"
+
 # The call-classification rows only work through the Tencent number service
 # (com.ted.number) that the Wuji build debloats, so the six category switches
 # on the call interception settings screen are disabled: setEnabled replaces
