@@ -664,3 +664,41 @@ scan_method = "onBootPhase"
 target_class = "Lcom/android/server/notification/NotificationManagerService;"
 target_field = "isROW"
 value = true
+
+# One Vision compat list: readXml branches on the OvcFeatureFlags statics, so
+# the PRC build loads ov_common_prc_packages and the ROW build loads
+# ov_common_row_packages. Flip both static reads inside this method alone so
+# the ROW branch runs; the flags keep their stock values for every other
+# consumer.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/wm/OvCommonCompatConfigs;"
+method = "readXml"
+proto = "()V"
+
+[[op.symbol]]
+name = "is_prc"
+kind = "field"
+class = "Landroid/util/OvcFeatureFlags;"
+field = "isPrc"
+ty = "Z"
+
+[[op.symbol]]
+name = "is_row"
+kind = "field"
+class = "Landroid/util/OvcFeatureFlags;"
+field = "isRow"
+ty = "Z"
+
+[[op.replacement]]
+from = "63 00 ${is_prc:u16}"
+to = "12 00 00 00"
+expected = 1
+
+[[op.replacement]]
+from = "63 00 ${is_row:u16}"
+to = "12 10 00 00"
+expected = 1

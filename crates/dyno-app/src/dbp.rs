@@ -3139,7 +3139,7 @@ value = false
         assert_eq!(dc.ops.len(), 77);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 55);
+        assert_eq!(uc.ops.len(), 56);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 13);
@@ -8552,6 +8552,90 @@ value = false
                 land(&p, op, "row_notification_manager_service.dex"),
                 1,
                 "notification color row op should land once"
+            );
+        }
+    }
+
+    /// Land the ROW One Vision compat-list op on the real services.jar: the
+    /// two OvcFeatureFlags reads in OvCommonCompatConfigs.readXml. Set
+    /// `DYNOBOX_SERVICES_JAR`; optionally `DYNOBOX_ROW_SERVICES_DEX_OUT`.
+    #[test]
+    fn bundled_row_one_vision_packages_land_on_real_services_jar() {
+        fn land(jar_path: &str, op: &DbpOp, dump: &str) -> usize {
+            let jar = std::fs::read(jar_path).expect("read services.jar");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("zip");
+            let mut hits = 0usize;
+            for e in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= jar.len()
+            }) {
+                let mut dex = jar[e.data_start..e.data_start + e.compressed_size].to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    hits += 1;
+                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    if let Ok(dir) = std::env::var("DYNOBOX_ROW_SERVICES_DEX_OUT") {
+                        let _ = std::fs::write(std::path::Path::new(&dir).join(dump), &dex);
+                    }
+                }
+            }
+            hits
+        }
+
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|o| {
+                matches!(o, DbpOp::MethodCodePatch { class, .. }
+                    if class.contains("OvCommonCompatConfigs"))
+            })
+            .expect("one vision row op");
+        match op {
+            DbpOp::MethodCodePatch {
+                file,
+                method,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(method, "readXml");
+                assert_eq!(proto, "()V");
+                for (name, field) in [("is_prc", "isPrc"), ("is_row", "isRow")] {
+                    let sym = symbols
+                        .iter()
+                        .find(|s| s.name() == name)
+                        .unwrap_or_else(|| panic!("{name} symbol"));
+                    match sym {
+                        DbpCodeSymbol::Field {
+                            class,
+                            field: f,
+                            ty,
+                            ..
+                        } => {
+                            assert_eq!(class, "Landroid/util/OvcFeatureFlags;");
+                            assert_eq!(f, field);
+                            assert_eq!(ty, "Z");
+                        }
+                        _ => panic!("{name} symbol must be a field"),
+                    }
+                }
+                assert_eq!(replacements.len(), 2, "both flag reads are flipped");
+                for r in replacements {
+                    assert_eq!(r.expected, 1);
+                }
+            }
+            _ => unreachable!(),
+        }
+        if let Ok(p) = std::env::var("DYNOBOX_SERVICES_JAR") {
+            assert_eq!(
+                land(&p, op, "row_ov_common_compat_configs.dex"),
+                1,
+                "one vision row op should land once"
             );
         }
     }
