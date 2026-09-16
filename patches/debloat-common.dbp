@@ -1013,3 +1013,25 @@ proto = "(Landroid/content/Context;)Lcom/lenovo/settings/light/data/model/GameSc
 from = "60 02 d8 1b"
 to = "60 02 ac 2c"
 expected = 1
+
+
+# The compat advanced-call-settings screen still drew the "Smart unknown
+# number identification" row (the earlier patch only pinned its value off).
+# Its onCreate already looks the row up, so drop it from the group there:
+# onCreate runs after inflation and before the hierarchy attach that walks
+# the children, so the row is gone before the list is built. The framework
+# variant and its activity are not declared by the manifest, so only the
+# compat fragment needs it.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk"
+class = "Lcom/zui/callsettings/appcompat/AdvancedCallSetingsFragmentCompat;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.replacement]]
+from = "6e 20 c4 ac 12 00 6e 10 6e ac 01 00 0c 00 71 10 f9 a9 00 00 0a 00 6e 20 c3 ac 02 00"
+to = "6e 10 5f 5f 02 00 0c 00 6e 20 b0 60 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+expected = 1

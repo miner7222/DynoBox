@@ -3136,7 +3136,7 @@ value = false
     fn bundled_dbp_files_inventory() {
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
         assert_eq!(dc.name, "debloat-common");
-        assert_eq!(dc.ops.len(), 61);
+        assert_eq!(dc.ops.len(), 62);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
         assert_eq!(uc.ops.len(), 42);
@@ -4959,6 +4959,38 @@ value = false
             .ops
             .iter()
             .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, replacements, .. }
+                    if class == "Lcom/zui/callsettings/appcompat/AdvancedCallSetingsFragmentCompat;"
+                        && method == "onCreate"
+                        && replacements.len() == 1
+                        && replacements[0].from.contains("71 10 f9 a9"))
+            })
+            .expect("debloat-common compat mark-number hide op");
+        match tc {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                proto,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk");
+                assert_eq!(proto, "(Landroid/os/Bundle;)V");
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(replacements[0].expected, 1);
+                assert!(
+                    replacements[0].to.contains("6e 10 5f 5f")
+                        && replacements[0].to.contains("6e 20 b0 60"),
+                    "compat mark-number row must leave its preference group"
+                );
+            }
+            _ => panic!("compat mark-number op must drop the preference row"),
+        }
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
                 matches!(op, DbpOp::MethodConstBool { class, method, .. }
                     if class == "Lcom/android/incallui/InCallPresenter;" && method == "isSupportAI")
             })
@@ -6497,7 +6529,8 @@ value = false
     /// `DYNOBOX_ZUIDIALER_DEX_DIR`, `DYNOBOX_ZUICONTACTS_DEX_DIR`,
     /// `DYNOBOX_ZUIMESSAGE_DEX_DIR`, `DYNOBOX_ZUICALLSETTINGS_DEX_DIR` to
     /// directories holding the extracted STORED `classes*.dex` (each check is
-    /// skipped when its env var is unset).
+    /// skipped when its env var is unset); set `DYNOBOX_TELEPHONY_DEX_OUT` to
+    /// a directory to dump every patched dex.
     #[test]
     fn bundled_debloat_telephony_land_on_real_dex() {
         fn find_op<'a>(
@@ -6591,8 +6624,15 @@ value = false
                             if class == "Lcom/zui/callsettings/OperatorFunctionUtil;"
                                 && method == "setEnableMarkNumber")
                     }),
+                    find_op(&dc, "ZuiCallSettings compat mark-number hide", |op| {
+                        matches!(op, DbpOp::MethodCodePatch { class, method, replacements, .. }
+                            if class == "Lcom/zui/callsettings/appcompat/AdvancedCallSetingsFragmentCompat;"
+                                && method == "onCreate"
+                                && replacements.len() == 1
+                                && replacements[0].from.contains("71 10 f9 a9"))
+                    }),
                 ],
-                2,
+                3,
             ),
         ];
         for (var, ops, expected) in cases {
@@ -6618,6 +6658,19 @@ value = false
                 }
                 if modified {
                     crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    if let Ok(out) = std::env::var("DYNOBOX_TELEPHONY_DEX_OUT") {
+                        std::fs::create_dir_all(&out).expect("create telephony dex out dir");
+                        let case = var
+                            .trim_start_matches("DYNOBOX_")
+                            .trim_end_matches("_DEX_DIR")
+                            .to_lowercase();
+                        let name = format!(
+                            "{case}_{}",
+                            path.file_name().expect("dex file name").to_string_lossy()
+                        );
+                        std::fs::write(std::path::Path::new(&out).join(name), &dex)
+                            .expect("write patched dex");
+                    }
                 }
             }
             assert_eq!(landed, expected, "{var} should land {expected} op(s)");
