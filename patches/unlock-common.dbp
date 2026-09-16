@@ -647,3 +647,20 @@ target_class = "Ljava/lang/Object;"
 target_method = "equals"
 proto = "(Ljava/lang/Object;)Z"
 value = false
+
+# Notification effect colors: the manager picks its effect-color set in
+# onBootPhase and the only thing separating the PRC set (WeChat green, QQ
+# amber) from the ROW set (Teams purple, Messenger white) is the isROW field,
+# which the constructor seeds from ro.config.zui.region. Force that one read in
+# onBootPhase to true so the ROW set is selected; the field is written once and
+# read nowhere else in the jar.
+
+[[op]]
+kind = "field_const_bool"
+partition = "system"
+file = "system/framework/services.jar"
+scan_class = "Lcom/android/server/notification/NotificationManagerService;"
+scan_method = "onBootPhase"
+target_class = "Lcom/android/server/notification/NotificationManagerService;"
+target_field = "isROW"
+value = true

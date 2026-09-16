@@ -3139,7 +3139,7 @@ value = false
         assert_eq!(dc.ops.len(), 77);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 54);
+        assert_eq!(uc.ops.len(), 55);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 13);
@@ -8486,6 +8486,72 @@ value = false
                 land(&p, op, "row_oom_adjuster.dex"),
                 1,
                 "OomAdjuster row op should land once"
+            );
+        }
+    }
+
+    /// Land the ROW notification-color op on the real services.jar: the
+    /// isROW read in NotificationManagerService.onBootPhase. Set
+    /// `DYNOBOX_SERVICES_JAR`; optionally `DYNOBOX_ROW_SERVICES_DEX_OUT`.
+    #[test]
+    fn bundled_row_notification_colors_land_on_real_services_jar() {
+        fn land(jar_path: &str, op: &DbpOp, dump: &str) -> usize {
+            let jar = std::fs::read(jar_path).expect("read services.jar");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("zip");
+            let mut hits = 0usize;
+            for e in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= jar.len()
+            }) {
+                let mut dex = jar[e.data_start..e.data_start + e.compressed_size].to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    hits += 1;
+                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    if let Ok(dir) = std::env::var("DYNOBOX_ROW_SERVICES_DEX_OUT") {
+                        let _ = std::fs::write(std::path::Path::new(&dir).join(dump), &dex);
+                    }
+                }
+            }
+            hits
+        }
+
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|o| {
+                matches!(o, DbpOp::FieldConstBool { scan_class, .. }
+                    if scan_class.contains("NotificationManagerService"))
+            })
+            .expect("notification color row op");
+        match op {
+            DbpOp::FieldConstBool {
+                file,
+                scan_method,
+                target_class,
+                target_field,
+                value,
+                ..
+            } => {
+                assert_eq!(file, "system/framework/services.jar");
+                assert_eq!(scan_method.as_deref(), Some("onBootPhase"));
+                assert_eq!(
+                    target_class,
+                    "Lcom/android/server/notification/NotificationManagerService;"
+                );
+                assert_eq!(target_field, "isROW");
+                assert!(*value, "the ROW effect set must be selected");
+            }
+            _ => unreachable!(),
+        }
+        if let Ok(p) = std::env::var("DYNOBOX_SERVICES_JAR") {
+            assert_eq!(
+                land(&p, op, "row_notification_manager_service.dex"),
+                1,
+                "notification color row op should land once"
             );
         }
     }
