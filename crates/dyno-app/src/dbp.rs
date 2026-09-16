@@ -3139,7 +3139,7 @@ value = false
         assert_eq!(dc.ops.len(), 74);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 45);
+        assert_eq!(uc.ops.len(), 50);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 13);

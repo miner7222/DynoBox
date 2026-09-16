@@ -329,6 +329,73 @@ from = "1a 00 ${dlb_dap_state:u16} 71 30 ${put_int:u16} 0d 01"
 to = "1a 00 ${dlb_dap_state:u16} 00 00 00 00 00 00"
 expected = 1
 
+# The QS Dolby Atmos tile still assumed the old "always on over the speaker"
+# behavior: with no headset/BT audio device connected it reported the tile as on
+# whatever dlb_dap_state said, and a tap opened the Dolby settings page instead
+# of toggling. Now that the ZuiSettings switch and the disconnect writes let the
+# user keep Dolby off on the speaker, pin the tile's headset check true in
+# handleUpdateState (the tile shows the real dlb_dap_state) and in handleClick
+# (a tap toggles, like the headset path), and in the detail dialog's toggle
+# state/enabled/click so all three surfaces agree. Only the call sites inside
+# these methods change; isHeadSetConnect$2 itself keeps its real result, so the
+# headset bookkeeping in handleSetListening and
+# recordDolbySwitchStatusWidthHeadSet is untouched.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile;"
+scan_method = "handleUpdateState"
+target_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile;"
+target_method = "isHeadSetConnect$2"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile;"
+scan_method = "handleClick"
+target_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile;"
+target_method = "isHeadSetConnect$2"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile$DolbyDetailAdapter;"
+scan_method = "getToggleEnabled"
+target_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile;"
+target_method = "isHeadSetConnect$2"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile$DolbyDetailAdapter;"
+scan_method = "getToggleState"
+target_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile;"
+target_method = "isHeadSetConnect$2"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile$DolbyDetailAdapter;"
+scan_method = "setToggleState"
+target_class = "Lcom/android/systemui/qs/tiles/QDolbyAtmosTile;"
+target_method = "isHeadSetConnect$2"
+proto = "()Z"
+value = true
+
 [[op]]
 kind = "text_replace"
 partition = "system"
