@@ -1,7 +1,7 @@
 product:/app/LTHD/
 product:/app/xiangbb/
 product:/etc/permissions/services.cn.google.xml
-product:/preinstall/WpsLauncher/
+product:/preinstall/WpsLauncher
 product:/priv-app/LenovoXiaoTian/
 system:/system/app/LenovoPAI/
 system:/system/bin/aplog.sh
@@ -31,14 +31,13 @@ system:/system/preinstall/Bilicomic/
 system:/system/preinstall/Canva/
 system:/system/preinstall/DouBao/
 system:/system/preinstall/DouYin/
-system:/system/preinstall/GameHub_Preinstalled/
 system:/system/preinstall/HSJPRO/
 system:/system/preinstall/HybridWorkSpace/
 system:/system/preinstall/JinDong/
 system:/system/preinstall/LFHEducenterHD/
-system:/system/preinstall/LegionZone/
 system:/system/preinstall/LenovoExtremeCoreCommunity/
 system:/system/preinstall/LenovoSmartBuy_lenovopad/
+system:/system/preinstall/LegionZone/
 system:/system/preinstall/Moffice_196/
 system:/system/preinstall/NoteIn/
 system:/system/preinstall/QWen/
