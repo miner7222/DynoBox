@@ -3142,7 +3142,7 @@ value = false
         assert_eq!(uc.ops.len(), 42);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
-        assert_eq!(fc.ops.len(), 11);
+        assert_eq!(fc.ops.len(), 12);
         let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
         assert_eq!(wj.name, "debloat-wuji");
         assert_eq!(wj.ops.len(), 4);
@@ -5281,7 +5281,10 @@ value = false
         let mut systemui_ops = 0usize;
         let mut launcher_ops = 0usize;
         for op in &recents.ops {
-            if op.file().ends_with("/ZuiSystemUI.apk") {
+            if op.file().ends_with("/ZuiSystemUI.apk")
+                && matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class.contains("/recents/"))
+            {
                 assert_eq!((op.partition(), op.file()), systemui_path);
                 systemui_ops += 1;
             } else if op.file().ends_with("/ZuiLauncher.apk") {
@@ -5438,7 +5441,11 @@ value = false
         let ops: Vec<&DbpOp> = doc
             .ops
             .iter()
-            .filter(|op| op.file() == "priv-app/ZuiSystemUI/ZuiSystemUI.apk")
+            .filter(|op| {
+                op.file() == "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+                    && matches!(op, DbpOp::MethodCodePatch { class, .. }
+                        if class.contains("/recents/"))
+            })
             .collect();
         assert_eq!(ops.len(), 2, "both Recents SystemUI ops");
 
@@ -7206,6 +7213,109 @@ value = false
                 }
             }
             _ => unreachable!(),
+        }
+    }
+
+    /// The AOD date-pattern op: the else branch reads its pattern from the
+    /// keyguard_widget_format_date_ex resource, and the same 98-byte window
+    /// rewrites the fa/cs/th/ms branch into an equivalent helper chain so the
+    /// enlargement still fits the fixed-size code item.
+    #[test]
+    fn bundled_fix_common_aod_date_op_shape() {
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let op = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class.contains("LenovoViewClock"))
+            })
+            .expect("fix-common must carry the AOD date op");
+        match op {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                method,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system_ext");
+                assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
+                assert_eq!(method, "updateTime");
+                assert_eq!(proto, "()V");
+                for name in ["get_string", "helper_m", "time_field"] {
+                    assert!(
+                        symbols.iter().any(|symbol| symbol.name() == name),
+                        "symbol {name} must be declared"
+                    );
+                }
+                assert_eq!(
+                    replacements.len(),
+                    5,
+                    "one window rewrite plus four retargets"
+                );
+                for r in replacements {
+                    assert_eq!(r.expected, 1);
+                }
+                assert!(replacements[0].from.contains("${mmm_d:u16}"));
+                assert!(replacements[0].to.contains("${get_string:u16}"));
+                assert!(
+                    !replacements[0].to.contains("${mmm_d:u16}"),
+                    "the literal pattern must give way to the resource read"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Land the AOD date-pattern op on the real ZuiSystemUI APK. Set
+    /// `DYNOBOX_ZUISYSTEMUI_APK`; optionally set
+    /// `DYNOBOX_ZUISYSTEMUI_AOD_DEX_OUT` to write the patched dex file.
+    #[test]
+    fn bundled_fix_common_aod_date_lands_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_ZUISYSTEMUI_APK") else {
+            return;
+        };
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let op = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class.contains("LenovoViewClock"))
+            })
+            .expect("AOD date op");
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let entries: Vec<_> = zip
+            .entries
+            .iter()
+            .filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            })
+            .collect();
+
+        let mut landed = Vec::new();
+        for entry in entries {
+            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+            let mut dex = original.to_vec();
+            if apply_one_op(&mut dex, op).unwrap() {
+                assert_eq!(dex.len(), original.len(), "patch must preserve dex length");
+                landed.push((entry.name.clone(), dex));
+            }
+        }
+        assert_eq!(landed.len(), 1, "the AOD date op must land in one dex");
+        let (name, mut dex) = landed.pop().expect("one dex carries the AOD date op");
+        assert_eq!(name, "classes.dex", "the AOD op lands in the first dex");
+        if let Ok(out) = std::env::var("DYNOBOX_ZUISYSTEMUI_AOD_DEX_OUT") {
+            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+            std::fs::write(&out, &dex).expect("write patched dex");
         }
     }
 

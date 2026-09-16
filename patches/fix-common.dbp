@@ -742,3 +742,151 @@ to = """
 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
 00 00 00 00 00 00
 """
+
+# ZuiSystemUI's AOD clock (LenovoViewClock.updateTime) hardcodes its date
+# patterns. The else branch - every locale outside zh/ja/fa/cs/th/ms, which
+# includes ko - formats the date with the literal "MMM d" and concatenates a
+# separately fetched weekday with an unconfigurable ",  " separator. Repoint
+# that branch at the existing keyguard_widget_format_date_ex resource (stock
+# value "EEE, MMM d") through DateFormat.format, so an RRO can set the pattern
+# per locale and the weekday comes from the pattern (EEE/EEEE).
+#
+# The resource chain needs six bytes more than the old else body, and
+# patch_method_code works on the fixed-size code item, so the same window also
+# rewrites the fa/cs/th/ms branch below it into an equivalent three-argument
+# helper chain (64 -> 40 bytes, same output); the window stays 98 bytes and is
+# padded with nops, keeping every address after it unchanged. The else body
+# grows to 38 bytes, so the four branches that reach past it from before the
+# window are retargeted at the rewritten fa body (now at 01d4).
+
+[[op]]
+kind = "method_code_patch"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+class = "Lcom/android/systemui/aod/doze/view/LenovoViewClock;"
+method = "updateTime"
+proto = "()V"
+
+[[op.symbol]]
+name = "mmm_d"
+kind = "string"
+value = "MMM d"
+
+[[op.symbol]]
+name = "space"
+kind = "string"
+value = " "
+
+[[op.symbol]]
+name = "m_context"
+kind = "field"
+class = "Lcom/android/systemui/aod/doze/view/LenovoViewClock;"
+field = "mContext"
+ty = "Landroid/content/Context;"
+
+[[op.symbol]]
+name = "time_field"
+kind = "field"
+class = "Lcom/android/systemui/aod/doze/view/LenovoViewClock;"
+field = "time"
+ty = "Ljava/lang/String;"
+
+[[op.symbol]]
+name = "string_builder"
+kind = "type"
+descriptor = "Ljava/lang/StringBuilder;"
+
+[[op.symbol]]
+name = "get_string"
+kind = "method"
+class = "Landroid/content/Context;"
+method = "getString"
+proto = "(I)Ljava/lang/String;"
+
+[[op.symbol]]
+name = "format"
+kind = "method"
+class = "Landroid/text/format/DateFormat;"
+method = "format"
+proto = "(Ljava/lang/CharSequence;Ljava/util/Calendar;)Ljava/lang/CharSequence;"
+
+[[op.symbol]]
+name = "char_sequence_to_string"
+kind = "method"
+class = "Ljava/lang/CharSequence;"
+method = "toString"
+proto = "()Ljava/lang/String;"
+
+[[op.symbol]]
+name = "get_month_string"
+kind = "method"
+class = "Landroid/text/format/DateUtils;"
+method = "getMonthString"
+proto = "(II)Ljava/lang/String;"
+
+[[op.symbol]]
+name = "int_to_string"
+kind = "method"
+class = "Ljava/lang/String;"
+method = "valueOf"
+proto = "(I)Ljava/lang/String;"
+
+[[op.symbol]]
+name = "helper_m"
+kind = "method"
+class = "Landroidx/concurrent/futures/AbstractResolvableFuture$$ExternalSyntheticOutline0;"
+method = "m"
+proto = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+
+[[op.symbol]]
+name = "string_builder_init"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "<init>"
+proto = "()V"
+
+[[op.symbol]]
+name = "string_builder_append_string"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "append"
+proto = "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+
+[[op.symbol]]
+name = "string_builder_append_int"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "append"
+proto = "(I)Ljava/lang/StringBuilder;"
+
+[[op.symbol]]
+name = "string_builder_to_string"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "toString"
+proto = "()Ljava/lang/String;"
+
+[[op.replacement]]
+from = "1a 01 ${mmm_d:u16} 71 20 ${format:u16} c1 00 0c 01 72 10 ${char_sequence_to_string:u16} 01 00 0c 01 71 30 ${helper_m:u16} f4 01 0c 01 5b 01 ${time_field:u16} 28 21 71 20 ${get_month_string:u16} b1 00 0c 01 22 06 ${string_builder:u16} 70 10 ${string_builder_init:u16} 06 00 6e 20 ${string_builder_append_string:u16} 46 00 6e 20 ${string_builder_append_string:u16} f6 00 6e 20 ${string_builder_append_int:u16} 26 00 1a 02 ${space:u16} 6e 20 ${string_builder_append_string:u16} 26 00 6e 20 ${string_builder_append_string:u16} 16 00 6e 10 ${string_builder_to_string:u16} 06 00 0c 01 5b 01 ${time_field:u16}"
+to = "54 01 ${m_context:u16} 14 05 ed 06 13 7f 6e 20 ${get_string:u16} 51 00 0c 01 71 20 ${format:u16} c1 00 0c 01 72 10 ${char_sequence_to_string:u16} 01 00 0c 01 5b 01 ${time_field:u16} 28 1e 71 20 ${get_month_string:u16} b1 00 0c 01 71 10 ${int_to_string:u16} 02 00 0c 06 71 30 ${helper_m:u16} f4 06 0c 06 1a 02 ${space:u16} 71 30 ${helper_m:u16} 26 01 0c 06 5b 06 ${time_field:u16} 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+expected = 1
+
+[[op.replacement]]
+from = "39 06 44 00"
+to = "39 06 47 00"
+expected = 1
+
+[[op.replacement]]
+from = "0a 06 39 06 3c 00"
+to = "0a 06 39 06 3f 00"
+expected = 1
+
+[[op.replacement]]
+from = "0a 06 39 06 33 00"
+to = "0a 06 39 06 36 00"
+expected = 1
+
+[[op.replacement]]
+from = "38 06 03 00 28 29"
+to = "38 06 03 00 28 2c"
+expected = 1
