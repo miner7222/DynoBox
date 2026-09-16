@@ -16,10 +16,12 @@ plus fixes for a few issues Lenovo has left unaddressed.
 - Most China-only apps and services removed
 - Needless telemetry and logging removed
 - All system languages selectable from Settings
+- Korean translation improvements
 - Stops Package Manager from disabling Google services
 - Wi-Fi 6 GHz and all channels unlocked
 - Four-app split-screen enabled
 - Circle to Search and Quick Share enabled
+- A few hidden features unlocked
 - Less aggressive memory management
 - Dolby Atmos stays off in speaker mode once disabled
 - Fixed LeAudio pairing failures
