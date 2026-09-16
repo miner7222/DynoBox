@@ -1,9 +1,0 @@
-name = "fix-leaudio"
-description = "Enable LE Audio by default."
-
-[[op]]
-kind = "text_replace"
-partition = "system_ext"
-file = "etc/build.prop"
-from = "ro.bluetooth.leaudio.le_audio_connection_by_default=false\n"
-to = "ro.bluetooth.leaudio.le_audio_connection_by_default=true\n\n"

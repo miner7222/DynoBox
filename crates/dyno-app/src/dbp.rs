@@ -14,7 +14,7 @@
 //! Example:
 //!
 //! ```toml
-//! name = "debloat-launcher"
+//! name = "debloat-common"
 //! description = "Force ZuiLauncher home search + first-run to ROW."
 //!
 //! [[op]]
@@ -2219,7 +2219,12 @@ value = true
         )
         .unwrap();
         assert_eq!(doc.ops.len(), 1);
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::MethodConstBool { method, .. } if method == "isZuiRow"))
+            .expect("method_const_bool op");
+        match op {
             DbpOp::MethodConstBool {
                 proto,
                 value,
@@ -2249,7 +2254,12 @@ proto = "(Landroid/content/Context;Z)V"
 "#,
         )
         .unwrap();
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::MethodNop { method, .. } if method == "initTMSApplication"))
+            .expect("method_nop op");
+        match op {
             DbpOp::MethodNop {
                 class,
                 method,
@@ -2497,7 +2507,12 @@ payload = "89 50 4E 47"
         )
         .unwrap();
         assert_eq!(doc.ops.len(), 1);
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::ZipEntryReplace { .. }))
+            .expect("zip_entry_replace op");
+        match op {
             DbpOp::ZipEntryReplace {
                 entries, payload, ..
             } => {
@@ -2763,7 +2778,12 @@ value = true
 "#,
         )
         .unwrap();
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::InvokeConstBool { scan_method: Some(m), .. } if m == "getChangedName"))
+            .expect("invoke_const_bool op");
+        match op {
             DbpOp::InvokeConstBool {
                 scan_method, value, ..
             } => {
@@ -2792,7 +2812,20 @@ anchor_int = 0x7f12006d
 "#,
         )
         .unwrap();
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    op,
+                    DbpOp::NopInvoke {
+                        anchor_int: Some(0x7f12006d),
+                        ..
+                    }
+                )
+            })
+            .expect("nop_invoke op");
+        match op {
             DbpOp::NopInvoke {
                 scan_class,
                 scan_method,
@@ -2831,7 +2864,12 @@ scratch_reg = 1
 "#,
         )
         .unwrap();
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::ForceViewGone { scan_class, .. } if scan_class == "Lcom/x/MainActivity;"))
+            .expect("force_view_gone op");
+        match op {
             DbpOp::ForceViewGone {
                 scan_class,
                 scan_method,
@@ -2865,7 +2903,12 @@ scratch_reg = 1
 "#,
         )
         .unwrap();
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::RemoteviewsHide { scan_class, .. } if scan_class == "Lcom/x/Widget;"))
+            .expect("remoteviews_hide op");
+        match op {
             DbpOp::RemoteviewsHide {
                 scan_class,
                 scan_method,
@@ -2898,7 +2941,12 @@ value = false
 "#,
         )
         .unwrap();
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::ResourceBool { resource, .. } if resource == "feature_enabled"))
+            .expect("resource_bool op");
+        match op {
             DbpOp::ResourceBool {
                 partition,
                 file,
@@ -2918,7 +2966,7 @@ value = false
     fn parse_text_replace_op() {
         let doc: DbpDocument = toml::from_str(
             r#"
-name = "unlock-wifi"
+name = "unlock-common"
 [[op]]
 kind = "text_replace"
 partition = "system"
@@ -2928,7 +2976,12 @@ to = "ro.product.countrycode=US\n##\n"
 "#,
         )
         .unwrap();
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::TextReplace { from, .. } if from == "ro.config.zui.education=true\n"))
+            .expect("text_replace op");
+        match op {
             DbpOp::TextReplace {
                 partition,
                 file,
@@ -3076,13 +3129,37 @@ value = false
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches")
     }
 
+    /// The bundled `.dbp` set: each file's name and exact op count. Content
+    /// checks live in `bundled_dbp_files_parse`; this is the inventory that
+    /// keeps the per-file totals asserted in one place.
+    #[test]
+    fn bundled_dbp_files_inventory() {
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
+        assert_eq!(dc.name, "debloat-common");
+        assert_eq!(dc.ops.len(), 57);
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
+        assert_eq!(uc.name, "unlock-common");
+        assert_eq!(uc.ops.len(), 37);
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
+        assert_eq!(fc.name, "fix-common");
+        assert_eq!(fc.ops.len(), 11);
+        let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
+        assert_eq!(wj.name, "debloat-wuji");
+        assert_eq!(wj.ops.len(), 4);
+        let adb =
+            load_dbp(&patches_dir().join("enable-adb-debug.dbp")).expect("enable-adb-debug.dbp");
+        assert_eq!(adb.name, "enable-adb-debug");
+        assert_eq!(adb.ops.len(), 3);
+        let gl =
+            load_dbp(&patches_dir().join("show-google-lens.dbp")).expect("show-google-lens.dbp");
+        assert_eq!(gl.name, "show-google-lens");
+        assert_eq!(gl.ops.len(), 3);
+    }
+
     #[test]
     fn bundled_dbp_files_parse() {
-        let cl =
-            load_dbp(&patches_dir().join("debloat-launcher.dbp")).expect("debloat-launcher.dbp");
-        assert_eq!(cl.name, "debloat-launcher");
-        assert_eq!(cl.ops.len(), 8);
-        assert!(cl.ops.iter().any(|op| {
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
+        assert!(dc.ops.iter().any(|op| {
             matches!(
                 op,
                 DbpOp::MethodConstBool {
@@ -3095,7 +3172,7 @@ value = false
                     && !value
             )
         }));
-        assert!(cl.ops.iter().any(|op| {
+        assert!(dc.ops.iter().any(|op| {
             matches!(
                 op,
                 DbpOp::InvokeConstBool {
@@ -3113,10 +3190,8 @@ value = false
                     && !value
             )
         }));
-        let zs = load_dbp(&patches_dir().join("unlock-locales.dbp")).expect("unlock-locales.dbp");
-        assert_eq!(zs.name, "unlock-locales");
-        assert_eq!(zs.ops.len(), 14);
-        assert!(zs.ops.iter().any(|op| {
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
+        assert!(uc.ops.iter().any(|op| {
             matches!(
                 op,
                 DbpOp::InvokeConstBool {
@@ -3138,10 +3213,19 @@ value = false
                     && !value
             )
         }));
-        let wu = load_dbp(&patches_dir().join("unlock-wifi.dbp")).expect("unlock-wifi.dbp");
-        assert_eq!(wu.name, "unlock-wifi");
-        assert_eq!(wu.ops.len(), 3);
-        match &wu.ops[0] {
+        let wu = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    op,
+                    DbpOp::TextReplace { file, from, .. }
+                        if file == "system/build.prop"
+                            && from == "ro.config.zui.education=true\n"
+                )
+            })
+            .expect("unlock-common wifi build.prop op");
+        match wu {
             DbpOp::TextReplace {
                 partition,
                 file,
@@ -3155,9 +3239,14 @@ value = false
                 assert_eq!(to, "ro.product.countrycode=US\n##\n");
                 assert_eq!(from.len(), to.len());
             }
-            _ => panic!("unlock-wifi first op must pin system build.prop"),
+            _ => panic!("unlock-common wifi build.prop op must be a text_replace"),
         }
-        match &wu.ops[1] {
+        let wu = uc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::TextReplace { file, .. } if file == "system/bin/init"))
+            .expect("unlock-common wifi init op");
+        match wu {
             DbpOp::TextReplace {
                 partition,
                 file,
@@ -3171,9 +3260,21 @@ value = false
                 assert_eq!(to, "ro.product.countrycodE");
                 assert_eq!(from.len(), to.len());
             }
-            _ => panic!("unlock-wifi second op must neutralize Lenovo init country mapping"),
+            _ => panic!("unlock-common init op must neutralize Lenovo init country mapping"),
         }
-        match &wu.ops[2] {
+        let wu = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    op,
+                    DbpOp::MethodConstString { class, method, .. }
+                        if class == "Lcom/zui/translator/utils/MicrosoftApiKey;"
+                            && method == "getCountryCode"
+                )
+            })
+            .expect("unlock-common translator country-code op");
+        match wu {
             DbpOp::MethodConstString {
                 partition,
                 file,
@@ -3192,12 +3293,23 @@ value = false
                 assert_eq!(proto, "()Ljava/lang/String;");
                 assert_eq!(value, "CN");
             }
-            _ => panic!("unlock-wifi third op must pin the translator country code"),
+            _ => panic!("unlock-common translator op must pin the country code"),
         }
-        let le = load_dbp(&patches_dir().join("fix-leaudio.dbp")).expect("fix-leaudio.dbp");
-        assert_eq!(le.name, "fix-leaudio");
-        assert_eq!(le.ops.len(), 1);
-        match &le.ops[0] {
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
+        let le = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    op,
+                    DbpOp::TextReplace { file, from, .. }
+                        if file == "etc/build.prop"
+                            && from
+                                == "ro.bluetooth.leaudio.le_audio_connection_by_default=false\n"
+                )
+            })
+            .expect("fix-common leaudio build.prop op");
+        match le {
             DbpOp::TextReplace {
                 partition,
                 file,
@@ -3218,13 +3330,22 @@ value = false
                 assert!(!all);
                 assert_eq!(from.len(), to.len());
             }
-            _ => panic!("fix-leaudio must pin system_ext build.prop"),
+            _ => panic!("fix-common leaudio op must pin system_ext build.prop"),
         }
-        let gs = load_dbp(&patches_dir().join("enable-google-services.dbp"))
-            .expect("enable-google-services.dbp");
-        assert_eq!(gs.name, "enable-google-services");
-        assert_eq!(gs.ops.len(), 2);
-        match &gs.ops[0] {
+        let gs = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    op,
+                    DbpOp::MethodConstInt { class, method, .. }
+                        if class
+                            == "Lcom/lenovo/settings/applications/GoogleServicesPreferenceController;"
+                            && method == "getAvailabilityStatus"
+                )
+            })
+            .expect("unlock-common enable-google-services availability op");
+        match gs {
             DbpOp::MethodConstInt {
                 partition,
                 file,
@@ -3243,9 +3364,20 @@ value = false
                 assert_eq!(proto, "()I");
                 assert_eq!(*value, 0);
             }
-            _ => panic!("enable-google-services op[0] must use method_const_int"),
+            _ => panic!("unlock-common GoogleServices availability op must use method_const_int"),
         }
-        match &gs.ops[1] {
+        let gs = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    op,
+                    DbpOp::InvokeConstBool { scan_method: Some(method), target_method, .. }
+                        if method == "disableGmsApps" && target_method == "isPrcVersion"
+                )
+            })
+            .expect("unlock-common disableGmsApps op");
+        match gs {
             DbpOp::InvokeConstBool {
                 partition,
                 file,
@@ -3267,12 +3399,37 @@ value = false
                 assert_eq!(target_method, "isPrcVersion");
                 assert!(!*value);
             }
-            _ => panic!("enable-google-services op[1] must use invoke_const_bool"),
+            _ => panic!("unlock-common disableGmsApps op must use invoke_const_bool"),
         }
-        let sw = load_dbp(&patches_dir().join("debloat-setupwizard.dbp"))
-            .expect("debloat-setupwizard.dbp");
-        assert_eq!(sw.name, "debloat-setupwizard");
-        assert_eq!(sw.ops.len(), 10);
+        // The former setup-wizard ops are split across debloat-common (the
+        // wizard/settings/LenovoID flows) and unlock-common (the CompleteLand
+        // CCS gates); select them by shape so the loop validates the same ten.
+        let setup_ops: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .chain(uc.ops.iter())
+            .filter(|op| match op {
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    scan_method,
+                    ..
+                } => {
+                    scan_class.contains("ZuiUtils")
+                        || scan_class.contains("CompleteLandActivity")
+                        || (scan_class.contains("DeviceActivationForWifiActivity")
+                            && scan_method.as_deref() == Some("startPrivacySettingsActivity"))
+                }
+                DbpOp::FieldConstBool { scan_class, .. } => {
+                    scan_class.contains("DeviceActivationForWifiActivity")
+                }
+                DbpOp::IntentActionBroadcast { .. } | DbpOp::MethodBroadcastFinish { .. } => true,
+                DbpOp::MethodCodePatch { class, .. } => {
+                    class == "Lcom/zui/setupwizard/PrivacyAndSettingActivity;"
+                }
+                _ => false,
+            })
+            .collect();
+        assert_eq!(setup_ops.len(), 10, "all ten setup-wizard ops must parse");
         let mut cloud_offline = false;
         let mut cloud_completed = false;
         let mut fixed_complete_on_create = false;
@@ -3282,7 +3439,7 @@ value = false
         let mut redirected_easysync = false;
         let mut skipped_lenovoid_entry = false;
         let mut user_experience_variants = 0usize;
-        for op in &sw.ops {
+        for op in setup_ops {
             match op {
                 // The cloud/Lenovo-ID gate: both forced so
                 // ZuiUtils.getCloudActivityAction returns null (step skipped).
@@ -3428,7 +3585,7 @@ value = false
                     assert_eq!(replacements.len(), 1);
                     user_experience_variants += 1;
                 }
-                _ => panic!("unexpected op in debloat-setupwizard"),
+                _ => panic!("unexpected op in the merged setup-wizard set"),
             }
         }
         assert!(
@@ -3445,9 +3602,15 @@ value = false
         );
         let gl =
             load_dbp(&patches_dir().join("show-google-lens.dbp")).expect("show-google-lens.dbp");
-        assert_eq!(gl.name, "show-google-lens");
-        assert_eq!(gl.ops.len(), 3);
-        match &gl.ops[2] {
+        let gl_dimen = gl
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::ResourceDimen { resource, .. }
+                    if resource == "google_lens_button_padding")
+            })
+            .expect("show-google-lens resource_dimen op");
+        match gl_dimen {
             DbpOp::ResourceDimen {
                 file, resource, dp, ..
             } => {
@@ -3455,9 +3618,17 @@ value = false
                 assert_eq!(resource, "google_lens_button_padding");
                 assert_eq!(*dp, 9);
             }
-            _ => panic!("show-google-lens op[2] must be resource_dimen"),
+            _ => panic!("show-google-lens dimen op must be resource_dimen"),
         }
-        match &gl.ops[0] {
+        let gl_dex = gl
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
+                    if scan_class == "Lcom/zui/camera/module/capture/CaptureModule;")
+            })
+            .expect("show-google-lens CaptureModule op");
+        match gl_dex {
             DbpOp::InvokeConstBool {
                 scan_class,
                 scan_method,
@@ -3474,10 +3645,39 @@ value = false
             }
             _ => panic!("show-google-lens must use invoke_const_bool"),
         }
-        let ds2 =
-            load_dbp(&patches_dir().join("debloat-settings.dbp")).expect("debloat-settings.dbp");
-        assert_eq!(ds2.name, "debloat-settings");
-        assert_eq!(ds2.ops.len(), 12);
+        // The former debloat-settings ops live in debloat-common (the ZuiSettings
+        // hides/suggestion flow) and unlock-common (the battery-health gate and
+        // the accounts entry); select them by shape.
+        let settings_ops: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .chain(uc.ops.iter())
+            .filter(|op| match op {
+                DbpOp::MethodConstInt { class, .. } => {
+                    class.contains("TopLevelLenovoAccountPreferenceController")
+                        || class.contains("TopLevelAccountEntryPreferenceController")
+                }
+                DbpOp::PreferenceControllerHide { .. } => true,
+                DbpOp::MethodConstBool { class, .. } => {
+                    class == "Lcom/lenovo/settings/battery/ZuiChargingOptimization;"
+                        || class
+                            == "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+                }
+                DbpOp::MethodCodePatch { class, .. } => {
+                    class == "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+                }
+                DbpOp::MethodCodeRedirect { class, .. } => {
+                    class == "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;"
+                        || class == "Lcom/lenovo/settings/sim/NetworkAccelerationController;"
+                }
+                DbpOp::InvokeConstBool { scan_class, .. } => {
+                    scan_class.contains("LenovoServicePreferenceController")
+                }
+                DbpOp::ResourceBool { resource, .. } => resource == "is_prc",
+                _ => false,
+            })
+            .collect();
+        assert_eq!(settings_ops.len(), 12, "all twelve settings ops must parse");
         let mut hide = false;
         let mut show = false;
         let mut hide_user_experience = false;
@@ -3489,7 +3689,7 @@ value = false
         let mut hide_network_accelerate = false;
         let mut hide_pen_market_footer = false;
         let mut battery_health_gate = false;
-        for op in &ds2.ops {
+        for op in settings_ops {
             match op {
                 DbpOp::MethodConstInt {
                     file,
@@ -3609,7 +3809,7 @@ value = false
                         assert_eq!(donor_method, "getAvailabilityStatus");
                         hide_network_accelerate = true;
                     } else {
-                        panic!("unexpected redirect target in debloat-settings: {class}");
+                        panic!("unexpected redirect target in the merged settings ops: {class}");
                     }
                 }
                 DbpOp::ResourceBool {
@@ -3623,7 +3823,7 @@ value = false
                     assert!(!*value, "must hide the pen-settings market footer");
                     hide_pen_market_footer = true;
                 }
-                _ => panic!("unexpected op in debloat-settings"),
+                _ => panic!("unexpected op in the merged settings ops"),
             }
         }
         assert!(hide, "must hide the LeCloud tile (-> 3)");
@@ -3653,11 +3853,15 @@ value = false
             "must force the Charging optimization battery health/cycles gate open"
         );
 
-        let qk = load_dbp(&patches_dir().join("disable-quick-kill.dbp"))
-            .expect("disable-quick-kill.dbp");
-        assert_eq!(qk.name, "disable-quick-kill");
-        assert_eq!(qk.ops.len(), 1);
-        match &qk.ops[0] {
+        let qk = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::TextReplace { file, .. }
+                    if file == "system/etc/ZuiMemCleanerConfig.xml")
+            })
+            .expect("unlock-common quick-kill op");
+        match qk {
             DbpOp::TextReplace {
                 file,
                 from,
@@ -3671,15 +3875,58 @@ value = false
                 assert_eq!(from.len(), to.len(), "must stay size-preserving");
                 assert!(*all, "must replace every occurrence");
             }
-            _ => panic!("disable-quick-kill must use a text_replace op"),
+            _ => panic!("unlock-common quick-kill must use a text_replace op"),
         }
 
         // The merged security patch (former antivirus / permission-manager /
-        // url-security / app-recommendation patches).
-        let ds =
-            load_dbp(&patches_dir().join("debloat-security.dbp")).expect("debloat-security.dbp");
-        assert_eq!(ds.name, "debloat-security");
-        assert_eq!(ds.ops.len(), 21);
+        // url-security / app-recommendation patches) lives in debloat-common,
+        // with the autorun/relative-start ops moved to unlock-common.
+        let security_ops: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .chain(uc.ops.iter())
+            .filter(|op| match op {
+                DbpOp::MethodNop { class, .. } => {
+                    class.contains("AntiVirusInterface") || class.contains("InstallInstallingExtra")
+                }
+                DbpOp::InvokeConstInt { scan_class, .. } => {
+                    scan_class.contains("PackageInstallerActivityExtra")
+                }
+                DbpOp::InvokeConstBool { scan_class, .. } => {
+                    scan_class.contains("ZuiEmergencyDashboardFragment")
+                        || scan_class.contains("AppPermissionPreferenceController")
+                }
+                DbpOp::ForceViewGone { scan_class, .. } => {
+                    scan_class.contains("MainNavigationActivity")
+                }
+                DbpOp::TextReplace { file, from, .. } => {
+                    file == "system/build.prop" && from == "ro.zui.software.safeurl=true"
+                }
+                DbpOp::NopInvoke { scan_class, .. } => {
+                    scan_class.contains("PhoneMainViewModel")
+                        || scan_class.contains("AutoRunPkgReceiver")
+                }
+                DbpOp::MethodConstInt { class, .. } => {
+                    class.contains("KillVirusPreferenceController")
+                        || class.contains("AppInstallationGuardPreferenceController")
+                }
+                DbpOp::LayoutCollapse { file, .. } | DbpOp::LayoutBackground { file, .. } => {
+                    file == "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+                }
+                DbpOp::MethodCodePatch { class, .. } => {
+                    class.contains("SmartOptimizationActivity")
+                        || class.contains("AutoRunDataUtils")
+                        || class.contains("ZuiSecurityServiceBinder")
+                        || class == "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+                }
+                _ => false,
+            })
+            .collect();
+        assert_eq!(
+            security_ops.len(),
+            21,
+            "all twenty-one security ops must parse"
+        );
         let mut av_nops = 0usize; // AntiVirusInterface hub method_nops
         let mut got_getrecommendapp_nop = false;
         let mut got_install_scan = false; // invoke_const_int getInt -> 0
@@ -3694,7 +3941,7 @@ value = false
         let mut got_relative_default_on = false;
         let mut nop_invokes = 0usize;
         let mut const_int_hides = 0usize;
-        for op in &ds.ops {
+        for op in security_ops {
             match op {
                 DbpOp::MethodNop {
                     class,
@@ -3871,7 +4118,7 @@ value = false
                         got_selection_nop = true;
                     }
                 }
-                _ => panic!("unexpected op kind in debloat-security"),
+                _ => panic!("unexpected op kind in the merged security ops"),
             }
         }
         assert_eq!(av_nops, 3, "3 AntiVirusInterface hub method_nops");
@@ -3892,18 +4139,32 @@ value = false
                 && got_autorun_default_on
                 && got_relative_default_on
                 && got_axml_collapse,
-            "all new/key debloat-security ops must be present"
+            "all new/key merged security ops must be present"
         );
 
-        let cts = load_dbp(&patches_dir().join("enable-circle-to-search.dbp"))
-            .expect("enable-circle-to-search.dbp");
-        assert_eq!(cts.name, "enable-circle-to-search");
-        assert_eq!(cts.ops.len(), 4);
+        // The former enable-circle-to-search ops now live in unlock-common.
+        let cts_ops: Vec<&DbpOp> = uc
+            .ops
+            .iter()
+            .filter(|op| match op {
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    scan_method,
+                    ..
+                } => {
+                    scan_class.contains("AssistManager")
+                        || scan_method.as_deref() == Some("isCircleToSearchEnable")
+                }
+                DbpOp::TextReplace { file, .. } => file == "etc/sysconfig/google.xml",
+                _ => false,
+            })
+            .collect();
+        assert_eq!(cts_ops.len(), 4, "all four circle-to-search ops must parse");
         let mut sysui = false;
         let mut settings = false;
         let mut declared = String::new();
         let mut text_ops = 0usize;
-        for op in &cts.ops {
+        for op in cts_ops {
             match op {
                 DbpOp::InvokeConstBool {
                     scan_class,
@@ -3943,7 +4204,7 @@ value = false
                     declared.push_str(to);
                     text_ops += 1;
                 }
-                _ => panic!("unexpected op in enable-circle-to-search"),
+                _ => panic!("unexpected op in the merged circle-to-search ops"),
             }
         }
         assert_eq!(text_ops, 2, "google.xml feature swaps");
@@ -3959,11 +4220,15 @@ value = false
         }
         assert!(sysui && settings, "both CtS dex ops must parse");
 
-        let pgs = load_dbp(&patches_dir().join("show-power-gesture.dbp"))
-            .expect("show-power-gesture.dbp");
-        assert_eq!(pgs.name, "show-power-gesture");
-        assert_eq!(pgs.ops.len(), 2);
-        match &pgs.ops[0] {
+        let pgs = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
+                    if scan_class.contains("PowerMenuPreferenceController"))
+            })
+            .expect("unlock-common power-menu op");
+        match pgs {
             DbpOp::InvokeConstBool {
                 file,
                 scan_class,
@@ -3978,9 +4243,17 @@ value = false
                 assert_eq!(target_method, "isRowVersion");
                 assert!(*value, "must force isRowVersion -> true");
             }
-            _ => panic!("show-power-gesture must use invoke_const_bool"),
+            _ => panic!("unlock-common power-menu op must use invoke_const_bool"),
         }
-        match &pgs.ops[1] {
+        let pgs = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class.contains("VoiceInteractionManagerServiceStub"))
+            })
+            .expect("unlock-common voice-interaction recovery op");
+        match pgs {
             DbpOp::MethodCodePatch {
                 partition,
                 file,
@@ -4007,13 +4280,18 @@ value = false
                 );
                 assert_eq!(replacements[0].to, "1a 01 ${assistant:u16}");
             }
-            _ => panic!("show-power-gesture op[1] must use method_code_patch"),
+            _ => panic!("unlock-common voice-interaction op must use method_code_patch"),
         }
 
-        let dt = load_dbp(&patches_dir().join("debloat-theme.dbp")).expect("debloat-theme.dbp");
-        assert_eq!(dt.name, "debloat-theme");
-        assert_eq!(dt.ops.len(), 1);
-        match &dt.ops[0] {
+        let dt = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
+                    if scan_class == "Lcom/zui/font/activity/FontActivity;")
+            })
+            .expect("debloat-common FontActivity op");
+        match dt {
             DbpOp::InvokeConstBool {
                 file,
                 scan_class,
@@ -4035,14 +4313,18 @@ value = false
                     "font online catalog gate must force isBusinessProject -> true"
                 );
             }
-            _ => panic!("debloat-theme must contain only the FontActivity invoke_const_bool op"),
+            _ => panic!("debloat-common must contain the FontActivity invoke_const_bool op"),
         }
 
-        let sc = load_dbp(&patches_dir().join("fix-storage-stats-crash.dbp"))
-            .expect("fix-storage-stats-crash.dbp");
-        assert_eq!(sc.name, "fix-storage-stats-crash");
-        assert_eq!(sc.ops.len(), 1);
-        match &sc.ops[0] {
+        let sc = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodNop { class, .. }
+                    if class == "Lcom/android/server/usage/StorageStatsService;")
+            })
+            .expect("fix-common storage-stats op");
+        match sc {
             DbpOp::MethodNop {
                 partition,
                 file,
@@ -4059,15 +4341,39 @@ value = false
                     "(Landroid/content/pm/PackageStats;Ljava/lang/String;Ljava/lang/String;)V"
                 );
             }
-            _ => panic!("fix-storage-stats-crash must use method_nop"),
+            _ => panic!("fix-common storage-stats op must use method_nop"),
         }
 
-        let rf = load_dbp(&patches_dir().join("fix-third-party-recents.dbp"))
-            .expect("fix-third-party-recents.dbp");
-        assert_eq!(rf.name, "fix-third-party-recents");
-        assert_eq!(rf.ops.len(), 3);
-        for (index, expected_replacements) in [8usize, 2, 1].into_iter().enumerate() {
-            match &rf.ops[index] {
+        let recents_layout = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class.contains("RecentTasksController") && method == "accept")
+            })
+            .expect("fix-common recents layout op");
+        let recents_finish = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class.contains("RecentsTransitionHandler") && method == "finishInner")
+            })
+            .expect("fix-common recents finishInner op");
+        let recents_launcher = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/android/quickstep/RecentsActivity;" && method == "M")
+            })
+            .expect("fix-common recents launcher op");
+        for (op, expected_replacements, systemui) in [
+            (recents_layout, 8usize, true),
+            (recents_finish, 2, true),
+            (recents_launcher, 1, false),
+        ] {
+            match op {
                 DbpOp::MethodCodePatch {
                     partition,
                     file,
@@ -4075,7 +4381,7 @@ value = false
                     replacements,
                     ..
                 } => {
-                    if index < 2 {
+                    if systemui {
                         assert_eq!(partition, "system_ext");
                         assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
                     } else {
@@ -4085,15 +4391,17 @@ value = false
                     assert!(!symbols.is_empty(), "recents ops must resolve DEX symbols");
                     assert_eq!(replacements.len(), expected_replacements);
                 }
-                _ => panic!("recents fix op[{index}] must use method_code_patch"),
+                _ => panic!("recents fix op must use method_code_patch"),
             }
         }
 
-        let ba =
-            load_dbp(&patches_dir().join("debloat-bootanim.dbp")).expect("debloat-bootanim.dbp");
-        assert_eq!(ba.name, "debloat-bootanim");
-        assert_eq!(ba.ops.len(), 1);
-        match &ba.ops[0] {
+        let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
+        let ba = wj
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::ZipEntryReplace { .. }))
+            .expect("debloat-wuji bootanimation op");
+        match ba {
             DbpOp::ZipEntryReplace {
                 partition,
                 file,
@@ -4109,14 +4417,18 @@ value = false
                 assert_eq!(parsed.bytes.len(), 69);
                 assert_eq!(&parsed.bytes[..8], b"\x89PNG\r\n\x1a\n");
             }
-            _ => panic!("debloat-bootanim must use zip_entry_replace"),
+            _ => panic!("debloat-wuji bootanimation op must use zip_entry_replace"),
         }
 
-        let da = load_dbp(&patches_dir().join("disable-dolby-atmos.dbp"))
-            .expect("disable-dolby-atmos.dbp");
-        assert_eq!(da.name, "disable-dolby-atmos");
-        assert_eq!(da.ops.len(), 4);
-        match &da.ops[0] {
+        let da = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstBool { class, .. }
+                    if class == "Lcom/lenovo/settings/sound/dolby/BaseDolbyController;")
+            })
+            .expect("unlock-common Dolby switch-enable op");
+        match da {
             DbpOp::MethodConstBool {
                 partition,
                 file,
@@ -4135,9 +4447,18 @@ value = false
                 assert_eq!(proto, "()Z");
                 assert!(*value);
             }
-            _ => panic!("disable-dolby-atmos op[0] must use method_const_bool"),
+            _ => panic!("unlock-common Dolby switch-enable op must use method_const_bool"),
         }
-        match &da.ops[1] {
+        let da = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/lenovo/settings/sound/dolby/DolbySwitchPreferenceController;"
+                        && method == "updateState")
+            })
+            .expect("unlock-common Dolby updateState op");
+        match da {
             DbpOp::MethodCodePatch {
                 partition,
                 file,
@@ -4160,9 +4481,18 @@ value = false
                 assert_eq!(replacements[0].to, "0a 01 00 00 00 00");
                 assert_eq!(replacements[0].expected, 1);
             }
-            _ => panic!("disable-dolby-atmos op[1] must use method_code_patch"),
+            _ => panic!("unlock-common Dolby updateState op must use method_code_patch"),
         }
-        match &da.ops[2] {
+        let da = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/android/server/audio/AudioService;"
+                        && method == "setWiredDeviceConnectionState")
+            })
+            .expect("unlock-common wired-device-state op");
+        match da {
             DbpOp::MethodCodePatch {
                 partition,
                 file,
@@ -4187,9 +4517,18 @@ value = false
                 assert_eq!(replacements[0].to, "0c 05 00 00 00 00 00 00");
                 assert_eq!(replacements[0].expected, 1);
             }
-            _ => panic!("disable-dolby-atmos op[2] must use method_code_patch"),
+            _ => panic!("unlock-common wired-device-state op must use method_code_patch"),
         }
-        match &da.ops[3] {
+        let da = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/android/server/audio/AudioService$AudioHandler;"
+                        && method == "handleMessage")
+            })
+            .expect("unlock-common Dolby handler op");
+        match da {
             DbpOp::MethodCodePatch {
                 partition,
                 file,
@@ -4220,14 +4559,22 @@ value = false
                 );
                 assert_eq!(replacements[0].expected, 1);
             }
-            _ => panic!("disable-dolby-atmos op[3] must use method_code_patch"),
+            _ => panic!("unlock-common Dolby handler op must use method_code_patch"),
         }
 
-        let tc =
-            load_dbp(&patches_dir().join("debloat-telephony.dbp")).expect("debloat-telephony.dbp");
-        assert_eq!(tc.name, "debloat-telephony");
-        assert_eq!(tc.ops.len(), 15);
-        match &tc.ops[0] {
+        // The telephony debloat ops live in debloat-common; the ZuiMessage and
+        // DongDe fix ops moved to fix-common.
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                    if file == "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
+                        && class == "Lcom/ted/number/TedServiceHelper;"
+                        && method == "bindService")
+            })
+            .expect("debloat-common ZuiTelecom ted bind nop");
+        match tc {
             DbpOp::MethodNop {
                 partition,
                 file,
@@ -4241,9 +4588,18 @@ value = false
                 assert_eq!(method, "bindService");
                 assert_eq!(proto, "()V");
             }
-            _ => panic!("debloat-telephony op[0] must nop TedServiceHelper.bindService"),
+            _ => panic!("debloat-common ZuiTelecom op must nop TedServiceHelper.bindService"),
         }
-        match &tc.ops[1] {
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstBool { class, method, .. }
+                    if class == "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
+                        && method == "isAntiSpamEnabled")
+            })
+            .expect("debloat-common anti-spam op");
+        match tc {
             DbpOp::MethodConstBool {
                 partition,
                 file,
@@ -4262,9 +4618,19 @@ value = false
                 assert_eq!(proto, "(Landroid/content/Context;)Z");
                 assert!(!*value);
             }
-            _ => panic!("debloat-telephony op[1] must force isAntiSpamEnabled false"),
+            _ => panic!("debloat-common ZuiTelecom op must force isAntiSpamEnabled false"),
         }
-        match &tc.ops[2] {
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                    if file == "system/priv-app/ZuiDialer/ZuiDialer.apk"
+                        && class == "Ls5/a;"
+                        && method == "f")
+            })
+            .expect("debloat-common dialer ted bind nop");
+        match tc {
             DbpOp::MethodNop {
                 partition,
                 file,
@@ -4278,9 +4644,19 @@ value = false
                 assert_eq!(method, "f");
                 assert_eq!(proto, "()V");
             }
-            _ => panic!("debloat-telephony op[2] must nop the dialer ted bind"),
+            _ => panic!("debloat-common ZuiDialer op must nop the dialer ted bind"),
         }
-        match &tc.ops[3] {
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstBool { file, class, method, .. }
+                    if file == "system/priv-app/ZuiDialer/ZuiDialer.apk"
+                        && class == "Lm2/h;"
+                        && method == "a")
+            })
+            .expect("debloat-common mark-number toggle op");
+        match tc {
             DbpOp::MethodConstBool {
                 partition,
                 file,
@@ -4296,9 +4672,19 @@ value = false
                 assert_eq!(proto, "()Z");
                 assert!(!*value);
             }
-            _ => panic!("debloat-telephony op[3] must hide the mark-number toggle"),
+            _ => panic!("debloat-common ZuiDialer op must hide the mark-number toggle"),
         }
-        match &tc.ops[4] {
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                    if file == "system/priv-app/ZuiContacts/ZuiContacts.apk"
+                        && class == "Ld1/a;"
+                        && method == "f")
+            })
+            .expect("debloat-common contacts ted bind nop");
+        match tc {
             DbpOp::MethodNop {
                 partition,
                 file,
@@ -4312,9 +4698,19 @@ value = false
                 assert_eq!(method, "f");
                 assert_eq!(proto, "()V");
             }
-            _ => panic!("debloat-telephony op[4] must nop the contacts ted bind"),
+            _ => panic!("debloat-common ZuiContacts op must nop the contacts ted bind"),
         }
-        match &tc.ops[5] {
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                    if file == "system/priv-app/ZuiMessage/ZuiMessage.apk"
+                        && class == "Lcom/ted/number/TedServiceHelper;"
+                        && method == "bindService")
+            })
+            .expect("debloat-common message ted bind nop");
+        match tc {
             DbpOp::MethodNop {
                 partition,
                 file,
@@ -4328,9 +4724,18 @@ value = false
                 assert_eq!(method, "bindService");
                 assert_eq!(proto, "()V");
             }
-            _ => panic!("debloat-telephony op[5] must nop the message ted bind"),
+            _ => panic!("debloat-common ZuiMessage op must nop the message ted bind"),
         }
-        match &tc.ops[6] {
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstBool { class, method, .. }
+                    if class == "Lcom/zui/callsettings/OperatorFunctionUtil;"
+                        && method == "isEnableMarkNumber")
+            })
+            .expect("debloat-common isEnableMarkNumber op");
+        match tc {
             DbpOp::MethodConstBool {
                 partition,
                 file,
@@ -4346,9 +4751,18 @@ value = false
                 assert_eq!(proto, "(Landroid/content/Context;)Z");
                 assert!(!*value);
             }
-            _ => panic!("debloat-telephony op[6] must pin isEnableMarkNumber false"),
+            _ => panic!("debloat-common ZuiCallSettings op must pin isEnableMarkNumber false"),
         }
-        match &tc.ops[7] {
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodNop { class, method, .. }
+                    if class == "Lcom/zui/callsettings/OperatorFunctionUtil;"
+                        && method == "setEnableMarkNumber")
+            })
+            .expect("debloat-common setEnableMarkNumber op");
+        match tc {
             DbpOp::MethodNop {
                 partition,
                 file,
@@ -4362,9 +4776,17 @@ value = false
                 assert_eq!(method, "setEnableMarkNumber");
                 assert_eq!(proto, "(Landroid/content/Context;Z)V");
             }
-            _ => panic!("debloat-telephony op[7] must nop the mark-number write"),
+            _ => panic!("debloat-common ZuiCallSettings op must nop the mark-number write"),
         }
-        match &tc.ops[8] {
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodConstBool { class, method, .. }
+                    if class == "Lcom/android/incallui/InCallPresenter;" && method == "isSupportAI")
+            })
+            .expect("debloat-common in-call AI op");
+        match tc {
             DbpOp::MethodConstBool {
                 partition,
                 file,
@@ -4380,12 +4802,21 @@ value = false
                 assert_eq!(proto, "()Z");
                 assert!(!*value);
             }
-            _ => panic!("debloat-telephony op[8] must disable the AI in-call pills"),
+            _ => panic!("debloat-common ZuiDialer op must disable the AI in-call pills"),
         }
 
         // The missing com.lenovoconnect.aoac.pad app (DongDe) must not kill
-        // SystemUI or Settings; those ops live at the end of the same file.
-        match &tc.ops[9] {
+        // SystemUI or Settings.
+        let tc = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { target_class, target_method, .. }
+                    if target_class == "Lcom/android/systemui/util/XSystemUtil;"
+                        && target_method == "isDevicePrc")
+            })
+            .expect("debloat-common isDevicePrc op");
+        match tc {
             DbpOp::InvokeConstBool {
                 partition,
                 file,
@@ -4407,9 +4838,17 @@ value = false
                 assert_eq!(target_method, "isDevicePrc");
                 assert!(!*value);
             }
-            _ => panic!("debloat-telephony op[9] must pin isDevicePrc false in start"),
+            _ => panic!("debloat-common op must pin isDevicePrc false in start"),
         }
-        match &tc.ops[10] {
+        let tc = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::NopInvoke { scan_class, .. }
+                    if scan_class == "Lcom/zui/simsettings/preference/SimAccountPreference$1;")
+            })
+            .expect("fix-common SimAccountPreference nop");
+        match tc {
             DbpOp::NopInvoke {
                 partition,
                 file,
@@ -4431,11 +4870,18 @@ value = false
                 assert_eq!(target_method, "setComponentEnabledSetting");
                 assert_eq!(anchor_string.as_deref(), Some("com.lenovoconnect.aoac.pad"));
             }
-            _ => panic!(
-                "debloat-telephony op[10] must drop the unchecked setComponentEnabledSetting"
-            ),
+            _ => panic!("fix-common op must drop the unchecked setComponentEnabledSetting"),
         }
-        match &tc.ops[11] {
+        let tc = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/zui/simsettings/preference/SimAccountPreference;"
+                        && method == "onBindViewHolder")
+            })
+            .expect("fix-common SimAccountPreference patch");
+        match tc {
             DbpOp::MethodCodePatch {
                 partition,
                 file,
@@ -4455,14 +4901,20 @@ value = false
                 assert_eq!(proto, "(Landroidx/preference/PreferenceViewHolder;)V");
                 assert_eq!(replacements.len(), 2);
             }
-            _ => panic!("debloat-telephony op[11] must grey out sim_account2"),
+            _ => panic!("fix-common op must grey out sim_account2"),
         }
 
         let adb =
             load_dbp(&patches_dir().join("enable-adb-debug.dbp")).expect("enable-adb-debug.dbp");
-        assert_eq!(adb.name, "enable-adb-debug");
-        assert_eq!(adb.ops.len(), 3);
-        match &adb.ops[0] {
+        let adb_system = adb
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::TextReplace { partition, file, .. }
+                    if partition == "system" && file == "system/build.prop")
+            })
+            .expect("enable-adb-debug system build.prop op");
+        match adb_system {
             DbpOp::TextReplace {
                 partition,
                 file,
@@ -4477,9 +4929,17 @@ value = false
                 assert_eq!(from.len(), to.len());
                 assert!(!*all);
             }
-            _ => panic!("enable-adb-debug op[0] must replace ro.adb.secure in system build.prop"),
+            _ => panic!("enable-adb-debug op must replace ro.adb.secure in system build.prop"),
         }
-        match &adb.ops[1] {
+        let adb_vendor = adb
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::TextReplace { partition, file, .. }
+                    if partition == "vendor" && file == "build.prop")
+            })
+            .expect("enable-adb-debug vendor build.prop op");
+        match adb_vendor {
             DbpOp::TextReplace {
                 partition,
                 file,
@@ -4492,9 +4952,17 @@ value = false
                 assert_eq!(from, "ro.adb.secure=1\n");
                 assert_eq!(to, "ro.adb.secure=0\n");
             }
-            _ => panic!("enable-adb-debug op[1] must replace ro.adb.secure in vendor build.prop"),
+            _ => panic!("enable-adb-debug op must replace ro.adb.secure in vendor build.prop"),
         }
-        match &adb.ops[2] {
+        let adb_usb = adb
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::TextReplace { file, .. }
+                    if file == "etc/init/hw/init.qcom.usb.rc")
+            })
+            .expect("enable-adb-debug USB config op");
+        match adb_usb {
             DbpOp::TextReplace {
                 partition,
                 file,
@@ -4507,14 +4975,18 @@ value = false
                 assert_eq!(from.len(), to.len());
                 assert!(to.contains("persist.sys.usb.config adb"));
             }
-            _ => panic!("enable-adb-debug op[2] must reseed persist.sys.usb.config=adb"),
+            _ => panic!("enable-adb-debug USB op must reseed persist.sys.usb.config=adb"),
         }
 
-        let ha = load_dbp(&patches_dir().join("fix-hiddenapps-npe.dbp"))
-            .expect("fix-hiddenapps-npe.dbp");
-        assert_eq!(ha.name, "fix-hiddenapps-npe");
-        assert_eq!(ha.ops.len(), 1);
-        match &ha.ops[0] {
+        let ha = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, .. }
+                    if class == "Lcom/zui/server/pm/ZuiHiddenAppsService;")
+            })
+            .expect("fix-common hiddenapps NPE op");
+        match ha {
             DbpOp::MethodCodePatch {
                 partition,
                 file,
@@ -4541,7 +5013,7 @@ value = false
                 );
                 assert_eq!(replacements[0].expected, 1);
             }
-            _ => panic!("fix-hiddenapps-npe must use method_code_patch"),
+            _ => panic!("fix-common hiddenapps op must use method_code_patch"),
         }
     }
 
@@ -4557,15 +5029,19 @@ value = false
         let Ok(path) = std::env::var("DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_SERVICES_JAR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("fix-hiddenapps-npe.dbp")).unwrap();
-        assert_eq!(doc.ops.len(), 1);
-        let op = &doc.ops[0];
-        assert!(matches!(
-            op,
-            DbpOp::MethodCodePatch { class, method, .. }
-                if class == "Lcom/zui/server/pm/ZuiHiddenAppsService;"
-                    && method == "$r8$lambda$uoQ3J380nW_sr1I4_wL-x4q-pDY"
-        ));
+        let doc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    op,
+                    DbpOp::MethodCodePatch { class, method, .. }
+                        if class == "Lcom/zui/server/pm/ZuiHiddenAppsService;"
+                            && method == "$r8$lambda$uoQ3J380nW_sr1I4_wL-x4q-pDY"
+                )
+            })
+            .expect("fix-common hiddenapps NPE op");
 
         let jar = std::fs::read(path).expect("read services.jar");
         assert_eq!(jar.len(), 25_460_514, "unexpected services.jar size");
@@ -4608,9 +5084,9 @@ value = false
 
     #[test]
     fn bundled_recents_paths_match_existing_systemui_and_launcher_patches() {
-        let recents = load_dbp(&patches_dir().join("fix-third-party-recents.dbp")).unwrap();
-        let circle = load_dbp(&patches_dir().join("enable-circle-to-search.dbp")).unwrap();
-        let launcher = load_dbp(&patches_dir().join("debloat-launcher.dbp")).unwrap();
+        let recents = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let circle = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let launcher = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
 
         let systemui_path = circle
             .ops
@@ -4623,7 +5099,7 @@ value = false
             .iter()
             .find(|op| op.file().ends_with("/ZuiLauncher.apk"))
             .map(|op| (op.partition(), op.file()))
-            .expect("debloat-launcher ZuiLauncher target");
+            .expect("debloat-common ZuiLauncher target");
 
         let mut systemui_ops = 0usize;
         let mut launcher_ops = 0usize;
@@ -4675,7 +5151,7 @@ value = false
             (landed, changed_entries)
         }
 
-        let doc = load_dbp(&patches_dir().join("show-power-gesture.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let op = doc
             .ops
             .iter()
@@ -4728,7 +5204,7 @@ value = false
 
     #[test]
     fn bundled_recents_finish_inner_rejoin_defines_oem_log_tag() {
-        let recents = load_dbp(&patches_dir().join("fix-third-party-recents.dbp")).unwrap();
+        let recents = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
         let (symbols, replacements) = recents
             .ops
             .iter()
@@ -4781,7 +5257,13 @@ value = false
     fn bundled_recents_fix_lands_on_real_apk() {
         use sha2::{Digest, Sha256};
 
-        let doc = load_dbp(&patches_dir().join("fix-third-party-recents.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let ops: Vec<&DbpOp> = doc
+            .ops
+            .iter()
+            .filter(|op| op.file() == "priv-app/ZuiSystemUI/ZuiSystemUI.apk")
+            .collect();
+        assert_eq!(ops.len(), 2, "both Recents SystemUI ops");
 
         for (path_env, out_env, expected_len, expected_digest, expected_op_hits) in [
             (
@@ -4789,14 +5271,14 @@ value = false
                 "DYNOBOX_ZUISYSTEMUI_DEX_OUT",
                 221_867_547usize,
                 "BD2C814D9D98BB4FC28055B0A376D04157F0623A5A4E44049596FE089A11BECC",
-                [1usize, 1, 0],
+                [1usize, 1],
             ),
             (
                 "DYNOBOX_ZUISYSTEMUI_ZUXOS294_APK",
                 "DYNOBOX_ZUISYSTEMUI_ZUXOS294_DEX_OUT",
                 221_892_123usize,
                 "1388CBBA8FB6B7B61BE393F0BFB88F9572EB58A5DDB27B7C0C3FCC06C80B7290",
-                [1usize, 1, 0],
+                [1usize, 1],
             ),
         ] {
             let Ok(path) = std::env::var(path_env) else {
@@ -4812,7 +5294,7 @@ value = false
 
             let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse APK zip");
             let mut landed = 0usize;
-            let mut op_hits = vec![0usize; doc.ops.len()];
+            let mut op_hits = vec![0usize; ops.len()];
             let mut changed_entries = Vec::new();
             for entry in zip.entries.iter().filter(|entry| {
                 entry.name.ends_with(".dex")
@@ -4824,7 +5306,7 @@ value = false
                 let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
                 let mut dex = original.to_vec();
                 let mut entry_hits = 0usize;
-                for (op_index, op) in doc.ops.iter().enumerate() {
+                for (op_index, op) in ops.iter().enumerate() {
                     if apply_one_op(&mut dex, op).unwrap() {
                         landed += 1;
                         entry_hits += 1;
@@ -4895,7 +5377,7 @@ value = false
             (landed, changed)
         }
 
-        let doc = load_dbp(&patches_dir().join("fix-third-party-recents.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
         let ops = launcher_ops(&doc);
         assert_eq!(ops.len(), 1, "one pool-layout-independent Launcher op");
 
@@ -4957,7 +5439,7 @@ value = false
     fn setupwizard_user_experience_row_lands_on_supported_builds() {
         use sha2::{Digest, Sha256};
 
-        let doc = load_dbp(&patches_dir().join("debloat-setupwizard.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let ops: Vec<_> = doc
             .ops
             .iter()
@@ -5110,21 +5592,124 @@ value = false
             ));
         }
 
-        let setup = load_dbp(&patches_dir().join("debloat-setupwizard.dbp")).unwrap();
-        let settings = load_dbp(&patches_dir().join("debloat-settings.dbp")).unwrap();
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+
+        fn find_op<'a>(
+            docs: [&'a DbpDocument; 2],
+            what: &str,
+            pred: impl Fn(&DbpOp) -> bool,
+        ) -> &'a DbpOp {
+            docs.into_iter()
+                .flat_map(|doc| doc.ops.iter())
+                .find(|op| pred(op))
+                .unwrap_or_else(|| panic!("missing {what}"))
+        }
+
+        // The former setup-wizard ops (debloat-common + unlock-common), in
+        // their original order.
+        let setup_ops: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .chain(uc.ops.iter())
+            .filter(|op| match op {
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    scan_method,
+                    ..
+                } => {
+                    scan_class.contains("ZuiUtils")
+                        || scan_class.contains("CompleteLandActivity")
+                        || (scan_class.contains("DeviceActivationForWifiActivity")
+                            && scan_method.as_deref() == Some("startPrivacySettingsActivity"))
+                }
+                DbpOp::FieldConstBool { scan_class, .. } => {
+                    scan_class.contains("DeviceActivationForWifiActivity")
+                }
+                DbpOp::IntentActionBroadcast { .. } | DbpOp::MethodBroadcastFinish { .. } => true,
+                DbpOp::MethodCodePatch { class, .. } => {
+                    class == "Lcom/zui/setupwizard/PrivacyAndSettingActivity;"
+                }
+                _ => false,
+            })
+            .collect();
+        assert_eq!(setup_ops.len(), 10, "all ten setup-wizard ops must parse");
+
+        // The settings ops the pinned expectations below describe, in their
+        // original order. The battery-health, network-acceleration and
+        // PenService ops added later are covered by the other settings
+        // landing tests.
+        let settings_ops: Vec<&DbpOp> = vec![
+            find_op([&dc, &uc], "TopLevelLenovoAccount op", |op| {
+                matches!(op, DbpOp::MethodConstInt { class, method, .. }
+                    if class
+                        == "Lcom/lenovo/settings/homepage/controller/TopLevelLenovoAccountPreferenceController;"
+                        && method == "getAvailabilityStatus")
+            }),
+            find_op([&dc, &uc], "User Experience preference hide", |op| {
+                matches!(op, DbpOp::PreferenceControllerHide { class, .. }
+                    if class == "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;")
+            }),
+            find_op([&dc, &uc], "User Experience suggestion const", |op| {
+                matches!(op, DbpOp::MethodConstBool { class, method, .. }
+                    if class == "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+                        && method == "isSuggestionComplete")
+            }),
+            find_op([&dc, &uc], "User Experience suggestion patch", |op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+                        && method == "onCreate")
+            }),
+            find_op(
+                [&dc, &uc],
+                "User Experience deindex (Unsupported donor)",
+                |op| {
+                    matches!(op, DbpOp::MethodCodeRedirect { class, donor_class, .. }
+                    if class == "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;"
+                        && donor_class == "Lcom/lenovo/settings/widget/UnsupportedPreferenceController;")
+                },
+            ),
+            find_op(
+                [&dc, &uc],
+                "User Experience deindex (SideSheet donor)",
+                |op| {
+                    matches!(op, DbpOp::MethodCodeRedirect { class, donor_class, .. }
+                    if class == "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;"
+                        && donor_class == "Lcom/google/android/material/sidesheet/SideSheetDialog;")
+                },
+            ),
+            find_op([&dc, &uc], "TopLevelAccountEntry op", |op| {
+                matches!(op, DbpOp::MethodConstInt { class, method, .. }
+                    if class
+                        == "Lcom/android/settings/accounts/TopLevelAccountEntryPreferenceController;"
+                        && method == "getAvailabilityStatus")
+            }),
+            find_op([&dc, &uc], "Service hotline isPrcVersion op", |op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_class, target_method, value, .. }
+                    if scan_class.contains("LenovoServicePreferenceController")
+                        && target_method == "isPrcVersion"
+                        && !*value)
+            }),
+            find_op([&dc, &uc], "Service hotline isRowVersion op", |op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_class, target_method, value, .. }
+                    if scan_class.contains("LenovoServicePreferenceController")
+                        && target_method == "isRowVersion"
+                        && *value)
+            }),
+        ];
+        assert_eq!(settings_ops.len(), 9, "the nine pinned settings ops");
+
         for (label, apks) in fixtures {
-            let setup_hits: Vec<_> = setup
-                .ops
+            let setup_hits: Vec<_> = setup_ops
                 .iter()
                 .map(|op| dex_landing_count(&apks[op.file()], op))
                 .collect();
-            let settings_hits: Vec<_> = settings
-                .ops
+            let settings_hits: Vec<_> = settings_ops
                 .iter()
                 .map(|op| dex_landing_count(&apks[op.file()], op))
                 .collect();
-            eprintln!("{label} debloat-setupwizard hits: {setup_hits:?}");
-            eprintln!("{label} debloat-settings hits: {settings_hits:?}");
+            eprintln!("{label} setup-wizard hits: {setup_hits:?}");
+            eprintln!("{label} settings hits: {settings_hits:?}");
             let expected_setup = match label {
                 ".063" => [1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
                 ".183" => [1, 1, 0, 1, 1, 1, 1, 1, 1, 1],
@@ -5147,7 +5732,7 @@ value = false
     fn zuisettings_user_experience_ops_land_on_supported_builds() {
         use sha2::{Digest, Sha256};
 
-        let doc = load_dbp(&patches_dir().join("debloat-settings.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let ops: Vec<_> = doc
             .ops
             .iter()
@@ -5267,7 +5852,8 @@ value = false
         }
     }
 
-    /// Apply the bundled debloat-settings ops to the real ZuiSettings dexes.
+    /// Apply the merged debloat-settings ops (debloat-common + unlock-common)
+    /// to the real ZuiSettings dexes.
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`; optionally
     /// `DYNOBOX_ZUISETTINGS_DEX_OUT` to dump patched dexes for disassembly.
     #[test]
@@ -5275,7 +5861,38 @@ value = false
         let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("debloat-settings.dbp")).unwrap();
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let ops: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .chain(uc.ops.iter())
+            .filter(|op| match op {
+                DbpOp::MethodConstInt { class, .. } => {
+                    class.contains("TopLevelLenovoAccountPreferenceController")
+                        || class.contains("TopLevelAccountEntryPreferenceController")
+                }
+                DbpOp::PreferenceControllerHide { .. } => true,
+                DbpOp::MethodConstBool { class, .. } => {
+                    class == "Lcom/lenovo/settings/battery/ZuiChargingOptimization;"
+                        || class
+                            == "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+                }
+                DbpOp::MethodCodePatch { class, .. } => {
+                    class == "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+                }
+                DbpOp::MethodCodeRedirect { class, .. } => {
+                    class == "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;"
+                        || class == "Lcom/lenovo/settings/sim/NetworkAccelerationController;"
+                }
+                DbpOp::InvokeConstBool { scan_class, .. } => {
+                    scan_class.contains("LenovoServicePreferenceController")
+                }
+                DbpOp::ResourceBool { resource, .. } => resource == "is_prc",
+                _ => false,
+            })
+            .collect();
+        assert_eq!(ops.len(), 12, "all twelve settings ops");
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         let mut user_experience_landed = 0usize;
@@ -5292,7 +5909,7 @@ value = false
                 continue;
             };
             let mut modified = false;
-            for op in &doc.ops {
+            for op in &ops {
                 if apply_one_op(&mut dex, op).unwrap() {
                     landed += 1;
                     if matches!(
@@ -5333,12 +5950,12 @@ value = false
         );
         assert_eq!(
             landed, 9,
-            "nine build-compatible debloat-settings ops should land \
+            "nine build-compatible merged settings ops should land \
              (SideSheetDialog donor and isRowVersion site are absent in this build)"
         );
     }
 
-    /// Apply the bundled debloat-bootanim op to a COPY of the real
+    /// Apply the debloat-wuji bootanimation op to a COPY of the real
     /// bootanimation.zip. Set `DYNOBOX_BOOTANIM_ZIP` to the copy path (never
     /// the source tree); optionally `DYNOBOX_BOOTANIM_OUT` to keep the patched
     /// copy for out-of-band inspection.
@@ -5347,13 +5964,17 @@ value = false
         let Ok(path) = std::env::var("DYNOBOX_BOOTANIM_ZIP") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("debloat-bootanim.dbp")).unwrap();
-        assert_eq!(doc.ops.len(), 1);
+        let doc = load_dbp(&patches_dir().join("debloat-wuji.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| matches!(op, DbpOp::ZipEntryReplace { .. }))
+            .expect("debloat-wuji bootanimation op");
         let DbpOp::ZipEntryReplace {
             entries, payload, ..
-        } = &doc.ops[0]
+        } = op
         else {
-            panic!("debloat-bootanim must use zip_entry_replace");
+            panic!("debloat-wuji must carry the zip_entry_replace op");
         };
         let template = parse_code_template(payload).expect("payload must be hex");
         assert_eq!(template.bytes.len(), 69);
@@ -5414,7 +6035,7 @@ value = false
         let Ok(path) = std::env::var("DYNOBOX_ZUISECURITY_APK") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("debloat-security.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let apk = std::fs::read(&path).expect("read apk");
         for (i, op) in doc.ops.iter().enumerate() {
             let landed = match op {
@@ -5462,24 +6083,118 @@ value = false
         }
     }
 
-    /// Land debloat-telephony ops on the real ZuiTelecom/ZuiDialer/ZuiContacts/
-    /// ZuiMessage/ZuiCallSettings dex dumps. Set `DYNOBOX_ZUITELE_DEX_DIR`,
+    /// Land the merged telephony ops (debloat-common + fix-common) on the real
+    /// ZuiTelecom/ZuiDialer/ZuiContacts/ZuiMessage/ZuiCallSettings dex dumps.
+    /// Set `DYNOBOX_ZUITELE_DEX_DIR`,
     /// `DYNOBOX_ZUIDIALER_DEX_DIR`, `DYNOBOX_ZUICONTACTS_DEX_DIR`,
     /// `DYNOBOX_ZUIMESSAGE_DEX_DIR`, `DYNOBOX_ZUICALLSETTINGS_DEX_DIR` to
     /// directories holding the extracted STORED `classes*.dex` (each check is
     /// skipped when its env var is unset).
     #[test]
     fn bundled_debloat_telephony_land_on_real_dex() {
-        let doc = load_dbp(&patches_dir().join("debloat-telephony.dbp")).unwrap();
-        assert_eq!(doc.ops.len(), 15);
-        let cases: [(&str, &[usize], usize); 5] = [
-            ("DYNOBOX_ZUITELE_DEX_DIR", &[0, 1], 2),
-            ("DYNOBOX_ZUIDIALER_DEX_DIR", &[2, 3], 2),
-            ("DYNOBOX_ZUICONTACTS_DEX_DIR", &[4], 1),
-            ("DYNOBOX_ZUIMESSAGE_DEX_DIR", &[5, 12, 13, 14], 4),
-            ("DYNOBOX_ZUICALLSETTINGS_DEX_DIR", &[6, 7], 2),
+        fn find_op<'a>(
+            doc: &'a DbpDocument,
+            what: &str,
+            pred: impl Fn(&DbpOp) -> bool,
+        ) -> &'a DbpOp {
+            doc.ops
+                .iter()
+                .find(|op| pred(op))
+                .unwrap_or_else(|| panic!("missing {what}"))
+        }
+
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let cases: [(&str, Vec<&DbpOp>, usize); 5] = [
+            (
+                "DYNOBOX_ZUITELE_DEX_DIR",
+                vec![
+                    find_op(&dc, "ZuiTelecom ted bind nop", |op| {
+                        matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                            if file == "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
+                                && class == "Lcom/ted/number/TedServiceHelper;"
+                                && method == "bindService")
+                    }),
+                    find_op(&dc, "ZuiTelecom anti-spam op", |op| {
+                        matches!(op, DbpOp::MethodConstBool { class, method, .. }
+                            if class == "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
+                                && method == "isAntiSpamEnabled")
+                    }),
+                ],
+                2,
+            ),
+            (
+                "DYNOBOX_ZUIDIALER_DEX_DIR",
+                vec![
+                    find_op(&dc, "ZuiDialer ted bind nop", |op| {
+                        matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                            if file == "system/priv-app/ZuiDialer/ZuiDialer.apk"
+                                && class == "Ls5/a;"
+                                && method == "f")
+                    }),
+                    find_op(&dc, "ZuiDialer mark-number toggle", |op| {
+                        matches!(op, DbpOp::MethodConstBool { file, class, method, .. }
+                            if file == "system/priv-app/ZuiDialer/ZuiDialer.apk"
+                                && class == "Lm2/h;"
+                                && method == "a")
+                    }),
+                ],
+                2,
+            ),
+            (
+                "DYNOBOX_ZUICONTACTS_DEX_DIR",
+                vec![find_op(&dc, "ZuiContacts ted bind nop", |op| {
+                    matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                        if file == "system/priv-app/ZuiContacts/ZuiContacts.apk"
+                            && class == "Ld1/a;"
+                            && method == "f")
+                })],
+                1,
+            ),
+            (
+                "DYNOBOX_ZUIMESSAGE_DEX_DIR",
+                vec![
+                    find_op(&dc, "ZuiMessage ted bind nop", |op| {
+                        matches!(op, DbpOp::MethodNop { file, class, method, .. }
+                            if file == "system/priv-app/ZuiMessage/ZuiMessage.apk"
+                                && class == "Lcom/ted/number/TedServiceHelper;"
+                                && method == "bindService")
+                    }),
+                    find_op(&fc, "ZuiMessage preference-cast patch", |op| {
+                        matches!(op, DbpOp::MethodCodePatch { symbols, .. }
+                            if symbols.iter().any(|symbol| symbol.name() == "zui_preference"))
+                    }),
+                    find_op(&fc, "ZuiMessage preference-disable patch", |op| {
+                        matches!(op, DbpOp::MethodCodePatch { symbols, .. }
+                            if symbols.iter().any(|symbol| symbol.name() == "set_enabled"))
+                    }),
+                    find_op(&fc, "ZuiMessage removePreference nop", |op| {
+                        matches!(op, DbpOp::NopInvoke { scan_class, target_method, .. }
+                            if scan_class
+                                == "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+                                && target_method == "removePreference")
+                    }),
+                ],
+                4,
+            ),
+            (
+                "DYNOBOX_ZUICALLSETTINGS_DEX_DIR",
+                vec![
+                    find_op(&dc, "ZuiCallSettings isEnableMarkNumber op", |op| {
+                        matches!(op, DbpOp::MethodConstBool { class, method, .. }
+                            if class == "Lcom/zui/callsettings/OperatorFunctionUtil;"
+                                && method == "isEnableMarkNumber")
+                    }),
+                    find_op(&dc, "ZuiCallSettings setEnableMarkNumber nop", |op| {
+                        matches!(op, DbpOp::MethodNop { class, method, .. }
+                            if class == "Lcom/zui/callsettings/OperatorFunctionUtil;"
+                                && method == "setEnableMarkNumber")
+                    }),
+                ],
+                2,
+            ),
         ];
-        for (var, op_indexes, expected) in cases {
+        for (var, ops, expected) in cases {
             let Ok(dir) = std::env::var(var) else {
                 continue;
             };
@@ -5494,8 +6209,8 @@ value = false
                     continue;
                 };
                 let mut modified = false;
-                for &index in op_indexes {
-                    if apply_one_op(&mut dex, &doc.ops[index]).unwrap() {
+                for op in &ops {
+                    if apply_one_op(&mut dex, op).unwrap() {
                         landed += 1;
                         modified = true;
                     }
@@ -5508,23 +6223,27 @@ value = false
         }
     }
 
-    /// Land the disable-dolby-atmos `DolbySwitchPreferenceController.updateState`
+    /// Land the unlock-common `DolbySwitchPreferenceController.updateState`
     /// branch nop on the real ZuiSettings dex. Set `DYNOBOX_ZUISETTINGS_DEX_DIR`
     /// to the extracted STORED dex dir (skipped when unset).
     #[test]
-    fn bundled_disable_dolby_atmos_lands_on_real_dex() {
+    fn bundled_allow_dolby_atmos_off_lands_on_real_dex() {
         let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("disable-dolby-atmos.dbp")).unwrap();
-        assert_eq!(doc.ops.len(), 4);
-        let op = &doc.ops[1];
-        assert!(matches!(
-            op,
-            DbpOp::MethodCodePatch { class, method, .. }
-                if class == "Lcom/lenovo/settings/sound/dolby/DolbySwitchPreferenceController;"
-                    && method == "updateState"
-        ));
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(
+                    op,
+                    DbpOp::MethodCodePatch { class, method, .. }
+                        if class == "Lcom/lenovo/settings/sound/dolby/DolbySwitchPreferenceController;"
+                            && method == "updateState"
+                )
+            })
+            .expect("unlock-common Dolby updateState op");
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -5642,7 +6361,7 @@ value = false
         }
     }
 
-    /// Apply the debloat-settings PenService `resource_bool` op to a real
+    /// Apply the debloat-common PenService `resource_bool` op to a real
     /// PenService `resources.arsc` (STORED APK entry, extract it verbatim).
     /// Set `DYNOBOX_PENSERVICE_ARSC`; optionally `DYNOBOX_PENSERVICE_ARSC_OUT`
     /// to dump the patched arsc.
@@ -5651,12 +6370,12 @@ value = false
         let Ok(path) = std::env::var("DYNOBOX_PENSERVICE_ARSC") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("debloat-settings.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let op = doc
             .ops
             .iter()
             .find(|op| matches!(op, DbpOp::ResourceBool { .. }))
-            .expect("debloat-settings must carry the PenService resource_bool op");
+            .expect("debloat-common must carry the PenService resource_bool op");
         let DbpOp::ResourceBool {
             file,
             resource,
@@ -5690,16 +6409,24 @@ value = false
         }
     }
 
-    /// Apply the bundled disable-quick-kill op to the real ZuiMemCleanerConfig
+    /// Apply the unlock-common quick-kill op to the real ZuiMemCleanerConfig
     /// XML. Set `DYNOBOX_ZMC_XML` to the extracted file path.
     #[test]
     fn bundled_disable_quick_kill_lands_on_real_xml() {
         let Ok(path) = std::env::var("DYNOBOX_ZMC_XML") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("disable-quick-kill.dbp")).unwrap();
-        let DbpOp::TextReplace { from, to, all, .. } = &doc.ops[0] else {
-            panic!("disable-quick-kill op[0] must be text_replace");
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::TextReplace { file, .. }
+                    if file == "system/etc/ZuiMemCleanerConfig.xml")
+            })
+            .expect("unlock-common quick-kill op");
+        let DbpOp::TextReplace { from, to, all, .. } = op else {
+            panic!("unlock-common quick-kill op must be text_replace");
         };
         let mut bytes = std::fs::read(&path).unwrap();
         let before_len = bytes.len();
@@ -5728,7 +6455,7 @@ value = false
         let Ok(dir) = std::env::var("DYNOBOX_ZUISECURITY_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("debloat-security.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let op = doc
             .ops
             .iter()
@@ -5763,7 +6490,7 @@ value = false
         assert_eq!(landed, 1, "selection nop should land in exactly one dex");
     }
 
-    /// Every debloat-setupwizard op lands in exactly one dex of its real APK;
+    /// Every setup-wizard op lands in exactly one dex of its real APK;
     /// the LenovoID redirect covers all ten EasySync launch continuations
     /// (nine source-action loads, with one shared across two branches). Set
     /// `DYNOBOX_ZUISETUPWIZARD_APK`, `DYNOBOX_ZUISETTINGS_APK`, and/or
@@ -5771,7 +6498,34 @@ value = false
     #[test]
 
     fn debloat_setupwizard_ops_land_on_real_apk() {
-        let doc = load_dbp(&patches_dir().join("debloat-setupwizard.dbp")).unwrap();
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let setup_ops: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .chain(uc.ops.iter())
+            .filter(|op| match op {
+                DbpOp::InvokeConstBool {
+                    scan_class,
+                    scan_method,
+                    ..
+                } => {
+                    scan_class.contains("ZuiUtils")
+                        || scan_class.contains("CompleteLandActivity")
+                        || (scan_class.contains("DeviceActivationForWifiActivity")
+                            && scan_method.as_deref() == Some("startPrivacySettingsActivity"))
+                }
+                DbpOp::FieldConstBool { scan_class, .. } => {
+                    scan_class.contains("DeviceActivationForWifiActivity")
+                }
+                DbpOp::IntentActionBroadcast { .. } | DbpOp::MethodBroadcastFinish { .. } => true,
+                DbpOp::MethodCodePatch { class, .. } => {
+                    class == "Lcom/zui/setupwizard/PrivacyAndSettingActivity;"
+                }
+                _ => false,
+            })
+            .collect();
+        assert_eq!(setup_ops.len(), 10, "all ten setup-wizard ops must parse");
         let targets = [
             (
                 "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk",
@@ -5804,7 +6558,11 @@ value = false
                         && e.data_start + e.compressed_size <= apk.len()
                 })
                 .collect();
-            let ops: Vec<_> = doc.ops.iter().filter(|op| op.file() == file).collect();
+            let ops: Vec<&DbpOp> = setup_ops
+                .iter()
+                .filter(|op| op.file() == file)
+                .copied()
+                .collect();
             assert!(!ops.is_empty(), "{file} must have bundled ops");
             if file == "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk" {
                 let complete_methods: BTreeSet<_> = ops
@@ -6040,7 +6798,7 @@ value = false
         }
     }
 
-    /// Land the unlock-wifi translator country-code pin on the real
+    /// Land the unlock-common translator country-code pin on the real
     /// LeVoiceCaptionApp. Set `DYNOBOX_LEVOICECAPTION_APK`; optionally set
     /// `DYNOBOX_LEVOICECAPTION_DEX_OUT` to dump the patched dex for
     /// disassembly.
@@ -6049,12 +6807,12 @@ value = false
         let Ok(path) = std::env::var("DYNOBOX_LEVOICECAPTION_APK") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("unlock-wifi.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let op = doc
             .ops
             .iter()
             .find(|op| matches!(op, DbpOp::MethodConstString { .. }))
-            .expect("unlock-wifi must carry the translator country-code op");
+            .expect("unlock-common must carry the translator country-code op");
         let apk = std::fs::read(&path).expect("read apk");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
         let mut hits = 0usize;
@@ -6081,7 +6839,7 @@ value = false
         assert_eq!(hits, 1, "country-code pin must land in exactly one dex");
     }
 
-    /// Land the bundled change-name ops on a real vendor build.prop. Set
+    /// Land the debloat-wuji market-name ops on a real vendor build.prop. Set
     /// `DYNOBOX_VENDOR_BUILD_PROP`; optionally set
     /// `DYNOBOX_VENDOR_BUILD_PROP_OUT` to write the patched bytes.
     #[test]
@@ -6089,13 +6847,13 @@ value = false
         let Ok(path) = std::env::var("DYNOBOX_VENDOR_BUILD_PROP") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("change-name.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-wuji.dbp")).unwrap();
         let ops: Vec<&DbpOp> = doc
             .ops
             .iter()
             .filter(|op| matches!(op, DbpOp::TextReplace { .. }))
             .collect();
-        assert_eq!(ops.len(), 3, "change-name must patch every market name");
+        assert_eq!(ops.len(), 3, "debloat-wuji must patch every market name");
         let bytes = std::fs::read(&path).expect("read build.prop");
         let text = String::from_utf8_lossy(&bytes);
         let mut patched = bytes.clone();
@@ -6130,8 +6888,8 @@ value = false
         }
     }
 
-    /// Land the three new debloat-security ops (app-recommendation hide +
-    /// disable, install-scan disable) on the real apks. Set
+    /// Land the three new debloat-common security ops (app-recommendation
+    /// hide + disable, install-scan disable) on the real apks. Set
     /// `DYNOBOX_ZUISETTINGS_APK` and/or `DYNOBOX_ZUIPACKAGEINSTALLER_APK`.
     #[test]
     fn debloat_security_new_ops_land_on_real_apks() {
@@ -6153,7 +6911,7 @@ value = false
             }
             hits
         }
-        let doc = load_dbp(&patches_dir().join("debloat-security.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
 
         if let Ok(p) = std::env::var("DYNOBOX_ZUISETTINGS_APK") {
             let hide = doc
@@ -6246,7 +7004,7 @@ value = false
         }
     }
 
-    /// Land the debloat-security autorun-default ops on the real ZuiSecurity
+    /// Land the unlock-common autorun-default ops on the real ZuiSecurity
     /// APK and services.jar: the seed patch, the update-preserve nop, and the
     /// relative-start default. Set `DYNOBOX_ZUISECURITY_APK` and/or
     /// `DYNOBOX_SERVICES_JAR`.
@@ -6270,7 +7028,7 @@ value = false
             }
             hits
         }
-        let doc = load_dbp(&patches_dir().join("debloat-security.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         if let Ok(p) = std::env::var("DYNOBOX_ZUISECURITY_APK") {
             let seed = doc
                 .ops
@@ -6303,13 +7061,13 @@ value = false
         }
     }
 
-    /// Apply the enable-circle-to-search dex ops to the real apks. Set
+    /// Apply the unlock-common Circle to Search dex ops to the real apks. Set
     /// `DYNOBOX_ZUISYSTEMUI_DEX_DIR` (AssistManager op) and/or
     /// `DYNOBOX_ZUISETTINGS_DEX_DIR` (isCircleToSearchEnable op); optionally the
     /// matching `*_OUT` dirs to dump patched dexes for disassembly.
     #[test]
     fn bundled_enable_circle_to_search_lands_on_real_dex() {
-        let doc = load_dbp(&patches_dir().join("enable-circle-to-search.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let sysui_op = doc
             .ops
             .iter()
@@ -6369,11 +7127,11 @@ value = false
         }
     }
 
-    /// Apply the bundled enable-google-services ops to real firmware fixtures.
+    /// Apply the unlock-common Google-services ops to real firmware fixtures.
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR` and/or `DYNOBOX_SERVICES_DEX_DIR`.
     #[test]
     fn bundled_enable_google_services_lands_on_real_dex() {
-        let doc = load_dbp(&patches_dir().join("enable-google-services.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let settings_op = doc
             .ops
             .iter()
@@ -6440,14 +7198,20 @@ value = false
         }
     }
 
-    /// Apply the bundled debloat-launcher ops to the real ZuiLauncher dexes.
+    /// Apply the debloat-common launcher ops to the real ZuiLauncher dexes.
     /// Set `DYNOBOX_ZUILAUNCHER_DEX_DIR`.
     #[test]
     fn bundled_debloat_launcher_lands_on_real_dex() {
         let Ok(dir) = std::env::var("DYNOBOX_ZUILAUNCHER_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("debloat-launcher.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let ops: Vec<&DbpOp> = doc
+            .ops
+            .iter()
+            .filter(|op| op.file() == "system/priv-app/ZuiLauncher/ZuiLauncher.apk")
+            .collect();
+        assert_eq!(ops.len(), 8, "all eight debloat-common launcher ops");
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
         let mut regular_badge_sites = 0usize;
@@ -6457,7 +7221,7 @@ value = false
             let Ok(mut dex) = std::fs::read(dir.join(name)) else {
                 continue;
             };
-            for op in &doc.ops {
+            for op in &ops {
                 if apply_one_op(&mut dex, op).unwrap() {
                     landed += 1;
                 }
@@ -6496,7 +7260,7 @@ value = false
             )
             .unwrap();
         }
-        assert_eq!(landed, 6, "all six debloat-launcher ops should land");
+        assert_eq!(landed, 6, "all six merged launcher ops should land");
         assert_eq!(regular_badge_sites, 0, "regular PRC badge gate is patched");
         assert_eq!(
             zui_badge_sites, 1,
@@ -6508,7 +7272,7 @@ value = false
         );
     }
 
-    /// Apply the bundled debloat-theme FontActivity op to a real HomeSettings APK.
+    /// Apply the debloat-common FontActivity op to a real HomeSettings APK.
     /// Set `DYNOBOX_ZUIHOMESETTINGS_APK`.
     #[test]
     fn bundled_debloat_theme_lands_on_real_apk() {
@@ -6530,7 +7294,7 @@ value = false
             }
             hits
         }
-        let doc = load_dbp(&patches_dir().join("debloat-theme.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
 
         if let Ok(p) = std::env::var("DYNOBOX_ZUIHOMESETTINGS_APK") {
             let font = doc
@@ -6553,20 +7317,31 @@ value = false
         }
     }
 
-    /// Apply the bundled ZuiSettings ops to the real ZuiSettings dexes.
+    /// Apply the bundled ZuiSettings locale ops to the real ZuiSettings dexes.
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
     #[test]
     fn bundled_unlock_locales_lands_on_real_dex() {
         let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("unlock-locales.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let ops: Vec<&DbpOp> = doc
             .ops
             .iter()
-            .filter(|op| op.file() == "system/priv-app/ZuiSettings/ZuiSettings.apk")
+            .filter(|op| {
+                matches!(
+                    op,
+                    DbpOp::InvokeConstBool { file, scan_class, scan_method, .. }
+                        if file == "system/priv-app/ZuiSettings/ZuiSettings.apk"
+                            && (scan_class
+                                .starts_with("Lcom/android/settings/localepicker/")
+                                || scan_class
+                                    .starts_with("Lcom/android/settings/regionalpreferences/")
+                                || scan_method.as_deref() == Some("getChangedName"))
+                )
+            })
             .collect();
-        assert_eq!(ops.len(), 13);
+        assert_eq!(ops.len(), 13, "the ZuiSettings locale ops");
         let dir = std::path::Path::new(&dir);
         let mut op_hits = vec![0usize; ops.len()];
         for name in [
@@ -6588,7 +7363,7 @@ value = false
         }
         assert!(
             op_hits.iter().all(|&hits| hits == 1),
-            "every unlock-locales op must land in exactly one dex; per-op hits: {op_hits:?}"
+            "every merged locale op must land in exactly one dex; per-op hits: {op_hits:?}"
         );
     }
 
@@ -6599,7 +7374,7 @@ value = false
         let Ok(dir) = std::env::var("DYNOBOX_PENSERVICE_DEX_DIR") else {
             return;
         };
-        let doc = load_dbp(&patches_dir().join("unlock-locales.dbp")).unwrap();
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let ops: Vec<&DbpOp> = doc
             .ops
             .iter()
@@ -6829,7 +7604,15 @@ to = "6e 10 ${is_empty:u16} 00 00 0a 01"
 "#,
         );
         let doc = load_dbp(f.path()).expect("symbolic method-code patch");
-        match &doc.ops[0] {
+        let op = doc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { symbols, .. }
+                    if symbols.iter().any(|symbol| symbol.name() == "is_empty"))
+            })
+            .expect("symbolic method_code_patch op");
+        match op {
             DbpOp::MethodCodePatch {
                 symbols,
                 replacements,

@@ -5,9 +5,9 @@ edits applied to files *inside partition images* during resign.
 Pass one or more with the `--plus` resign option:
 
 ```sh
-dynobox resign  -i <in> -o <out> -k <key> --plus patches/debloat-launcher.dbp
+dynobox resign  -i <in> -o <out> -k <key> --plus patches/debloat-common.dbp
 dynobox unpack  -i <in> --resign -k <key> --plus a.dbp --plus b.dbp
-dynobox apply   -i <in> resign  -k <key> --plus patches/unlock-locales.dbp  ota.zip
+dynobox apply   -i <in> resign  -k <key> --plus patches/unlock-common.dbp  ota.zip
 ```
 
 Archive ops force a method, invocation result, or compiled resource value to a
@@ -28,7 +28,7 @@ the resign.
 ## Document format
 
 ```toml
-name = "debloat-launcher"              # required, short identifier
+name = "debloat-common"              # required, short identifier
 description = "…"                       # optional
 
 [[op]]
@@ -464,23 +464,9 @@ while still advancing the setup wizard.
 
 ## Bundled patches
 
-* **`change-name.dbp`**
-* **`debloat-bootanim.dbp`**
-* **`debloat-launcher.dbp`**
-* **`debloat-security.dbp`**
-* **`debloat-settings.dbp`**
-* **`debloat-setupwizard.dbp`**
-* **`debloat-telephony.dbp`**
-* **`debloat-theme.dbp`**
-* **`disable-dolby-atmos.dbp`**
-* **`disable-quick-kill.dbp`**
+* **`debloat-common.dbp`**
+* **`debloat-wuji.dbp`**
 * **`enable-adb-debug.dbp`**
-* **`enable-circle-to-search.dbp`**
-* **`enable-google-services.dbp`**
-* **`fix-leaudio.dbp`**
-* **`fix-storage-stats-crash.dbp`**
-* **`fix-third-party-recents.dbp`**
+* **`fix-common.dbp`**
 * **`show-google-lens.dbp`**
-* **`show-power-gesture.dbp`**
-* **`unlock-locales.dbp`**
-* **`unlock-wifi.dbp`**
+* **`unlock-common.dbp`**

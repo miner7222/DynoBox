@@ -1,5 +1,216 @@
-name = "fix-third-party-recents"
-description = "Fix Recents with third-party launchers."
+
+name = "fix-common"
+description = "Crash and behavior repairs: hidden-apps NPE, storage stats, third-party Recents, LE Audio and the ZuiMessage screens."
+
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/zui/simsettings/preference/SimAccountPreference$1;"
+scan_method = "onClick"
+target_class = "Landroid/content/pm/PackageManager;"
+target_method = "setComponentEnabledSetting"
+proto = "(Landroid/content/ComponentName;II)V"
+anchor_string = "com.lenovoconnect.aoac.pad"
+
+# Grey out sim_account2 instead of removing it: the row stays visible but
+# inactive (stock disabled look), matching a device whose second slot has
+# no usable card. Two single-instruction swaps in onBindViewHolder, each
+# unique in the method (verified by disassembly):
+# 1. xor-int v0,v3 (airplane-derived enable) -> const/4 v0,#0, so the row
+#    view is always setEnabled(false) and never fires onClick.
+# 2. if-eqz v8,:cond (preference-enabled color branch) -> goto, so the
+#    sim2 texts always take the title_color_disable path.
+# (A GONE variant was validated and then dropped per review; isHasSim2
+# forcing alone only hides the number/state texts, not the row.)
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/zui/simsettings/preference/SimAccountPreference;"
+method = "onBindViewHolder"
+proto = "(Landroidx/preference/PreferenceViewHolder;)V"
+
+[[op.replacement]]
+from = "b7 30"
+to = "12 00"
+expected = 1
+
+[[op.replacement]]
+from = "38 08 3c 00"
+to = "28 3c 00 00"
+expected = 1
+
+# preferences_per_subscription.xml declares the per-subscription "Advanced" rows
+# as zui.appcompat.preference.SwitchPreference, but the fragment assigns
+# findPreference() results to zui.appcompat.preference.Preference locals, so the
+# compiler emits a checkcast to that class. ZUI's SwitchPreference extends
+# android.support.v14.preference.SwitchPreference, a sibling of ZUI's Preference
+# (both descend from android.support.v7.preference.Preference directly), so the
+# checkcast throws ClassCastException and the Messaging per-subscription screen
+# can never open. Both sites only pass the value on to
+# PreferenceCategory.removePreference(android.support.v7.preference.Preference),
+# so retarget the two `check-cast v2` instructions to that shared v7 Preference:
+# the verifier accepts the argument and the removals behave exactly as before.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.symbol]]
+kind = "type"
+name = "zui_preference"
+descriptor = "Lzui/appcompat/preference/Preference;"
+
+[[op.symbol]]
+kind = "type"
+name = "support_preference"
+descriptor = "Landroid/support/v7/preference/Preference;"
+
+[[op.replacement]]
+from = "1f 02 ${zui_preference:u16}"
+to = "1f 02 ${support_preference:u16}"
+expected = 2
+
+# A few statements later the screen disables the auto-retrieve and delivery-report
+# rows whenever the Messaging app is not the default SMS app. The delivery-report
+# row was already removed above when MmsConfig reports MMS delivery reports as
+# unsupported, so that second findPreference returns null and its setEnabled(false)
+# throws NullPointerException. Nop just that one call site: the row is absent from
+# the screen either way, and the auto-retrieve disable above it is untouched.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.symbol]]
+kind = "method"
+name = "get_string"
+class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+method = "getString"
+proto = "(I)Ljava/lang/String;"
+
+[[op.symbol]]
+kind = "method"
+name = "find_preference"
+class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+method = "findPreference"
+proto = "(Ljava/lang/CharSequence;)Landroid/support/v7/preference/Preference;"
+
+[[op.symbol]]
+kind = "type"
+name = "switch_preference"
+descriptor = "Lzui/appcompat/preference/SwitchPreference;"
+
+[[op.symbol]]
+kind = "method"
+name = "set_enabled"
+class = "Lzui/appcompat/preference/SwitchPreference;"
+method = "setEnabled"
+proto = "(Z)V"
+
+[[op.replacement]]
+from = "6e 20 ${get_string:u16} 37 00 0c 08 6e 20 ${find_preference:u16} 87 00 0c 08 1f 08 ${switch_preference:u16} 6e 20 ${set_enabled:u16} 48 00"
+to = "6e 20 ${get_string:u16} 37 00 0c 08 6e 20 ${find_preference:u16} 87 00 0c 08 1f 08 ${switch_preference:u16} 00 00 00 00 00 00"
+expected = 1
+
+# preferences_per_subscription.xml also declares the "Wireless alerts" row, and
+# this screen removes it unconditionally right after the retargeted casts above
+# (the only place wireless_alerts_key is used). Nop that anchored removePreference
+# so the row stays on screen; its click wiring is dead code in this build, so it
+# is presentational only.
+
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+scan_class = "Lcom/android/messaging/ui/appsettings/PerSubscriptionSettingsActivity$PerSubscriptionSettingsFragment;"
+scan_method = "onCreate"
+target_class = "Lzui/appcompat/preference/PreferenceCategory;"
+target_method = "removePreference"
+proto = "(Landroid/support/v7/preference/Preference;)Z"
+anchor_int = 2131886882
+
+# ActiveServices.stopServiceLocked(IApplicationThread, ...) intentionally passes
+# a null calling package (the caller is identified by thread, not by name), and
+# stock retrieveServiceLocked then calls
+# getApplicationInfoAsUser(callingPackage, ...) inside a
+# try/catch (NameNotFoundException). With the ZuiHiddenApps hook installed,
+# ComputerEngine.isAppHidden() forwards that null straight into
+# ZuiHiddenAppsManager.isPackageMainProcessRunning(), whose server side runs
+# str.equals(entry.getValue()) over the pid->package map. That NPE is caught by
+# the client helper and logged as "isPackageMainProcessRunning failed." with a
+# full stack (about 35 lines) on every app-initiated stopService. The message is
+# harmless, but it is the largest E-tag spam source in a boot log.
+#
+# Rewire the lambda's equals to java.util.Objects.equals (already in this dex's
+# pool): identical results for a non-null package name, false instead of a
+# throw for null. The invoke's move-result consumer is part of the replacement
+# because the primitive refuses to overwrite a consumed invoke otherwise; the
+# final body is then re-checked so every move-result still follows a
+# result-producing instruction. Pool indexes move between builds, so both
+# method references are resolved by symbol; only the register shape ({v1, v0})
+# and the trailing move-result v1 are pinned.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/zui/server/pm/ZuiHiddenAppsService;"
+method = "$r8$lambda$uoQ3J380nW_sr1I4_wL-x4q-pDY"
+proto = "(Ljava/lang/String;ILjava/util/Map$Entry;)Z"
+
+[[op.symbol]]
+name = "object_equals"
+kind = "method"
+class = "Ljava/lang/Object;"
+method = "equals"
+proto = "(Ljava/lang/Object;)Z"
+
+[[op.symbol]]
+name = "objects_equals"
+kind = "method"
+class = "Ljava/util/Objects;"
+method = "equals"
+proto = "(Ljava/lang/Object;Ljava/lang/Object;)Z"
+
+[[op.replacement]]
+from = "6e 20 ${object_equals:u16} 01 00 0a 01"
+to = "71 20 ${objects_equals:u16} 01 00 0a 01"
+expected = 1
+
+[[op]]
+kind = "text_replace"
+partition = "system_ext"
+file = "etc/build.prop"
+from = "ro.bluetooth.leaudio.le_audio_connection_by_default=false\n"
+to = "ro.bluetooth.leaudio.le_audio_connection_by_default=true\n\n"
+
+# Settings' app-list loader calls StorageStatsManager.queryStatsForPackage per
+# app; system_server answers from StorageStatsService.queryStatsForUid, which
+# guards only getCodePath() (== the scanSourceDir field) but then passes
+# appInfo.sourceDir UNCHECKED into computeAppStatsByDataTypes -> new File().
+# Any installed package record with a null/empty sourceDir (stale or
+# mid-update install state) NPEs system_server and kills Settings.
+# Neutralizing the breakdown computation keeps the list working: apk/lib/dm
+# and dexopt/profile sizes stay 0, while code/data/cache from installd (what
+# the list sorts and shows) are unaffected. method_nop preserves
+# tries_size/handler bytes; verified by disassembly of services.jar.
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/usage/StorageStatsService;"
+method = "computeAppStatsByDataTypes"
+proto = "(Landroid/content/pm/PackageStats;Ljava/lang/String;Ljava/lang/String;)V"
 
 [[op]]
 kind = "method_code_patch"

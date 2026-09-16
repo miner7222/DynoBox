@@ -1,0 +1,421 @@
+
+name = "unlock-common"
+description = "Unlock PRC-gated behavior and locked rows: locales/region UI, Wi-Fi region, Circle to Search, Google services, battery health, account entry, autorun and relative starts, CCS, Dolby switch and ZMC quick kill."
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/lenovo/performance/autorun/utils/AutoRunDataUtils;"
+method = "appInfoConvertToAutoRunItem"
+proto = "(Lcom/lenovo/performance/autorun/beans/AppInfo;)Lcom/lenovo/performance/autorun/AutoRunItem;"
+
+[[op.replacement]]
+from = "12 02"
+to = "12 12"
+expected = 1
+
+# processAdd() calls updateEntryIntoDb() for packages that already have a row;
+# drop that call so updating an app keeps its stored autorun on/off state.
+
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+scan_class = "Lcom/lenovo/performance/autorun/services/AutoRunPkgReceiver;"
+scan_method = "processAdd"
+target_class = "Lcom/lenovo/performance/autorun/AutoRunDataLayerManager;"
+target_method = "updateEntryIntoDb"
+proto = "(Lcom/lenovo/performance/autorun/AutoRunItem;)V"
+anchor_string = "InstallApp "
+
+# getRelativeAppStatus() returns 0 for pairs the user never chose, which
+# isAllowStart treats as "blocked unless the caller is top"; seed the default
+# with 1 so unlisted pairs are allowed. An explicit block (2) still wins.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/ZuiSecurityService$ZuiSecurityServiceBinder;"
+method = "getRelativeAppStatus"
+proto = "(Ljava/lang/String;Ljava/lang/String;)I"
+
+[[op.replacement]]
+from = "12 00"
+to = "12 10"
+expected = 1
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/battery/ZuiChargingOptimization;"
+method = "isSupportBatteryHealthAndCycles"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/android/settings/accounts/TopLevelAccountEntryPreferenceController;"
+method = "getAvailabilityStatus"
+value = 0
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+scan_class = "Lcom/zui/setupwizard/CompleteLandActivity;"
+scan_method = "onCreate"
+target_class = "Lcom/zui/setupwizard/common/AppHelper;"
+target_method = "isSupportCCS"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+scan_class = "Lcom/zui/setupwizard/CompleteLandActivity;"
+scan_method = "onEnterEnd"
+target_class = "Lcom/zui/setupwizard/common/AppHelper;"
+target_method = "isSupportCCS"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleListEditor;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/PenService/PenService.apk"
+scan_class = "Lcom/lenovo/pen/bt/ui/freewrite/language/LanguageActivity;"
+scan_method = "updateUiByMode"
+target_class = "Lcom/lenovo/pen/cap/util/SystemProps;"
+target_method = "isPRC"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleListEditor;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleListEditor$7;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleDragAndDropAdapter;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleDragAndDropAdapter;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleDragCell;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/localepicker/LocaleDragCell;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+scan_method = "getChangedName"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionalPreferencesCategoryController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionalPreferencesController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/RegionPickerFragment$1;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/TemperatureUnitFragment$2;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/regionalpreferences/MeasurementSystemItemFragment$2;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/build.prop"
+from = "ro.config.zui.education=true\n"
+to = "ro.product.countrycode=US\n##\n"
+
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/bin/init"
+from = "ro.product.countrycode"
+to = "ro.product.countrycodE"
+
+[[op]]
+kind = "method_const_string"
+partition = "system"
+file = "system/priv-app/LeVoiceCaptionApp/LeVoiceCaptionApp.apk"
+class = "Lcom/zui/translator/utils/MicrosoftApiKey;"
+method = "getCountryCode"
+proto = "()Ljava/lang/String;"
+value = "CN"
+
+# BaseDolbyController.isDolbySwitchEnable() returns isHeadsetConnected() on
+# this build (zui_config_support_dolby_switch_toggle=false), greying out the
+# "dolby_switch" toggle whenever no headset is attached. Forcing true enables
+# the switch on speaker; tapping it off writes dlb_dap_state=0 like the
+# headset path already does. handlePreferenceTreeClick writes the same two
+# settings on both branches, so only the enabled-state changes.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/sound/dolby/BaseDolbyController;"
+method = "isDolbySwitchEnable"
+value = true
+
+# The stale "cannot be turned off on speaker" summary is the preference XML
+# default; updateState only clears it (setSummary(null)) when
+# isDolbyEnabledNoHeadphones() is true. That predicate is a trivial R8-shared
+# body so method_const_bool is refused by the shared-code-item guard — nop
+# the branch instead (if-eqz v1 -> fall through) so the clear always runs.
+# No pool references in the pattern, no code moves, and the checked-state
+# logic below is untouched.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/sound/dolby/DolbySwitchPreferenceController;"
+method = "updateState"
+proto = "(Landroidx/preference/Preference;)V"
+
+[[op.replacement]]
+from = "0a 01 38 01 06 00"
+to = "0a 01 00 00 00 00"
+expected = 1
+
+# AudioService.setWiredDeviceConnectionState forces dlb_dap_state=1 on wired
+# disconnect, silently re-enabling Dolby after the user turned it off. The
+# user's choice is already preserved in recordDolbySwitchStatusWidthHeadSet
+# (the toggle writes both settings on every tap, and the connect path
+# restores from it), so the disconnect write carries no information — nop it
+# instead of forcing a value either way. Nopping keeps ON-users ON and
+# OFF-users OFF; the putInt result is discarded at this site.
+# Pool indexes move between builds, so the putInt reference is resolved by
+# symbol; only the register shape ({v5,v7,v6}) is pinned.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/audio/AudioService;"
+method = "setWiredDeviceConnectionState"
+proto = "(Landroid/media/AudioDeviceAttributes;ILjava/lang/String;)V"
+
+[[op.symbol]]
+name = "put_int"
+kind = "method"
+class = "Landroid/provider/Settings$Global;"
+method = "putInt"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)Z"
+
+[[op.replacement]]
+from = "0c 05 71 30 ${put_int:u16} 75 06"
+to = "0c 05 00 00 00 00 00 00"
+expected = 1
+
+# Same forced-ON on Bluetooth disconnect (AudioHandler BT-device-changed
+# handler writes dlb_dap_state=1 when mNewDevice==null). Nop that putInt too;
+# the BT-connect restore from recordDolbySwitchStatusWidthHeadSet stays, so
+# per-device choice keeps working in both directions.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/audio/AudioService$AudioHandler;"
+method = "handleMessage"
+proto = "(Landroid/os/Message;)V"
+
+[[op.symbol]]
+name = "dlb_dap_state"
+kind = "string"
+value = "dlb_dap_state"
+
+[[op.symbol]]
+name = "put_int"
+kind = "method"
+class = "Landroid/provider/Settings$Global;"
+method = "putInt"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)Z"
+
+[[op.replacement]]
+from = "1a 00 ${dlb_dap_state:u16} 71 30 ${put_int:u16} 0d 01"
+to = "1a 00 ${dlb_dap_state:u16} 00 00 00 00 00 00"
+expected = 1
+
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/etc/ZuiMemCleanerConfig.xml"
+from = 'use_quick_kill" Value="true" />'
+to = 'use_quick_kill" Value="false"/>'
+all = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/assist/AssistManager;"
+target_class = "Lcom/android/systemui/util/XSystemUtil;"
+target_method = "isDeviceRow"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+scan_method = "isCircleToSearchEnable"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "text_replace"
+partition = "product"
+file = "etc/sysconfig/google.xml"
+from = "    <!-- TODO: This is a temporary workaround for allowing GmsCore to receive this broadcast.\n         This can be removed once OneTimeInitializer functionality is moved to GmsCore. -->\n"
+to = "    <feature name=\"com.google.android.feature.CONTEXTUAL_SEARCH\" />\n    <feature name=\"com.google.android.feature.GEMINI_EXPERIENCE\" />\n    <!--                                      -->\n"
+
+[[op]]
+kind = "text_replace"
+partition = "product"
+file = "etc/sysconfig/google.xml"
+from = "    <!-- These are the standard packages that are white-listed to always have internet\n         access while in power save mode, even if they aren't in the foreground. -->\n"
+to = "    <feature name=\"com.google.android.feature.CONTEXTUAL_SEARCH_LIVE_TRANSLATE\" />\n    <!--                                                                             -->\n"
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/applications/GoogleServicesPreferenceController;"
+method = "getAvailabilityStatus"
+value = 0
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/framework/services.jar"
+scan_class = "Lcom/android/server/pm/PackageManagerService;"
+scan_method = "disableGmsApps"
+target_class = "Lcom/android/server/pm/PackageManagerService;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/gestures/PowerMenuPreferenceController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/voiceinteraction/VoiceInteractionManagerService$VoiceInteractionManagerServiceStub;"
+method = "switchImplementationIfNeededNoTracingLocked"
+proto = "(Z)V"
+
+[[op.symbol]]
+name = "voice_interaction_service"
+kind = "string"
+value = "voice_interaction_service"
+
+[[op.symbol]]
+name = "assistant"
+kind = "string"
+value = "assistant"
+
+[[op.replacement]]
+from = "1a 01 ${voice_interaction_service:u16}"
+to = "1a 01 ${assistant:u16}"
+expected = 1

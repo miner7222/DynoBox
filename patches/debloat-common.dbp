@@ -1,0 +1,705 @@
+
+name = "debloat-common"
+description = "Remove the PRC bloat surfaces across launcher, security, settings, setup wizard, telephony, home-settings fonts and the Game Assistant chat entries."
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/android/launcher3/Utilities;"
+method = "isZuiRow"
+value = true
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/android/launcher3/icons/GraphicsUtils;"
+method = "isZuiRow"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/android/launcher3/icons/BaseIconFactory;"
+scan_method = "createBadgedIconBitmap"
+target_class = "Lcom/android/launcher3/icons/GraphicsUtils;"
+target_method = "isZuiRow"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/android/launcher3/icons/BaseIconFactory;"
+scan_method = "createBadgedIconBitmapZui"
+target_class = "Lcom/android/launcher3/icons/GraphicsUtils;"
+target_method = "isZuiRow"
+site_index = 1
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/android/launcher3/icons/BitmapInfo;"
+scan_method = "a"
+target_class = "Lcom/android/launcher3/icons/GraphicsUtils;"
+target_method = "isZuiRow"
+value = false
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/android/launcher3/config/FeatureFlags;"
+method = "isIsShowPrcGlobalSearch"
+value = false
+
+# UE provider writes: with the User Experience app debloated, every
+# ContentResolver.insert to content://com.lenovo.ue.device.provider/*
+# throws IllegalArgumentException (caught, but spams logcat on a worker
+# thread on every upload). Both DataUtils copies (launcher + weather
+# widget) funnel all SendTypes through their b() into that insert and
+# already treat false as "not delivered", so forcing b() false keeps
+# caller behavior identical minus the exception. Insert-only; no
+# query/update/delete paths reference the provider.
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/util/DataUtils;"
+method = "b"
+proto = "(Lcom/zui/launcher/util/DataUtils$SendType;Landroid/content/ContentValues;)Z"
+value = false
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/timelaweather/util/DataUtils;"
+method = "b"
+proto = "(Lcom/zui/timelaweather/util/DataUtils$SendType;Landroid/content/ContentValues;)Z"
+value = false
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/lenovo/safecenter/antivirus/external/AntiVirusInterface;"
+method = "initTMSApplication"
+proto = "(Landroid/content/Context;Z)V"
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/lenovo/safecenter/antivirus/external/AntiVirusInterface;"
+method = "startAutoScanBroadcastReceiver"
+proto = "(Landroid/content/Context;)V"
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/lenovo/safecenter/antivirus/external/AntiVirusInterface;"
+method = "startUpdateTMSVirusDbReceiver"
+proto = "(Landroid/content/Context;)V"
+
+[[op]]
+kind = "nop_invoke"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+scan_class = "Lcom/zui/safecenter/ui/PhoneMainViewModel;"
+scan_method = "<init>"
+target_class = "Ljava/util/List;"
+target_method = "add"
+proto = "(Ljava/lang/Object;)Z"
+anchor_int = 0x7f12003a
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/emergency/KillVirusPreferenceController;"
+method = "getAvailabilityStatus"
+value = 3
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/emergency/AppInstallationGuardPreferenceController;"
+method = "getAvailabilityStatus"
+value = 3
+
+[[op]]
+kind = "invoke_const_int"
+partition = "system"
+file = "system/priv-app/ZuiPackageInstaller/ZuiPackageInstaller.apk"
+scan_class = "Lcom/android/packageinstaller/PackageInstallerActivityExtra;"
+target_class = "Landroid/provider/Settings$Global;"
+target_method = "getInt"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)I"
+value = 0
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/android/settings/applications/appinfo/AppPermissionPreferenceController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "force_view_gone"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+scan_class = "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+scan_method = "initView"
+view_ids = [0x7f0903f1, 0x7f090406]
+scratch_reg = 1
+
+# Same rows on current builds (permission 0x7f0903fe still field-backed and
+# anchors; virus 0x7f090413).
+
+[[op]]
+kind = "force_view_gone"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+scan_class = "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+scan_method = "initView"
+view_ids = [0x7f0903fe, 0x7f090413]
+scratch_reg = 1
+
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/build.prop"
+from = "ro.zui.software.safeurl=true"
+to = "ro.zui.software.safeurL=true"
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/emergency/ZuiEmergencyDashboardFragment;"
+scan_method = "onCreate"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiPackageInstaller/ZuiPackageInstaller.apk"
+class = "Lcom/android/packageinstaller/InstallInstallingExtra;"
+method = "getRecommendApp"
+proto = "()V"
+
+# Smart Optimization virus card (layout_root_virus) is visible by XML
+# default with no code gate, and hiding it needs new code that does not fit
+# size-preserving dex ops — collapse it in the layout binaries instead
+# (height/weight + margins to zero in every variant that carries it).
+
+[[op]]
+kind = "layout_collapse"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+node_id = 0x7f090404
+expected = 6
+
+# Hiding rows leaves the neighboring card boundaries square (the rounded
+# top/bottom closures belonged to the hidden rows). Restore them by swapping
+# the boundary rows' backgrounds to the rounded variants.
+
+[[op]]
+kind = "layout_background"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+node_id = 0x7f090401
+drawable = 0x7f0804ab
+expected = 2
+
+[[op]]
+kind = "layout_background"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+node_id = 0x7f0903fa
+drawable = 0x7f0804ac
+expected = 2
+
+# Fallback for the collapse above: if a build's layout does not match the
+# collapse op (it is all-or-nothing and skips as a whole), the virus card
+# would still be visible and tappable. Nop its setOnClickListener invoke
+# (the iget stays, harmless) so the card then renders but does nothing when
+# tapped. The setEnabled calls elsewhere keep working.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/zui/safecenter/ui/SmartOptimizationActivity;"
+method = "initView"
+proto = "()V"
+
+[[op.replacement]]
+from = "54 60 23 87 6e 20 a3 05 60 00"
+to = "54 60 23 87 00 00 00 00 00 00"
+expected = 1
+
+# Clicking any home card used to mark it "selected" (onClick ->
+# setSelectedView) so its bg_home_card background stayed highlighted until
+# another card was pressed. Cards whose action is inert (Anti-spam / Find My
+# Tablet without their target apps) never open a pane, so the highlight just
+# stuck. The split listener still re-selects the card whose pane actually
+# opened, so drop only the click-time selection; the pressed-state ripple is
+# untouched and now clears on release like a normal tap.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+method = "onClick"
+proto = "(Landroid/view/View;)V"
+
+[[op.symbol]]
+name = "set_selected_view"
+kind = "method"
+class = "Lcom/zui/safecenter/ui/MainNavigationActivity;"
+method = "setSelectedView"
+proto = "(I)V"
+
+[[op.replacement]]
+from = "70 20 ${set_selected_view:u16} 02 00"
+to = "00 00 00 00 00 00"
+expected = 1
+
+# ============================ AUTORUN DEFAULTS ============================
+# Keep the Autostart Manager entry points, but flip its defaults to "allowed
+# unless chosen otherwise". New installs are seeded enabled (the framework
+# reads that state through ZuiSecurityService.getAutorunAppStatus -> 1, which
+# isAllowStart allows), while an app update no longer rewrites the stored
+# state and relative (app-to-app) starts default to allowed.
+
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/homepage/controller/TopLevelLenovoAccountPreferenceController;"
+method = "getAvailabilityStatus"
+value = 3
+
+[[op]]
+kind = "preference_controller_hide"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;"
+preference_key = "user_experience"
+preference_field = "mUserExperience"
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+method = "isSuggestionComplete"
+proto = "(Landroid/content/Context;)Z"
+value = true
+
+# Battery health / charge-cycle rows only appear in the Charging optimization
+# screen when !isInception() && isRowVersion(); force the gate open.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/suggestion/UserExperienceSuggestionActivity;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.symbol]]
+name = "show_dialog"
+kind = "method"
+class = "Lcom/lenovo/common/utils/LenovoUtils;"
+method = "showJoinUserExperienceDialog"
+proto = "(Landroid/content/Context;Ljava/lang/Runnable;Ljava/lang/Runnable;Ljava/lang/Runnable;Z)V"
+
+[[op.symbol]]
+name = "finish"
+kind = "method"
+class = "Landroid/app/Activity;"
+method = "finish"
+proto = "()V"
+
+[[op.replacement]]
+from = "71 54 ${show_dialog:u16} 03 21"
+to = "6e 10 ${finish:u16} 03 00"
+
+[[op]]
+kind = "method_code_redirect"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;"
+method = "getAvailabilityStatus"
+proto = "()I"
+donor_class = "Lcom/lenovo/settings/widget/UnsupportedPreferenceController;"
+donor_method = "getAvailabilityStatus"
+donor_proto = "()I"
+
+[[op]]
+kind = "method_code_redirect"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/privacy/UserExperienceSwitchController;"
+method = "getAvailabilityStatus"
+proto = "()I"
+donor_class = "Lcom/google/android/material/sidesheet/SideSheetDialog;"
+donor_method = "getStateOnStart"
+donor_proto = "()I"
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/deviceinfo/controller/LenovoServicePreferenceController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isPrcVersion"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/deviceinfo/controller/LenovoServicePreferenceController;"
+target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
+target_method = "isRowVersion"
+value = true
+
+# Hide the Network acceleration entry (NetworkAccelerate app is debloated).
+# getAvailabilityStatus() is a trivial `const/4; return` body shared by R8
+# with other methods, so method_const_int is refused by the shared-code-item
+# guard; redirect code_off to UnsupportedPreferenceController instead
+# (same classes6.dex, returns 3 = unsupported/hidden).
+
+[[op]]
+kind = "method_code_redirect"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/sim/NetworkAccelerationController;"
+method = "getAvailabilityStatus"
+proto = "()I"
+donor_class = "Lcom/lenovo/settings/widget/UnsupportedPreferenceController;"
+donor_method = "getAvailabilityStatus"
+donor_proto = "()I"
+
+# Hide the pen-settings footer that advertises "Pen apps zone" (a Lenovo App
+# Store page). All eight pen settings layouts gate that footer on
+# @bool/is_prc and nothing else in this build reads the flag, so flipping it
+# removes the row without touching any other surface.
+
+[[op]]
+kind = "resource_bool"
+partition = "system"
+file = "system/priv-app/PenService/PenService.apk"
+resource = "is_prc"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+scan_class = "Lcom/zui/setupwizard/ZuiUtils;"
+scan_method = "getCloudActivityAction"
+target_class = "Lcom/zui/setupwizard/utils/ConnectivityUtil;"
+target_method = "isOnline"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+scan_class = "Lcom/zui/setupwizard/ZuiUtils;"
+scan_method = "getCloudActivityAction"
+target_class = "Lcom/tblenovo/setup/utils/SharedPreHelper;"
+target_method = "isCloudRestoreCompleted"
+proto = "(Landroid/content/Context;)Z"
+value = true
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+class = "Lcom/zui/setupwizard/PrivacyAndSettingActivity;"
+method = "initView"
+proto = "()V"
+
+[[op.symbol]]
+name = "user_experience_row"
+kind = "field"
+class = "Lcom/zui/setupwizard/PrivacyAndSettingActivity;"
+field = "mUserExperience"
+ty = "Landroid/widget/RelativeLayout;"
+
+[[op.symbol]]
+name = "row_click"
+kind = "method"
+class = "Landroid/widget/RelativeLayout;"
+method = "setOnClickListener"
+proto = "(Landroid/view/View$OnClickListener;)V"
+
+[[op.symbol]]
+name = "set_visibility"
+kind = "method"
+class = "Landroid/view/View;"
+method = "setVisibility"
+proto = "(I)V"
+
+[[op.replacement]]
+from = "54 53 ${user_experience_row:u16} 38 03 05 00 6e 20 ${row_click:u16} 53 00"
+to = "54 53 ${user_experience_row:u16} 13 04 08 00 6e 20 ${set_visibility:u16} 43 00"
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+class = "Lcom/zui/setupwizard/PrivacyAndSettingActivity;"
+method = "initView"
+proto = "()V"
+
+[[op.symbol]]
+name = "user_experience_row"
+kind = "field"
+class = "Lcom/zui/setupwizard/PrivacyAndSettingActivity;"
+field = "mUserExperience"
+ty = "Landroid/widget/RelativeLayout;"
+
+[[op.symbol]]
+name = "row_click"
+kind = "method"
+class = "Landroid/widget/RelativeLayout;"
+method = "setOnClickListener"
+proto = "(Landroid/view/View$OnClickListener;)V"
+
+[[op.symbol]]
+name = "set_visibility"
+kind = "method"
+class = "Landroid/view/View;"
+method = "setVisibility"
+proto = "(I)V"
+
+[[op.replacement]]
+from = "54 50 ${user_experience_row:u16} 38 00 05 00 6e 20 ${row_click:u16} 50 00"
+to = "54 50 ${user_experience_row:u16} 13 04 08 00 6e 20 ${set_visibility:u16} 40 00"
+
+[[op]]
+kind = "field_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+scan_method = "startPrivacySettingsActivity"
+target_class = "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+target_field = "isNetworkAvail"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+scan_class = "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+scan_method = "startPrivacySettingsActivity"
+target_class = "Lcom/lenovo/settings/wifi/DeviceActivationForWifiActivity;"
+target_method = "isPrcCommercial"
+value = false
+
+[[op]]
+kind = "intent_action_broadcast"
+partition = "system"
+file = "system/priv-app/LenovoID/LenovoID.apk"
+from_action = "com.zui.cloudservice.intent.action.GUIDE_DATA_RESTORE_FROM_PRIVACY"
+to_action = "com.zui.setupwizard.action.CLOUD_SKIP"
+
+[[op]]
+kind = "method_broadcast_finish"
+partition = "system"
+file = "system/priv-app/LenovoID/LenovoID.apk"
+class = "Lcom/lenovo/lsf/lenovoid/ui/PsLoginWizardActivity;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+super_class = "Lcom/lenovo/lsf/lenovoid/ui/BaseWizardActivity;"
+action = "com.zui.setupwizard.action.CLOUD_SKIP"
+
+# ZuiTelecom binds com.ted.number.service on calls (plus rebind attempts);
+# without the service every query fails gracefully (null-checked onFail
+# paths), so nopping the single bind site stops all traffic.
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
+class = "Lcom/ted/number/TedServiceHelper;"
+method = "bindService"
+proto = "()V"
+
+# Master gate of the incoming-call filter pipeline (reads xui_harass_on).
+# Forcing false keeps the filter fail-open without touching normal calls.
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiTelecom/ZuiTelecom.apk"
+class = "Lcom/android/server/telecom/zui/NewAntiSpamCallFilter;"
+method = "isAntiSpamEnabled"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+# Same bind kill for the dialer's bundled helper copy (obfuscated s5/a;
+# f() holds the single bindService call site, callers null-check results).
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Ls5/a;"
+method = "f"
+proto = "()V"
+
+# The "Smart unknown number identification" toggle removes itself via
+# removePreference when this gate is false; forcing false hides it.
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Lm2/h;"
+method = "a"
+proto = "()Z"
+value = false
+
+# Same bind kill for the contacts helper copy (obfuscated d1/a).
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiContacts/ZuiContacts.apk"
+class = "Ld1/a;"
+method = "f"
+proto = "()V"
+
+# Message embeds the same ted client (in classes2.dex) and binds the service
+# for sender number recognition; nop its single bind site too. The client is
+# already built to run with an unbound service (ensurePkgInstalled short
+# circuit + null mPageService checks), so queries just go unanswered.
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/ted/number/TedServiceHelper;"
+method = "bindService"
+proto = "()V"
+
+# Call Settings keeps its own "Mark unknown number" switch (pref_mark_number),
+# shown unconditionally by both the regular and compat fragments. Its checked
+# state reads OperatorFunctionUtil.isEnableMarkNumber (setting
+# call_setting_mark_number); pin that read to false and nop the companion
+# setEnableMarkNumber write so the dead switch can never be turned on.
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk"
+class = "Lcom/zui/callsettings/OperatorFunctionUtil;"
+method = "isEnableMarkNumber"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk"
+class = "Lcom/zui/callsettings/OperatorFunctionUtil;"
+method = "setEnableMarkNumber"
+proto = "(Landroid/content/Context;Z)V"
+
+# InCallFragment.updateAiButtonVisibility hides the whole ai_button_container
+# (both AI Meeting and Live Translate pills) unless InCallPresenter.isSupportAI()
+# is true. That predicate has exactly one caller and only gates this container,
+# so forcing it false removes both features at the source with no other
+# behavior change. The startAiMeeting/startLiveTranslate entry points are
+# reachable only through these buttons, and the manifest declares no AI call
+# receivers or services.
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Lcom/android/incallui/InCallPresenter;"
+method = "isSupportAI"
+proto = "()Z"
+value = false
+
+# ZuiCentralSurfacesImpl.start() enables/disables the
+# com.lenovoconnect.aoac.pad UniAppActivity component through
+# PackageManager.setComponentEnabledSetting, which throws
+# IllegalArgumentException (killing SystemUI/Keyguard) when the app was
+# debloated. That block is already gated on XSystemUtil.isDevicePrc(), so
+# forcing the gate false inside start() takes the existing early-out and
+# the missing component is never touched. isDevicePrc() is called exactly
+# once in this class, so the method-scoped force changes nothing else.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/statusbar/phone/ZuiCentralSurfacesImpl;"
+scan_method = "start"
+target_class = "Lcom/android/systemui/util/XSystemUtil;"
+target_method = "isDevicePrc"
+value = false
+
+# Same crash in Settings: tapping sim_account2 calls setComponentEnabledSetting
+# on com.lenovoconnect.aoac.pad OUTSIDE the try/catch (only startActivity is
+# guarded), so a missing app kills Settings. Nop that one call, anchored on
+# the package string; the tap then falls through to the stock
+# "application_not_install" toast. The sim_account1 path in the same onClick
+# is a different invoke and is untouched. Only lenovoconnect reference in
+# all of ZuiSettings (smali, res, manifest surveyed).
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiHomeSettings/ZuiHomeSettings.apk"
+scan_class = "Lcom/zui/font/activity/FontActivity;"
+target_class = "Lcom/zui/font/util/Utilities;"
+target_method = "isBusinessProject"
+proto = "(Landroid/content/Context;)Z"
+value = true
+
+# Every Game Helper tool tile is gated by
+# KeyContainer.isFeatureOpened(romFeatures), i.e. RomFeatures.isFeatureOpen(getKEY()).
+# Making these two companion getters return a string that is in no feature key
+# list keeps the WeChat/QQ tiles out of the assistant grid, the floating panel
+# and the floating notices, while the item instances keep their real
+# "key_we_chat"/"key_qq" state keys.
+[[op]]
+kind = "method_const_string"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/sys/item/ItemWeChat$Companion;"
+method = "getKEY"
+proto = "()Ljava/lang/String;"
+value = "WeChat"
+
+[[op]]
+kind = "method_const_string"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/sys/item/ItemQQ$Companion;"
+method = "getKEY"
+proto = "()Ljava/lang/String;"
+value = "QQ"

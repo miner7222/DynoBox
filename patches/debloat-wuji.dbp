@@ -1,5 +1,6 @@
-name = "debloat-bootanim"
-description = "Blank part1 frames 010-031 of the system boot animation with a 1x1 transparent PNG (size-preserving)."
+
+name = "debloat-wuji"
+description = "Wuji (TB324) only: blank the boot animation part1 frames and rename the market name to Legion Tab Y700 5G."
 
 # `desc.txt` can only replay whole parts, so middle frames cannot be skipped
 # there. Each listed STORED entry is overwritten with a 1x1 transparent PNG
@@ -33,3 +34,24 @@ entries = [
   "part1/1600X2560 Wuji with Tianxi Logo_031.png",
 ]
 payload = "89 50 4E 47 0D 0A 1A 0A 00 00 00 0D 49 48 44 52 00 00 00 01 00 00 00 01 08 06 00 00 00 1F 15 C4 89 00 00 00 0C 49 44 41 54 78 9C 63 60 60 60 00 00 00 04 00 01 F6 17 38 55 00 00 00 00 49 45 4E 44 AE 42 60 82"
+
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "build.prop"
+from = "联想AI平板 拯救者Y700无极"
+to = "Legion Tab Y700 5G                "
+
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "build.prop"
+from = "联想平板 拯救者Y700无极"
+to = "Legion Tab Y700 5G              "
+
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "build.prop"
+from = "LenovoTab LEGION Y700 Wuji"
+to = "Legion Tab Y700 5G        "
