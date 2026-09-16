@@ -588,3 +588,45 @@ proto = "(Landroid/content/Context;)Ljava/util/List;"
 from = "72 20 a5 04 57 00 0c 08 6e 20 86 f6 80 00 0a 08"
 to = "72 20 a5 04 57 00 0c 08 6e 20 86 f6 80 00 12 18"
 expected = 1
+
+# Keyboard display names: with isRowProduct false the parser takes the PRC
+# marketing names (marketing_name_prc_consumer / marketing_name_prc_commerical)
+# plus the "磁吸键盘" suffix when the config asks for the market name, and the
+# input service labels the Olympia keyboard with the PRC strings. Each of the
+# three classes initializes its own isRowProduct static from
+# SystemProperties.get("ro.config.lgsi.region").equals("row"); that comparison
+# is the only Object.equals call in each static initializer, so force the
+# result to true and leave the region prop alone.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/framework/services.jar"
+scan_class = "Lcom/zui/server/input/keyboard/key/utils/KeyboardConfigParser;"
+scan_method = "<clinit>"
+target_class = "Ljava/lang/Object;"
+target_method = "equals"
+proto = "(Ljava/lang/Object;)Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/framework/services.jar"
+scan_class = "Lcom/zui/server/input/keyboard/key/utils/KeyboardConstants;"
+scan_method = "<clinit>"
+target_class = "Ljava/lang/Object;"
+target_method = "equals"
+proto = "(Ljava/lang/Object;)Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/framework/services.jar"
+scan_class = "Lcom/android/server/input/InputManagerServiceDelegate;"
+scan_method = "<clinit>"
+target_class = "Ljava/lang/Object;"
+target_method = "equals"
+proto = "(Ljava/lang/Object;)Z"
+value = true

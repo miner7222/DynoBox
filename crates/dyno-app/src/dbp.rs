@@ -3139,7 +3139,7 @@ value = false
         assert_eq!(dc.ops.len(), 77);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 50);
+        assert_eq!(uc.ops.len(), 53);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 13);
@@ -8350,6 +8350,78 @@ value = false
                 landed, 1,
                 "isCircleToSearchEnable op should land in one dex"
             );
+        }
+    }
+
+    /// Land the ROW-branch keyboard-name ops on the real services.jar: the
+    /// three static initializers that compare ro.config.lgsi.region against
+    /// "row". Set `DYNOBOX_SERVICES_JAR`; optionally
+    /// `DYNOBOX_ROW_SERVICES_DEX_OUT` to dump each patched dex for
+    /// disassembly.
+    #[test]
+    fn bundled_row_keyboard_names_land_on_real_services_jar() {
+        fn land(jar_path: &str, op: &DbpOp, dump: &str) -> usize {
+            let jar = std::fs::read(jar_path).expect("read services.jar");
+            let zip = crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("zip");
+            let mut hits = 0usize;
+            for e in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= jar.len()
+            }) {
+                let mut dex = jar[e.data_start..e.data_start + e.compressed_size].to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    hits += 1;
+                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    if let Ok(dir) = std::env::var("DYNOBOX_ROW_SERVICES_DEX_OUT") {
+                        let _ = std::fs::write(std::path::Path::new(&dir).join(dump), &dex);
+                    }
+                }
+            }
+            hits
+        }
+
+        let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        for (class, dump) in [
+            ("KeyboardConfigParser", "row_keyboard_config_parser.dex"),
+            ("KeyboardConstants", "row_keyboard_constants.dex"),
+            (
+                "InputManagerServiceDelegate",
+                "row_input_manager_service_delegate.dex",
+            ),
+        ] {
+            let op = doc
+                .ops
+                .iter()
+                .find(|o| {
+                    matches!(o, DbpOp::InvokeConstBool { scan_class, .. }
+                        if scan_class.contains(class))
+                })
+                .unwrap_or_else(|| panic!("{class} row op"));
+            match op {
+                DbpOp::InvokeConstBool {
+                    file,
+                    scan_method,
+                    target_class,
+                    target_method,
+                    proto,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(file, "system/framework/services.jar");
+                    assert_eq!(scan_method.as_deref(), Some("<clinit>"));
+                    assert_eq!(target_class, "Ljava/lang/Object;");
+                    assert_eq!(target_method, "equals");
+                    assert_eq!(proto, "(Ljava/lang/Object;)Z");
+                    assert!(*value, "{class} must read as a row product");
+                }
+                _ => unreachable!(),
+            }
+            if let Ok(p) = std::env::var("DYNOBOX_SERVICES_JAR") {
+                assert_eq!(land(&p, op, dump), 1, "{class} row op should land once");
+            }
         }
     }
 
