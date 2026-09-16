@@ -124,6 +124,12 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "", requires = "resign")]
         debloat: Option<String>,
 
+        /// Insert static RRO APK(s) into `product.img:/overlay/` during
+        /// resign (no mount).
+        /// Repeat the flag for several overlays. Requires --resign.
+        #[arg(long, value_name = "APK", requires = "resign")]
+        add_overlay: Vec<PathBuf>,
+
         /// Apply an external `.dbp` patch to files inside the partition images
         /// during resign. Repeat the flag to apply several patches
         /// (`--plus a.dbp --plus b.dbp`). Requires --resign.
@@ -233,6 +239,13 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
+        /// Insert static RRO APK(s) into `product.img:/overlay/` during
+        /// resign (no mount).
+        /// Repeat the flag for several overlays. Requires `resign`
+        /// or `--resign`; `report.html` records each file by name and SHA-256.
+        #[arg(long, value_name = "APK")]
+        add_overlay: Vec<PathBuf>,
+
         /// Apply an external `.dbp` patch to files inside the partition images
         /// during resign. Repeat the flag to apply several patches
         /// (`--plus a.dbp --plus b.dbp`). Requires `resign` or `--resign`.
@@ -335,6 +348,13 @@ enum Commands {
         /// Invalid paths are ignored.
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
+
+        /// Insert static RRO APK(s) into `product.img:/overlay/` during
+        /// resign (no mount).
+        /// Repeat the flag for several overlays; `report.html`
+        /// records each file by name and SHA-256.
+        #[arg(long, value_name = "APK")]
+        add_overlay: Vec<PathBuf>,
 
         /// Apply an external `.dbp` patch to files inside the partition images.
         /// Repeat the flag to apply several patches
@@ -482,6 +502,7 @@ struct ApplyResignOptions<'a> {
     system_spl: &'a Option<String>,
     fuck_lgsi: &'a Option<String>,
     debloat: bool,
+    add_overlay: &'a [PathBuf],
     plus: &'a [PathBuf],
 }
 
@@ -496,6 +517,7 @@ impl ApplyResignOptions<'_> {
             || self.system_spl.is_some()
             || self.fuck_lgsi.is_some()
             || self.debloat
+            || !self.add_overlay.is_empty()
             || !self.plus.is_empty()
     }
 }
@@ -580,6 +602,7 @@ fn make_resign_config(
     system_spl: Option<String>,
     fuck_lgsi: Option<FuckLgsiMode>,
     debloat: Option<DebloatMode>,
+    add_overlay: Vec<PathBuf>,
     plus: Vec<PathBuf>,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
@@ -592,6 +615,7 @@ fn make_resign_config(
         system_spl,
         fuck_lgsi,
         debloat,
+        add_overlay,
         plus,
     })
 }
@@ -1134,6 +1158,7 @@ where
             system_spl,
             fuck_lgsi,
             debloat,
+            add_overlay,
             plus,
             info,
             complete,
@@ -1158,6 +1183,7 @@ where
                     system_spl,
                     resolve_fuck_lgsi_mode(fuck_lgsi),
                     resolve_debloat_mode(debloat),
+                    add_overlay,
                     plus,
                 ),
                 repack,
@@ -1185,6 +1211,7 @@ where
             system_spl,
             fuck_lgsi,
             debloat,
+            add_overlay,
             plus,
             info,
             complete,
@@ -1210,6 +1237,7 @@ where
                 system_spl: &system_spl,
                 fuck_lgsi: &fuck_lgsi,
                 debloat: debloat.is_some(),
+                add_overlay: &add_overlay,
                 plus: &plus,
             };
             validate_apply_resign_options(resign, &resign_options)?;
@@ -1234,6 +1262,7 @@ where
                     system_spl,
                     lgsi_mode,
                     debloat_mode,
+                    add_overlay,
                     plus,
                 ),
                 repack,
@@ -1258,6 +1287,7 @@ where
             system_spl,
             fuck_lgsi,
             debloat,
+            add_overlay,
             plus,
             info,
             repack,
@@ -1278,6 +1308,7 @@ where
                     system_spl,
                     fuck_lgsi: lgsi_mode,
                     debloat: resolve_debloat_mode(debloat),
+                    add_overlay,
                     plus,
                 },
                 repack,
@@ -1697,6 +1728,7 @@ mod tests {
             system_spl: &None,
             fuck_lgsi: &None,
             debloat: false,
+            add_overlay: &[],
             plus: &[],
         };
         let err = validate_apply_resign_options(false, &options)
@@ -1718,6 +1750,7 @@ mod tests {
             system_spl: &None,
             fuck_lgsi: &None,
             debloat: false,
+            add_overlay: &[],
             plus: &[],
         };
         let err = validate_apply_resign_options(false, &options)
@@ -1738,6 +1771,7 @@ mod tests {
             system_spl: &None,
             fuck_lgsi: &None,
             debloat: false,
+            add_overlay: &[],
             plus: &[],
         };
         let err = validate_apply_resign_options(true, &options)
@@ -1764,6 +1798,7 @@ mod tests {
             system_spl: &system_spl,
             fuck_lgsi: &Some(String::new()),
             debloat: false,
+            add_overlay: &[],
             plus: &[],
         };
         validate_apply_resign_options(true, &options).expect("resign with key should be accepted");

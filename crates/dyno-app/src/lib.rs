@@ -1,3 +1,4 @@
+pub mod add_overlay;
 pub mod avb_descriptor;
 pub mod boot_spl;
 pub mod dbp;

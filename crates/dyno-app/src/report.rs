@@ -34,6 +34,7 @@ pub struct PipelineReport {
     pub lgsi: Option<LgsiRecord>,
     pub signing_key_change: Option<SigningKeyChange>,
     pub debloat: Option<DebloatRecord>,
+    pub overlay: Option<OverlayRecord>,
     pub plus: Option<PlusRecord>,
 }
 
@@ -81,6 +82,25 @@ pub struct DebloatPartition {
     pub not_found: usize,
     pub old_root_digest: String,
     pub new_root_digest: String,
+}
+
+/// `--add-overlay` summary: the static RRO APKs inserted into a partition's
+/// overlay directory, plus the verity root-digest change.
+#[derive(Debug, Clone)]
+pub struct OverlayRecord {
+    pub partition: String,
+    pub files: Vec<OverlayFileRecord>,
+    pub old_root_digest: String,
+    pub new_root_digest: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct OverlayFileRecord {
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    pub inode: u32,
+    pub blocks: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +182,7 @@ impl PipelineReport {
             || self.lgsi.is_some()
             || self.signing_key_change.is_some()
             || self.debloat.is_some()
+            || self.overlay.is_some()
             || self.plus.is_some()
     }
 
@@ -210,6 +231,9 @@ impl PipelineReport {
         }
         if let Some(db) = &self.debloat {
             push_debloat_section(&mut out, db);
+        }
+        if let Some(ov) = &self.overlay {
+            push_overlay_section(&mut out, ov);
         }
         if let Some(pl) = &self.plus {
             push_plus_section(&mut out, pl);
@@ -455,6 +479,27 @@ fn push_debloat_section(out: &mut String, db: &DebloatRecord) {
         out.push_str(&p.removed.to_string());
         out.push_str("</td><td class='skipped'>");
         out.push_str(&p.not_found.to_string());
+        out.push_str("</td></tr>\n");
+    }
+    out.push_str("</table></section>\n");
+}
+
+fn push_overlay_section(out: &mut String, ov: &OverlayRecord) {
+    out.push_str("<section><div class='section-heading'><h2>Added overlays</h2></div>\n");
+    out.push_str(
+        "<table><tr><th>File</th><th>Size</th><th>SHA-256</th><th>Inode</th><th>Blocks</th></tr>\n",
+    );
+    for f in &ov.files {
+        out.push_str("<tr><td><code>");
+        out.push_str(&esc(&f.name));
+        out.push_str("</code></td><td class='to'>");
+        out.push_str(&f.size.to_string());
+        out.push_str("</td><td class='mono'>");
+        out.push_str(&esc(&f.sha256));
+        out.push_str("</td><td>");
+        out.push_str(&f.inode.to_string());
+        out.push_str("</td><td>");
+        out.push_str(&f.blocks.to_string());
         out.push_str("</td></tr>\n");
     }
     out.push_str("</table></section>\n");

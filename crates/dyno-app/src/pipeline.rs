@@ -19,6 +19,7 @@ use crate::fuck_lgsi::{
 use crate::report::{
     DebloatPartition as ReportDebloatPartition, DebloatRecord as ReportDebloatRecord,
     LgsiChange as ReportLgsiChange, LgsiRecord as ReportLgsiRecord, LgsiSkip as ReportLgsiSkip,
+    OverlayFileRecord as ReportOverlayFileRecord, OverlayRecord as ReportOverlayRecord,
     PipelineReport, PlusFileRecord as ReportPlusFileRecord,
     PlusPatchRecord as ReportPlusPatchRecord, PlusRecord as ReportPlusRecord,
     RollbackRecord as ReportRollbackRecord, SigningKeyChange as ReportSigningKeyChange,
@@ -90,6 +91,16 @@ pub struct ResignConfig {
     /// caller-provided path list to `debloat.txt`) removal input. The generated
     /// `blobs.txt` catalog is removed once input is collected.
     pub debloat: Option<crate::debloat::DebloatMode>,
+    /// Static RRO APKs to insert into `product.img:/overlay/` during
+    /// resign. Android scans `/product/overlay/**` at boot (recursively) and
+    /// enables static overlays automatically; a preinstalled overlay needs no
+    /// signature match unless the target declares an `<overlayable>`. The APK
+    /// bytes are written into freshly allocated ext4 inodes/blocks/directory
+    /// entries (no mount), the partition's dm-verity hash tree is regenerated
+    /// once by the deferred pass, and the new root digest is propagated into
+    /// vbmeta_system.img so the resign loop signs over it. `report.html`
+    /// records each inserted file by name, size and SHA-256.
+    pub add_overlay: Vec<PathBuf>,
     /// Paths to external `.dbp` (DynoBox Patch) files applied via `--plus`.
     /// Each is a TOML document of size-preserving dex ops targeting APKs
     /// inside the partition images (see [`crate::dbp`]). Every partition an
@@ -2468,6 +2479,119 @@ where
     Ok(())
 }
 
+/// `--add-overlay`: insert static RRO APKs into `product.img:/overlay/`
+/// (creating the directory when needed).
+///
+/// The APK bytes are written into freshly allocated inodes, data blocks and
+/// directory entries (no mount); the partition is then marked dirty so the
+/// deferred pass regenerates its dm-verity hash tree once (coalesced with any
+/// other op that touched product.img) and back-fills the report digests.
+fn run_add_overlay<S>(
+    out_dir: &Path,
+    apks: &[PathBuf],
+    events: &mut S,
+    local_inode_cache: &mut LocalInodeCache,
+    dirty_partitions: &mut BTreeMap<String, PathBuf>,
+    report: &mut PipelineReport,
+) -> anyhow::Result<()>
+where
+    S: EventSink + ?Sized,
+{
+    use sha2::{Digest, Sha256};
+
+    const PARTITION: &str = "product";
+    let img_name = format!("{PARTITION}.img");
+    let img_path = out_dir.join(&img_name);
+    if !img_path.exists() {
+        message(
+            events,
+            MessageLevel::Warning,
+            format!("--add-overlay: `{img_name}` not found; skipped."),
+        );
+        return Ok(());
+    }
+
+    // Read and validate every payload before the image is touched.
+    let mut payloads: Vec<(String, Vec<u8>)> = Vec::with_capacity(apks.len());
+    for path in apks {
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading overlay APK {}", path.display()))?;
+        if !bytes.starts_with(b"PK\x03\x04") {
+            anyhow::bail!("--add-overlay: `{}` is not a zip/apk file", path.display());
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .with_context(|| {
+                format!(
+                    "--add-overlay: `{}` has no usable file name",
+                    path.display()
+                )
+            })?
+            .to_string();
+        if payloads.iter().any(|(existing, _)| existing == &name) {
+            anyhow::bail!("--add-overlay: duplicate file name `{name}` in the overlay list");
+        }
+        payloads.push((name, bytes));
+    }
+
+    // Break any hard-link to the input before mutating.
+    ensure_images_local(local_inode_cache, out_dir, &[img_name.as_str()])?;
+
+    let files: Vec<crate::add_overlay::OverlayFile<'_>> = payloads
+        .iter()
+        .map(|(name, bytes)| crate::add_overlay::OverlayFile { name, bytes })
+        .collect();
+    let inserted = crate::add_overlay::insert_files(
+        &img_path,
+        crate::add_overlay::DEFAULT_OVERLAY_DIR,
+        &files,
+    )
+    .with_context(|| format!("inserting overlays into {img_name}"))?;
+
+    let mut records = Vec::with_capacity(inserted.len());
+    for item in &inserted {
+        let (_, bytes) = payloads
+            .iter()
+            .find(|(name, _)| name == &item.name)
+            .ok_or_else(|| anyhow::anyhow!("--add-overlay: lost payload for `{}`", item.name))?;
+        message(
+            events,
+            MessageLevel::Info,
+            format!(
+                "--add-overlay: {PARTITION}:/{} placed `{}` ({} bytes, inode {}, {} block(s)).",
+                crate::add_overlay::DEFAULT_OVERLAY_DIR,
+                item.name,
+                item.size,
+                item.inode,
+                item.blocks
+            ),
+        );
+        records.push(ReportOverlayFileRecord {
+            name: item.name.clone(),
+            size: item.size,
+            sha256: crate::avb_descriptor::hex_encode(&Sha256::digest(bytes)),
+            inode: item.inode,
+            blocks: item.blocks,
+        });
+    }
+
+    if records.is_empty() {
+        return Ok(());
+    }
+    // The partition image was mutated: mark it dirty so the resign stage
+    // regenerates its dm-verity hash tree once. Report digests are back-filled
+    // after that single regen.
+    dirty_partitions.insert(PARTITION.to_string(), img_path.clone());
+    report.overlay = Some(ReportOverlayRecord {
+        partition: PARTITION.to_string(),
+        files: records,
+        old_root_digest: String::new(),
+        new_root_digest: String::new(),
+    });
+    Ok(())
+}
+
 fn run_resign_stage<S>(
     input: &Path,
     out_dir: &Path,
@@ -2896,6 +3020,17 @@ where
         )?;
     }
 
+    if !config.add_overlay.is_empty() {
+        run_add_overlay(
+            out_dir,
+            &config.add_overlay,
+            events,
+            &mut local_inode_cache,
+            &mut dirty_partitions,
+            &mut report,
+        )?;
+    }
+
     // --plus: apply external `.dbp` patches to files inside the partition
     // images. Mutation-only here; each touched partition's dm-verity is
     // regenerated once by the deferred pass below (coalesced with any
@@ -3072,6 +3207,12 @@ where
                     p.new_root_digest = new_hex.clone();
                 }
             }
+        }
+        if let Some(overlay) = report.overlay.as_mut()
+            && overlay.partition == *partition
+        {
+            overlay.old_root_digest = old_hex.clone();
+            overlay.new_root_digest = new_hex.clone();
         }
     }
 
@@ -5827,6 +5968,7 @@ mod tests {
             system_spl: None,
             fuck_lgsi: Some(FuckLgsiMode::Config(lgsi.clone())),
             debloat: Some(crate::debloat::DebloatMode::ListFile(debloat.clone())),
+            add_overlay: Vec::new(),
             plus: vec![plus.clone()],
         };
         let secondary =
@@ -6286,6 +6428,7 @@ mod tests {
             system_spl: None,
             fuck_lgsi: None,
             debloat: None,
+            add_overlay: Vec::new(),
             plus: Vec::new(),
         }
     }

@@ -72,6 +72,8 @@ struct FormSnapshot {
     debloat: bool,
     debloat_list: Option<PathBuf>,
     #[serde(default)]
+    add_overlays: Vec<PathBuf>,
+    #[serde(default)]
     info: bool,
     plus_patches: Vec<PathBuf>,
 }
@@ -99,6 +101,7 @@ impl FormSnapshot {
             fuck_lgsi_config: gui.fuck_lgsi_config.clone(),
             debloat: gui.debloat,
             debloat_list: gui.debloat_list.clone(),
+            add_overlays: gui.add_overlays.clone(),
             info: gui.info,
             plus_patches: gui.plus_patches.clone(),
         }
@@ -127,6 +130,7 @@ impl FormSnapshot {
         gui.fuck_lgsi_config.clone_from(&self.fuck_lgsi_config);
         gui.debloat = self.debloat;
         gui.debloat_list.clone_from(&self.debloat_list);
+        gui.add_overlays.clone_from(&self.add_overlays);
         gui.info = self.info;
         gui.plus_patches.clone_from(&self.plus_patches);
     }
@@ -188,6 +192,7 @@ impl MissingPaths {
             .chain(snapshot.key_path.iter())
             .chain(snapshot.fuck_lgsi_config.iter())
             .chain(snapshot.debloat_list.iter())
+            .chain(snapshot.add_overlays.iter())
             .chain(snapshot.plus_patches.iter());
         paths.extend(candidates.filter(|path| !path.exists()).cloned());
         Self { paths }
@@ -237,6 +242,7 @@ struct DynoGui {
     fuck_lgsi_config: Option<PathBuf>,
     debloat: bool,
     debloat_list: Option<PathBuf>,
+    add_overlays: Vec<PathBuf>,
     info: bool,
     plus_patches: Vec<PathBuf>,
 
@@ -282,6 +288,7 @@ impl Default for DynoGui {
             fuck_lgsi_config: None,
             debloat: false,
             debloat_list: None,
+            add_overlays: Vec::new(),
             info: false,
             plus_patches: Vec::new(),
             last_status: None,
@@ -435,6 +442,9 @@ impl DynoGui {
         }
         for patch in &self.plus_patches {
             a.push(format!("--plus={}", patch.display()));
+        }
+        for overlay in &self.add_overlays {
+            a.push(format!("--add-overlay={}", overlay.display()));
         }
     }
 
@@ -894,6 +904,41 @@ impl DynoGui {
                     drag_scroll_path(ui, &text, "debloat-list", missing);
                 });
             });
+
+            ui.horizontal(|ui| {
+                if ui.button("➕ Add overlay").clicked()
+                    && let Some(paths) = rfd::FileDialog::new()
+                        .add_filter("Android package", &["apk"])
+                        .pick_files()
+                {
+                    for p in paths {
+                        if !self.add_overlays.contains(&p) {
+                            self.add_overlays.push(p);
+                        }
+                    }
+                }
+                if !self.add_overlays.is_empty() && ui.button("Clear").clicked() {
+                    self.add_overlays.clear();
+                }
+                ui.label(format!(
+                    "--add-overlay ({} APK(s))",
+                    self.add_overlays.len()
+                ))
+                .on_hover_text(
+                    "Static RRO APKs inserted into product.img:/overlay/ during resign \
+                         (no mount). \
+                         The partition's dm-verity is regenerated and re-signed.",
+                );
+            });
+            for (i, p) in self.add_overlays.iter().enumerate() {
+                let text = p.display().to_string();
+                drag_scroll_path(
+                    ui,
+                    &text,
+                    &format!("add-overlay-{i}"),
+                    self.missing_paths.contains(p),
+                );
+            }
 
             ui.horizontal(|ui| {
                 if ui.button("➕ Add .dbp").clicked() {
