@@ -3136,7 +3136,7 @@ value = false
     fn bundled_dbp_files_inventory() {
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
         assert_eq!(dc.name, "debloat-common");
-        assert_eq!(dc.ops.len(), 62);
+        assert_eq!(dc.ops.len(), 73);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
         assert_eq!(uc.ops.len(), 42);
@@ -3891,7 +3891,7 @@ value = false
                 _ => false,
             })
             .collect();
-        assert_eq!(settings_ops.len(), 12, "all twelve settings ops must parse");
+        assert_eq!(settings_ops.len(), 11, "all eleven settings ops must parse");
         let mut hide = false;
         let mut show = false;
         let mut hide_user_experience = false;
@@ -3900,7 +3900,6 @@ value = false
         let mut suggestion_complete = false;
         let mut suggestion_finished = false;
         let mut search_deindex_variants = 0usize;
-        let mut hide_network_accelerate = false;
         let mut hide_pen_market_footer = false;
         let mut battery_health_gate = false;
         for op in settings_ops {
@@ -4021,7 +4020,6 @@ value = false
                             "Lcom/lenovo/settings/widget/UnsupportedPreferenceController;"
                         );
                         assert_eq!(donor_method, "getAvailabilityStatus");
-                        hide_network_accelerate = true;
                     } else {
                         panic!("unexpected redirect target in the merged settings ops: {class}");
                     }
@@ -4053,10 +4051,6 @@ value = false
         assert!(
             suggestion_complete && suggestion_finished && search_deindex_variants == 2,
             "must suppress, harden, and deindex the User Experience suggestion"
-        );
-        assert!(
-            hide_network_accelerate,
-            "must hide the Network acceleration entry (-> UnsupportedPreferenceController)"
         );
         assert!(
             hide_pen_market_footer,
@@ -6480,8 +6474,11 @@ value = false
         for (i, op) in doc.ops.iter().enumerate() {
             let landed = match op {
                 DbpOp::LayoutCollapse {
-                    node_id, expected, ..
-                } => {
+                    file,
+                    node_id,
+                    expected,
+                    ..
+                } if file == "system/priv-app/ZuiSecurity/ZuiSecurity.apk" => {
                     let mut b = apk.clone();
                     let hit = force_axml_collapse(&mut b, *node_id as u32, *expected).unwrap();
                     if hit {
@@ -6496,11 +6493,12 @@ value = false
                     hit
                 }
                 DbpOp::LayoutBackground {
+                    file,
                     node_id,
                     drawable,
                     expected,
                     ..
-                } => {
+                } if file == "system/priv-app/ZuiSecurity/ZuiSecurity.apk" => {
                     let mut b = apk.clone();
                     let hit =
                         force_axml_background(&mut b, *node_id as u32, *drawable as u32, *expected)
@@ -7344,6 +7342,293 @@ value = false
         }
     }
 
+    /// Land the Game Assistant region-list ops (Settings.isRow pinned true in
+    /// the haptic, 4D-vibration and constant readers) on the real ZuiGameHelper
+    /// APK. Set `DYNOBOX_GAMEHELPER_APK`; optionally set
+    /// `DYNOBOX_GAMEHELPER_ROW_DEX_OUT` to dump the patched dex.
+    #[test]
+    fn bundled_debloat_gamehelper_row_lists_land_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_GAMEHELPER_APK") else {
+            return;
+        };
+        let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let targets = [
+            (
+                "Lcom/zui/game/service/util/HapticUtils;",
+                "openHapticEffect",
+            ),
+            (
+                "Lcom/zui/game/service/vibrate/VibrationToolKt;",
+                "isGameSupport4dVibration",
+            ),
+            ("Lcom/zui/game/service/util/ConstValueKt;", "<clinit>"),
+        ];
+        let ops: Vec<&DbpOp> = targets
+            .iter()
+            .map(|(class, method)| {
+                doc.ops
+                    .iter()
+                    .find(|op| {
+                        matches!(op, DbpOp::InvokeConstBool { scan_class, scan_method, value, .. }
+                            if scan_class == class
+                                && scan_method.as_deref() == Some(*method)
+                                && *value)
+                    })
+                    .unwrap_or_else(|| panic!("debloat-common must carry the {class} ROW-list op"))
+            })
+            .collect();
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let entries: Vec<_> = zip
+            .entries
+            .iter()
+            .filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            })
+            .collect();
+        let mut landed = vec![0usize; ops.len()];
+        for entry in entries {
+            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+            let mut patched = original.to_vec();
+            let mut modified = false;
+            for (index, op) in ops.iter().enumerate() {
+                if apply_one_op(&mut patched, op).unwrap() {
+                    assert_eq!(
+                        patched.len(),
+                        original.len(),
+                        "patch must preserve dex length"
+                    );
+                    assert_eq!(
+                        entry.name, "classes2.dex",
+                        "row-list ops live in classes2.dex"
+                    );
+                    landed[index] += 1;
+                    modified = true;
+                }
+            }
+            if modified && let Ok(out) = std::env::var("DYNOBOX_GAMEHELPER_ROW_DEX_OUT") {
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+                std::fs::create_dir_all(&out).expect("create dex out dir");
+                std::fs::write(std::path::Path::new(&out).join(&entry.name), &patched)
+                    .expect("write patched dex");
+            }
+        }
+        assert_eq!(
+            landed,
+            vec![1, 1, 1],
+            "each row-list op must land exactly once"
+        );
+    }
+
+    /// Shape of the NetworkAccelerate ops: VPN starts nop'ed, activation and
+    /// expiry pinned, server calls nop'ed, and the two VPN rows left disabled.
+    #[test]
+    fn bundled_debloat_network_accel_op_shape() {
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let ops: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .filter(|op| op.file() == "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk")
+            .collect();
+        assert_eq!(ops.len(), 8, "eight NetworkAccelerate ops");
+        for op in &ops {
+            assert_eq!(op.partition(), "system");
+        }
+        let start_vpn = ops
+            .iter()
+            .filter(|op| {
+                matches!(op, DbpOp::MethodNop { class, method, .. }
+                    if class == "Lcom/android/networkaccelerate/NetworkAccelService;"
+                        && (method == "doStartVpn" || method == "startVpnWhenEnterMeeting"))
+            })
+            .count();
+        assert_eq!(start_vpn, 2, "both VPN start paths must be nop'ed");
+        let pinned = ops
+            .iter()
+            .filter(|op| matches!(op, DbpOp::MethodConstBool { .. }))
+            .count();
+        assert_eq!(pinned, 2, "activation and expiry readers must be pinned");
+        let calls = ops
+            .iter()
+            .filter(|op| {
+                matches!(op, DbpOp::MethodNop { method, .. }
+                    if method == "queryDeviceInfo" || method == "activateDevice")
+            })
+            .count();
+        assert_eq!(calls, 2, "both server entry points must be nop'ed");
+        let row_patch = ops
+            .iter()
+            .find(
+                |op| matches!(op, DbpOp::MethodCodePatch { method, .. } if method == "updateState"),
+            )
+            .expect("updateState row patch");
+        match row_patch {
+            DbpOp::MethodCodePatch { replacements, .. } => {
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(replacements[0].expected, 2);
+                assert_eq!(
+                    replacements[0].to, "6e 20 4c 30 20 00",
+                    "both VPN rows must take the zero register"
+                );
+            }
+            _ => unreachable!(),
+        }
+        let summaries = ops
+            .iter()
+            .filter(|op| {
+                matches!(op, DbpOp::MethodCodePatch { method, replacements, .. }
+                    if method == "updateState"
+                        && replacements.len() == 2
+                        && replacements.iter().all(|r| r.to == "00 00 00 00 00 00"))
+            })
+            .count();
+        assert_eq!(summaries, 1, "both row summaries must be dropped");
+    }
+
+    /// Land the NetworkAccelerate ops on the real app dex. Set
+    /// `DYNOBOX_NETWORKACCEL_DEX` (the extracted STORED classes.dex); optionally
+    /// set `DYNOBOX_NETWORKACCEL_DEX_OUT` to dump the patched dex.
+    #[test]
+    fn bundled_debloat_network_accel_lands_on_real_dex() {
+        let Ok(path) = std::env::var("DYNOBOX_NETWORKACCEL_DEX") else {
+            return;
+        };
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let ops: Vec<&DbpOp> = dc
+            .ops
+            .iter()
+            .filter(|op| op.file() == "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk")
+            .collect();
+        assert_eq!(ops.len(), 8);
+        let original = std::fs::read(&path).expect("read dex");
+        let mut patched = original.clone();
+        let mut landed = 0usize;
+        for op in &ops {
+            if apply_one_op(&mut patched, op).unwrap() {
+                landed += 1;
+            }
+        }
+        assert_eq!(
+            patched.len(),
+            original.len(),
+            "patch must preserve dex length"
+        );
+        assert_eq!(landed, 8, "every NetworkAccelerate op must land");
+        if let Ok(out) = std::env::var("DYNOBOX_NETWORKACCEL_DEX_OUT") {
+            crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+            std::fs::write(&out, &patched).expect("write patched dex");
+        }
+    }
+
+    /// Land the Game Manager popup op (the normal-app add dropped from the
+    /// Game Assistant popup) on the real ZuiGameHelper APK. Set
+    /// `DYNOBOX_GAMEHELPER_APK`; optionally set
+    /// `DYNOBOX_GAMEHELPER_POPUP_DEX_OUT` to dump the patched dex.
+    #[test]
+    fn bundled_debloat_gamehelper_game_manager_popup_lands_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_GAMEHELPER_APK") else {
+            return;
+        };
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let op = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, replacements, .. }
+                    if class == "Lcom/zui/game/service/ui/gamelist/GameManagerActivity$initData$1;"
+                        && method == "invokeSuspend"
+                        && replacements.len() == 1
+                        && replacements[0].expected == 1
+                        && replacements[0].to.ends_with("00 00 00 00 00 00"))
+            })
+            .expect("debloat-common must carry the Game Manager popup op");
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let mut landed = 0usize;
+        for entry in zip.entries.iter().filter(|e| {
+            e.name.ends_with(".dex")
+                && e.compression_method == 0
+                && !e.uses_data_descriptor
+                && !e.is_zip64
+                && e.data_start + e.compressed_size <= apk.len()
+        }) {
+            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+            let mut patched = original.to_vec();
+            if apply_one_op(&mut patched, op).unwrap() {
+                assert_eq!(
+                    patched.len(),
+                    original.len(),
+                    "patch must preserve dex length"
+                );
+                assert_eq!(
+                    entry.name, "classes4.dex",
+                    "the popup op lives in classes4.dex"
+                );
+                landed += 1;
+                if let Ok(out) = std::env::var("DYNOBOX_GAMEHELPER_POPUP_DEX_OUT") {
+                    crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+                    std::fs::create_dir_all(&out).expect("create dex out dir");
+                    std::fs::write(std::path::Path::new(&out).join(&entry.name), &patched)
+                        .expect("write patched dex");
+                }
+            }
+        }
+        assert_eq!(landed, 1, "the popup op must land in one dex");
+    }
+
+    /// Shape of the Game Assistant region-list ops: each pins Settings.isRow
+    /// true inside one reader method.
+    #[test]
+    fn bundled_debloat_gamehelper_row_lists_op_shape() {
+        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+        let targets = [
+            (
+                "Lcom/zui/game/service/util/HapticUtils;",
+                "openHapticEffect",
+            ),
+            (
+                "Lcom/zui/game/service/vibrate/VibrationToolKt;",
+                "isGameSupport4dVibration",
+            ),
+            ("Lcom/zui/game/service/util/ConstValueKt;", "<clinit>"),
+        ];
+        for (class, method) in targets {
+            let op = dc
+                .ops
+                .iter()
+                .find(|op| {
+                    matches!(op, DbpOp::InvokeConstBool { scan_class, scan_method, .. }
+                        if scan_class == class && scan_method.as_deref() == Some(method))
+                })
+                .unwrap_or_else(|| panic!("missing {class} row-list op"));
+            match op {
+                DbpOp::InvokeConstBool {
+                    partition,
+                    file,
+                    target_class,
+                    target_method,
+                    proto,
+                    site_index,
+                    value,
+                    ..
+                } => {
+                    assert_eq!(partition, "system");
+                    assert_eq!(file, "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk");
+                    assert_eq!(target_class, "Lcom/zui/game/service/di/Settings;");
+                    assert_eq!(target_method, "isRow");
+                    assert_eq!(proto, "()Z");
+                    assert_eq!(*site_index, None);
+                    assert!(*value, "{class} must read the ROW list");
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
     /// Shape of the Game Assistant feature-key op: the three WUJI keys are
     /// repointed at `key_floating_info` through string symbols.
     #[test]
@@ -7369,18 +7654,13 @@ value = false
                 assert_eq!(file, "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk");
                 assert_eq!(method, "<clinit>");
                 assert_eq!(proto, "()V");
-                for name in [
-                    "key_we_chat",
-                    "key_qq",
-                    "key_network_acceleration",
-                    "key_floating_info",
-                ] {
+                for name in ["key_we_chat", "key_qq", "key_floating_info"] {
                     assert!(
                         symbols.iter().any(|symbol| symbol.name() == name),
                         "symbol {name} must be declared"
                     );
                 }
-                assert_eq!(replacements.len(), 3, "three WUJI tiles");
+                assert_eq!(replacements.len(), 2, "the WeChat and QQ tiles");
                 for r in replacements {
                     assert_eq!(r.expected, 1);
                     assert!(r.to.contains("${key_floating_info:u16}"));

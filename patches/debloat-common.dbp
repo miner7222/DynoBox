@@ -372,23 +372,6 @@ target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
 target_method = "isRowVersion"
 value = true
 
-# Hide the Network acceleration entry (NetworkAccelerate app is debloated).
-# getAvailabilityStatus() is a trivial `const/4; return` body shared by R8
-# with other methods, so method_const_int is refused by the shared-code-item
-# guard; redirect code_off to UnsupportedPreferenceController instead
-# (same classes6.dex, returns 3 = unsupported/hidden).
-
-[[op]]
-kind = "method_code_redirect"
-partition = "system"
-file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
-class = "Lcom/lenovo/settings/sim/NetworkAccelerationController;"
-method = "getAvailabilityStatus"
-proto = "()I"
-donor_class = "Lcom/lenovo/settings/widget/UnsupportedPreferenceController;"
-donor_method = "getAvailabilityStatus"
-donor_proto = "()I"
-
 # Hide the pen-settings footer that advertises "Pen apps zone" (a Lenovo App
 # Store page). All eight pen settings layouts gate that footer on
 # @bool/is_prc and nothing else in this build reads the flag, so flipping it
@@ -660,14 +643,14 @@ target_method = "isBusinessProject"
 proto = "(Landroid/content/Context;)Z"
 value = true
 
-# The WeChat, QQ and network-acceleration tiles come straight from the device
-# feature list (RomFeatures.keyList -> Repository.keys() -> findItemByKey), so
-# the companion getKEY decoys never removed them. Repoint the three WUJI
-# profile keys at "key_floating_info" instead: its item (ItemFloatingData) is
-# dropped from the floating tile list by GameHelperViewController.deleteFloatingItem,
+# The WeChat and QQ tiles come straight from the device feature list
+# (RomFeatures.keyList -> Repository.keys() -> findItemByKey), so the
+# companion getKEY decoys never removed them. Repoint the two WUJI profile
+# keys at "key_floating_info" instead: its item (ItemFloatingData) is dropped
+# from the floating tile list by GameHelperViewController.deleteFloatingItem,
 # and the original keys fall out of every isFeatureOpen() gate at the same
-# time. Only the WUJI profile carries key_network_acceleration; the WeChat/QQ
-# pairs in the other profiles are left untouched.
+# time. The network-acceleration tile is deliberately left in place; the
+# WeChat/QQ pairs in the other profiles are untouched.
 
 [[op]]
 kind = "method_code_patch"
@@ -688,11 +671,6 @@ kind = "string"
 value = "key_qq"
 
 [[op.symbol]]
-name = "key_network_acceleration"
-kind = "string"
-value = "key_network_acceleration"
-
-[[op.symbol]]
 name = "key_floating_info"
 kind = "string"
 value = "key_floating_info"
@@ -705,11 +683,6 @@ expected = 1
 [[op.replacement]]
 from = "1a 1a ${key_qq:u16} 4d 1a 08 0f"
 to = "1a 1a ${key_floating_info:u16} 4d 1a 08 0f"
-expected = 1
-
-[[op.replacement]]
-from = "1a 1b ${key_network_acceleration:u16} 4d 1b 08 1a"
-to = "1a 1b ${key_floating_info:u16} 4d 1b 08 1a"
 expected = 1
 
 # ============================ ANTISPAM ============================
@@ -1034,4 +1007,156 @@ proto = "(Landroid/os/Bundle;)V"
 [[op.replacement]]
 from = "6e 20 c4 ac 12 00 6e 10 6e ac 01 00 0c 00 71 10 f9 a9 00 00 0a 00 6e 20 c3 ac 02 00"
 to = "6e 10 5f 5f 02 00 0c 00 6e 20 b0 60 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+expected = 1
+
+
+# ZuiGameHelper flavours its per-game app lists by region: the haptic engine
+# picks game_list/game_list_row plus mode_list/mode_list_row, the 4D vibration
+# reader picks RomFeatures' PRC/ROW vibration array and its own PRC/ROW
+# package set, and the constant lists (super resolution, frame interpolation)
+# are built from PRC/ROW branches. All of them gate on Settings.isRow(); pin
+# that read true inside the three readers so the ROW lists are used.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+scan_class = "Lcom/zui/game/service/util/HapticUtils;"
+scan_method = "openHapticEffect"
+target_class = "Lcom/zui/game/service/di/Settings;"
+target_method = "isRow"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+scan_class = "Lcom/zui/game/service/vibrate/VibrationToolKt;"
+scan_method = "isGameSupport4dVibration"
+target_class = "Lcom/zui/game/service/di/Settings;"
+target_method = "isRow"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+scan_class = "Lcom/zui/game/service/util/ConstValueKt;"
+scan_method = "<clinit>"
+target_class = "Lcom/zui/game/service/di/Settings;"
+target_method = "isRow"
+proto = "()Z"
+value = true
+
+
+# NetworkAccelerator: keep the WiFi+data dual-network feature only and stop
+# the Lenovo activation from gating it. The game/meeting rows and the whole
+# VPN stack stay inert: both VPN start paths are nop'ed, the activation and
+# expiry readers are pinned (activated, never expired), the server calls are
+# nop'ed so nothing is fetched or shown, and updateState's enable calls now
+# pass the already-zero register (v2) for the two VPN rows instead of v1, so
+# the rows render disabled instead of usable.
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/NetworkAccelService;"
+method = "doStartVpn"
+proto = "()V"
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/NetworkAccelService;"
+method = "startVpnWhenEnterMeeting"
+proto = "(Ljava/lang/String;)V"
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "isDeviceActivated"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "isDeviceExpired"
+proto = "()Z"
+value = false
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "queryDeviceInfo"
+proto = "()V"
+
+[[op]]
+kind = "method_nop"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "activateDevice"
+proto = "(Landroid/content/Context;)V"
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "updateState"
+proto = "()V"
+
+[[op.replacement]]
+from = "6e 20 4c 30 10 00"
+to = "6e 20 4c 30 20 00"
+expected = 2
+
+# The disabled rows must not advertise a state either: updateState() still reads
+# the two per-feature switches and writes "turn on" / "turn off" into each row's
+# summary once the dual-network switch is on, so drop both setSummary calls.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "updateState"
+proto = "()V"
+
+[[op.replacement]]
+from = "6e 20 5e 30 01 00"
+to = "00 00 00 00 00 00"
+expected = 1
+
+[[op.replacement]]
+from = "6e 20 5e 30 35 00"
+to = "00 00 00 00 00 00"
+expected = 1
+
+# Game Assistant: the Game Manager popup lists games plus every non-game
+# third-party app; drop the normal-app add so the adapter only renders the
+# game section.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/ui/gamelist/GameManagerActivity$initData$1;"
+method = "invokeSuspend"
+proto = "(Ljava/lang/Object;)Ljava/lang/Object;"
+
+[[op.replacement]]
+from = "71 10 3f 36 01 00 0c 02 6e 20 c0 48 32 00"
+to = "71 10 3f 36 01 00 0c 02 00 00 00 00 00 00"
 expected = 1

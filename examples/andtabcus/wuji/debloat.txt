@@ -60,7 +60,6 @@ system:/system/priv-app/LeVoiceAgent/
 system:/system/priv-app/LenovoOTA/
 system:/system/priv-app/LenovoStore/
 system:/system/priv-app/LenovoWhatsNew/
-system:/system/priv-app/NetworkAccelerate/
 system:/system/priv-app/TabletPushOut/
 system:/system/priv-app/TabletUE/
 system:/system/priv-app/TdxIdentifyUnknownNumbers/

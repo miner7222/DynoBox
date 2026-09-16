@@ -3576,6 +3576,7 @@ const AXML_ANDROID_NS: &str = "http://schemas.android.com/apk/res/android";
 const AXML_TYPE_REFERENCE: u8 = 0x01;
 const AXML_TYPE_FLOAT: u8 = 0x04;
 const AXML_TYPE_DIMENSION: u8 = 0x05;
+const AXML_TYPE_INT_DEC: u8 = 0x10;
 
 /// One in-place typed-value rewrite inside inflated entry bytes.
 struct AxmlEdit {
@@ -3634,8 +3635,9 @@ fn axml_zero_dim(attr: &crate::fuck_lgsi::AxmlAttr, edits: &mut Vec<AxmlEdit>) -
 
 enum AxmlEditKind {
     /// Collapse the node: zero layout_height (or layout_weight) plus any
-    /// vertical margins. Nodes already gone, or whose height is
-    /// match_parent/wrap_content, are skipped, not counted.
+    /// vertical margins. Nodes already gone, or whose height is a positive
+    /// int that is neither a dimension nor match_parent/wrap_content, are
+    /// skipped, not counted.
     Collapse,
     /// Swap the node's android:background reference to `drawable`.
     Background { drawable: u32 },
@@ -3721,8 +3723,19 @@ fn collect_axml_works(
                                 });
                                 true
                             }
-                            // match_parent/wrap_content: weight may still
-                            // collapse the node; decide below.
+                            // match_parent / wrap_content are stored as
+                            // negative ints; a zero dimension collapses them
+                            // just like a measured size.
+                            AXML_TYPE_INT_DEC if (h.data as i32) < 0 => {
+                                node_edits.push(AxmlEdit {
+                                    type_off: h.type_off,
+                                    new_type: AXML_TYPE_DIMENSION,
+                                    new_data: 0,
+                                });
+                                true
+                            }
+                            // other ints: weight may still collapse the
+                            // node; decide below.
                             _ => false,
                         },
                     };
