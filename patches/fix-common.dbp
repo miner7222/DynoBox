@@ -914,3 +914,35 @@ proto = "()V"
 from = "13 02 f6 07"
 to = "13 02 d3 07"
 expected = 1
+
+# Retyping the bar to TYPE_SYSTEM_ALERT keeps it out of the "hide non-system
+# overlays" set, but the input side still treats the window as an overlay: its
+# input config carries no TRUSTED_OVERLAY and uses USE_OPACITY occlusion, so
+# sensitive windows keep dropping touches while the bar is up. The bar's
+# params already pass through setNoMoveAnim(), which reflects
+# PRIVATE_FLAG_NO_MOVE_ANIMATION onto privateFlags; replace the reflected flag
+# value with a constant that also carries PRIVATE_FLAG_TRUSTED_OVERLAY and
+# PRIVATE_FLAG_SYSTEM_APPLICATION_OVERLAY (0x20000048 = 0x20000000 | 0x40 | 8),
+# so the bar is trusted for input and counts as a system overlay. Only the
+# second reflection read (the flag value) is rewritten; privateFlags itself is
+# still read and written through reflection.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiFreeformBar/ZuiFreeformBar.apk"
+class = "Lcom/zui/freeform/sidebar/FloatService;"
+method = "setNoMoveAnim"
+proto = "(Landroid/view/WindowManager$LayoutParams;)V"
+
+[[op.symbol]]
+name = "get_int"
+kind = "method"
+class = "Ljava/lang/reflect/Field;"
+method = "getInt"
+proto = "(Ljava/lang/Object;)I"
+
+[[op.replacement]]
+from = "6e 20 ${get_int:u16} 40 00 0a 00"
+to = "14 00 48 00 00 20 00 00"
+expected = 1

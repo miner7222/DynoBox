@@ -3142,7 +3142,7 @@ value = false
         assert_eq!(uc.ops.len(), 56);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
-        assert_eq!(fc.ops.len(), 13);
+        assert_eq!(fc.ops.len(), 14);
         let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
         assert_eq!(wj.name, "debloat-wuji");
         assert_eq!(wj.ops.len(), 4);
@@ -7992,8 +7992,9 @@ value = false
             .ops
             .iter()
             .find(|op| {
-                matches!(op, DbpOp::MethodCodePatch { class, .. }
-                    if class == "Lcom/zui/freeform/sidebar/FloatService;")
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/zui/freeform/sidebar/FloatService;"
+                        && method == "initSideBarView")
             })
             .expect("fix-common must carry the sidebar window type op");
         match op {
@@ -8016,52 +8017,102 @@ value = false
             }
             _ => unreachable!(),
         }
+
+        let trusted = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/zui/freeform/sidebar/FloatService;"
+                        && method == "setNoMoveAnim")
+            })
+            .expect("fix-common must carry the sidebar trusted-flag op");
+        match trusted {
+            DbpOp::MethodCodePatch {
+                file,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiFreeformBar/ZuiFreeformBar.apk");
+                assert_eq!(proto, "(Landroid/view/WindowManager$LayoutParams;)V");
+                let sym = symbols
+                    .iter()
+                    .find(|s| s.name() == "get_int")
+                    .expect("get_int symbol");
+                match sym {
+                    DbpCodeSymbol::Method {
+                        class,
+                        method,
+                        proto,
+                        ..
+                    } => {
+                        assert_eq!(class, "Ljava/lang/reflect/Field;");
+                        assert_eq!(method, "getInt");
+                        assert_eq!(proto, "(Ljava/lang/Object;)I");
+                    }
+                    _ => panic!("get_int must be a method symbol"),
+                }
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(
+                    replacements[0].to, "14 00 48 00 00 20 00 00",
+                    "0x20000048 = trusted overlay | no-move animation | system overlay"
+                );
+                assert_eq!(replacements[0].expected, 1);
+            }
+            _ => unreachable!(),
+        }
     }
 
-    /// Retype the sidebar hover bar from APPLICATION_OVERLAY to
-    /// TYPE_SYSTEM_ALERT on the real ZuiFreeformBar APK. Set
-    /// `DYNOBOX_FREEFORMBAR_APK`; optionally set `DYNOBOX_FREEFORMBAR_DEX_OUT`
-    /// to write the patched dex file.
+    /// Land the sidebar window ops on the real ZuiFreeformBar APK: the
+    /// TYPE_SYSTEM_ALERT retype in `initSideBarView` and the trusted-flag
+    /// constant in `setNoMoveAnim`. Set `DYNOBOX_FREEFORMBAR_APK`; optionally
+    /// set `DYNOBOX_FREEFORMBAR_DEX_OUT` to write the patched dex file.
     #[test]
     fn bundled_fix_common_sidebar_window_type_lands_on_real_apk() {
         let Ok(path) = std::env::var("DYNOBOX_FREEFORMBAR_APK") else {
             return;
         };
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
-        let op = fc
-            .ops
-            .iter()
-            .find(|op| {
-                matches!(op, DbpOp::MethodCodePatch { class, .. }
-                    if class == "Lcom/zui/freeform/sidebar/FloatService;")
-            })
-            .expect("sidebar window type op");
         let apk = std::fs::read(&path).expect("read apk");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
-        let mut landed = Vec::new();
-        for entry in zip.entries.iter().filter(|e| {
-            e.name.ends_with(".dex")
-                && e.compression_method == 0
-                && !e.uses_data_descriptor
-                && !e.is_zip64
-                && e.data_start + e.compressed_size <= apk.len()
-        }) {
-            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
-            let mut dex = original.to_vec();
-            if apply_one_op(&mut dex, op).unwrap() {
-                assert_eq!(dex.len(), original.len(), "patch must preserve dex length");
-                landed.push((entry.name.clone(), dex));
+        for method in ["initSideBarView", "setNoMoveAnim"] {
+            let op = fc
+                .ops
+                .iter()
+                .find(|op| {
+                    matches!(op, DbpOp::MethodCodePatch { class, method: m, .. }
+                        if class == "Lcom/zui/freeform/sidebar/FloatService;"
+                            && m == method)
+                })
+                .unwrap_or_else(|| panic!("sidebar op for {method}"));
+            let mut landed = Vec::new();
+            for entry in zip.entries.iter().filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            }) {
+                let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+                let mut dex = original.to_vec();
+                if apply_one_op(&mut dex, op).unwrap() {
+                    assert_eq!(dex.len(), original.len(), "patch must preserve dex length");
+                    landed.push((entry.name.clone(), dex));
+                }
             }
-        }
-        assert_eq!(landed.len(), 1, "the sidebar op must land in one dex");
-        let (name, mut dex) = landed.pop().expect("one dex carries the sidebar op");
-        assert!(
-            name == "classes.dex" || name == "classes2.dex",
-            "the sidebar op lands in one of the two app dex files"
-        );
-        if let Ok(out) = std::env::var("DYNOBOX_FREEFORMBAR_DEX_OUT") {
-            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
-            std::fs::write(&out, &dex).expect("write patched dex");
+            assert_eq!(landed.len(), 1, "the {method} op must land in one dex");
+            let (name, mut dex) = landed.pop().expect("one dex carries the op");
+            assert!(
+                name == "classes.dex" || name == "classes2.dex",
+                "the {method} op lands in one of the two app dex files"
+            );
+            if let Ok(out) = std::env::var("DYNOBOX_FREEFORMBAR_DEX_OUT") {
+                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                let file = std::path::Path::new(&out).join(format!("{method}.dex"));
+                std::fs::write(&file, &dex).expect("write patched dex");
+            }
         }
     }
 
