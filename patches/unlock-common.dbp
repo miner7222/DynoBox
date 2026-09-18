@@ -1,6 +1,6 @@
 
 name = "unlock-common"
-description = "Unlock PRC-gated behavior and locked rows: locales/region UI, Wi-Fi region, Circle to Search, Google services, battery health, account entry, autorun and relative starts, CCS, Dolby switch and ZMC quick kill."
+description = "Unlock PRC-gated behavior and locked rows: locales/region UI, Wi-Fi region, Circle to Search, Google services, battery health, account entry, autorun and relative starts, CCS, Dolby switch, ZMC quick kill and the fan-gated super god mode."
 
 [[op]]
 kind = "method_code_patch"
@@ -702,3 +702,53 @@ expected = 1
 from = "63 00 ${is_row:u16}"
 to = "12 10 00 00"
 expected = 1
+
+# ZuiGameHelper's super god mode item (ItemSuperGodMode) refuses to toggle
+# unless a Legion cooling fan is attached: the off->on path scans UsbManager
+# for the HID fan (VID 0x17EF/PID 0x62E9), requests USB permission and runs a
+# temperature handshake, and every failure ends in the "fan required" toast.
+# enableSuperGodMode() itself never touches the fan - it saves the previous
+# mode, publishes mode 16 and writes game_helper_game_mode=16 - so nop the
+# guard branch and let the item toggle directly. The USB scan below becomes
+# unreachable; HID observers stay quiet without a device, and a real fan still
+# gets its listener registered through onModeChange(). Note this unlocks the
+# mode state and the TGPA game-mode mark only: ZuiPP's game-mode ladder accepts
+# 0-8, so pair it with the performance toggle to keep the savage policy.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/sys/item/ItemSuperGodMode;"
+method = "onClick"
+proto = "(Landroid/content/Context;)V"
+
+[[op.symbol]]
+name = "enable_super_god"
+kind = "method"
+class = "Lcom/zui/game/service/sys/item/ItemSuperGodMode;"
+method = "enableSuperGodMode"
+proto = "(Landroid/content/Context;)V"
+
+[[op.replacement]]
+from = "39 00 06 00 70 20 ${enable_super_god:u16} 87 00"
+to = "00 00 00 00 70 20 ${enable_super_god:u16} 87 00"
+expected = 1
+
+# The item is also hidden until the panel's first-time flag flips: the game
+# panel builder (GameHelperViewController$getCurrentView$1$1.emit) drops the
+# super god item while MMKVUtil.getBoolean("is_first_time_mode_super_god")
+# still returns its default of true, and only the cooling-fan attach dialog
+# ever clears that flag, so a fan-less device never sees the toggle. Force
+# this one getBoolean call site to false so the item stays in the panel.
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+scan_class = "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$1;"
+scan_method = "emit"
+target_class = "Lcom/zui/game/service/util/MMKVUtil;"
+target_method = "getBoolean"
+proto = "(Ljava/lang/String;Z)Z"
+value = false

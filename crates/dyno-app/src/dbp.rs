@@ -3139,7 +3139,7 @@ value = false
         assert_eq!(dc.ops.len(), 77);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
-        assert_eq!(uc.ops.len(), 56);
+        assert_eq!(uc.ops.len(), 58);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
         assert_eq!(fc.ops.len(), 15);
@@ -8089,6 +8089,168 @@ value = false
         if let Ok(out) = std::env::var("DYNOBOX_ZUISYSTEMUI_QS_DATE_DEX_OUT") {
             crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
             std::fs::write(&out, &dex).expect("write patched dex");
+        }
+    }
+
+    /// Shape check for the super god mode op: the fan guard branch in
+    /// `ItemSuperGodMode.onClick` is nop'd so the item toggles the mode
+    /// without the HID cooling fan.
+    #[test]
+    fn bundled_unlock_common_super_god_mode_op_shape() {
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let op = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/zui/game/service/sys/item/ItemSuperGodMode;"
+                        && method == "onClick")
+            })
+            .expect("unlock-common must carry the super god mode op");
+        match op {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk");
+                assert_eq!(proto, "(Landroid/content/Context;)V");
+                assert!(
+                    symbols
+                        .iter()
+                        .any(|symbol| symbol.name() == "enable_super_god"),
+                    "the enableSuperGodMode symbol must be declared"
+                );
+                assert_eq!(replacements.len(), 1);
+                let replacement = &replacements[0];
+                assert_eq!(replacement.expected, 1);
+                assert!(replacement.from.starts_with("39 00 06 00"));
+                assert!(replacement.to.starts_with("00 00 00 00"));
+                assert!(replacement.from.contains("${enable_super_god:u16}"));
+                assert!(replacement.to.contains("${enable_super_god:u16}"));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Shape check for the super god visibility op: the panel builder's
+    /// first-time `MMKVUtil.getBoolean` gate is pinned to false so the item
+    /// is not removed from the panel without the cooling fan.
+    #[test]
+    fn bundled_unlock_common_super_god_visibility_op_shape() {
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let op = uc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
+                    if scan_class == "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$1;")
+            })
+            .expect("unlock-common must carry the super god visibility op");
+        match op {
+            DbpOp::InvokeConstBool {
+                partition,
+                file,
+                scan_class,
+                scan_method,
+                target_class,
+                target_method,
+                proto,
+                site_index,
+                value,
+            } => {
+                assert_eq!(partition, "system");
+                assert_eq!(file, "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk");
+                assert_eq!(
+                    scan_class,
+                    "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$1;"
+                );
+                assert_eq!(scan_method.as_deref(), Some("emit"));
+                assert_eq!(target_class, "Lcom/zui/game/service/util/MMKVUtil;");
+                assert_eq!(target_method, "getBoolean");
+                assert_eq!(proto, "(Ljava/lang/String;Z)Z");
+                assert_eq!(*site_index, None);
+                assert!(!*value, "the first-time gate must be pinned to false");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Land the super god ops (the toggle guard nop and the panel visibility
+    /// gate) on the real ZuiGameHelper APK. Set `DYNOBOX_GAMEHELPER_APK`;
+    /// optionally set `DYNOBOX_GAMEHELPER_GODMODE_DEX_OUT` to write the
+    /// patched dex file with both ops applied.
+    #[test]
+    fn bundled_unlock_common_super_god_mode_lands_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_GAMEHELPER_APK") else {
+            return;
+        };
+        let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+        let ops: Vec<_> = uc
+            .ops
+            .iter()
+            .filter(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/zui/game/service/sys/item/ItemSuperGodMode;"
+                        && method == "onClick")
+                    || matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
+                        if scan_class == "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$1;")
+            })
+            .collect();
+        assert_eq!(ops.len(), 2, "the super god unlock carries two ops");
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let entries: Vec<_> = zip
+            .entries
+            .iter()
+            .filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            })
+            .collect();
+
+        let classes4 = entries
+            .iter()
+            .find(|e| e.name == "classes4.dex")
+            .expect("classes4.dex entry");
+        let original = &apk[classes4.data_start..classes4.data_start + classes4.compressed_size];
+        let mut combined = original.to_vec();
+
+        for op in &ops {
+            let mut landed = Vec::new();
+            for entry in &entries {
+                let bytes = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+                let mut fresh = bytes.to_vec();
+                if apply_one_op(&mut fresh, op).unwrap() {
+                    assert_eq!(fresh.len(), bytes.len(), "patch must preserve dex length");
+                    landed.push(entry.name.clone());
+                }
+            }
+            assert_eq!(landed.len(), 1, "each super god op must land in one dex");
+            assert_eq!(
+                landed[0], "classes4.dex",
+                "the super god ops land in classes4.dex"
+            );
+            assert!(
+                apply_one_op(&mut combined, op).unwrap(),
+                "the combined dex must take both super god ops"
+            );
+        }
+        assert_eq!(
+            combined.len(),
+            original.len(),
+            "patches must preserve dex length"
+        );
+        if let Ok(out) = std::env::var("DYNOBOX_GAMEHELPER_GODMODE_DEX_OUT") {
+            crate::fuck_lgsi::recompute_dex_header_sums(&mut combined);
+            std::fs::write(&out, &combined).expect("write patched dex");
         }
     }
 
