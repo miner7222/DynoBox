@@ -136,7 +136,7 @@ pub fn repack_super_image(
     }
 
     // 4. Rewrite XMLs
-    tracing::info!("Rewriting XML entries...");
+    tracing::info!("repack: rewriting XML entries");
     rewrite_super_xml_entries(xml_paths, &chunk_plans)?;
 
     Ok(created_files)

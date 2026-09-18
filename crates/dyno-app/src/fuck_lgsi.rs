@@ -437,7 +437,7 @@ pub fn apply_fuck_lgsi_with_progress(
                 Ok(()) => applied.push(change),
                 Err(e) => {
                     // Strip the leading `feature <name>: ` from the patch
-                    // error so the pipeline's `[lgsi] <name>: skipped (…)`
+                    // error so the pipeline's `lgsi <name>: skipped (…)`
                     // wrapper doesn't repeat the feature name.
                     let msg = e.to_string();
                     let detail = msg

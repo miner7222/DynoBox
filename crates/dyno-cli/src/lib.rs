@@ -3,8 +3,8 @@ use dynobox_app::debloat::DebloatMode;
 use dynobox_app::events::ProgressUnit;
 use dynobox_app::fuck_lgsi::FuckLgsiMode;
 use dynobox_app::{
-    ApplyRequest, CommandKind, MessageLevel, ProgressEvent, RepackRequest, ResignConfig,
-    ResignRequest, StageKind, UnpackRequest, VerificationOptions, default_output_name_for_apply,
+    ApplyRequest, MessageLevel, ProgressEvent, RepackRequest, ResignConfig, ResignRequest,
+    StageKind, UnpackRequest, VerificationOptions, default_output_name_for_apply,
     default_output_name_for_resign, default_output_name_for_unpack, generate_integrity_keypair,
     render_verification_report, run_apply, run_repack, run_resign, run_unpack,
     verify_input_with_options,
@@ -15,8 +15,8 @@ use std::borrow::Cow;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tracing::{Level, info, warn};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{info, warn};
+use tracing_subscriber::{EnvFilter, FmtSubscriber};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -450,7 +450,7 @@ fn setup_logging() {
     // long-running work already surfaces elapsed time via the indicatif
     // progress spinner.
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(EnvFilter::new("info,avbtool_rs=warn"))
         .with_ansi(!plain)
         .with_target(false)
         .without_time()
@@ -636,15 +636,6 @@ fn parse_system_spl(value: &str) -> Result<String, String> {
     dynobox_app::system_spl::validate_spl_format(value)
         .map(|_| value.to_string())
         .map_err(|e| e.to_string())
-}
-
-fn command_name(command: CommandKind) -> &'static str {
-    match command {
-        CommandKind::Unpack => "unpack",
-        CommandKind::Apply => "apply",
-        CommandKind::Resign => "resign",
-        CommandKind::Repack => "repack",
-    }
 }
 
 fn stage_name(stage: StageKind) -> &'static str {
@@ -933,17 +924,9 @@ fn is_path_boundary_before(text: &str, index: usize) -> bool {
 
 fn log_event(event: ProgressEvent) {
     match event {
-        ProgressEvent::CommandStarted {
-            command,
-            input,
-            output,
-        } => {
-            info!(
-                "{}: {} -> {}",
-                command_name(command),
-                input.display(),
-                output.display()
-            );
+        ProgressEvent::CommandStarted { input, output, .. } => {
+            info!("input: {}", input.display());
+            info!("output: {}", output.display());
         }
         ProgressEvent::StageStarted { stage } => {
             info!("{}: start", stage_name(stage));
@@ -957,7 +940,11 @@ fn log_event(event: ProgressEvent) {
             total,
             item,
         } => {
-            info!("{} [{}/{}] {}", stage_name(stage), current, total, item);
+            if total > 1 {
+                info!("{} [{}/{}] {}", stage_name(stage), current, total, item);
+            } else {
+                info!("{}: {}", stage_name(stage), item);
+            }
         }
         // ItemProgress is consumed by the indicatif renderer in
         // `build_text_sink`; in the bare `log_event` path used by tests and

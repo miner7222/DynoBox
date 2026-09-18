@@ -413,7 +413,7 @@ impl PipelineOps for RealPipelineOps {
         message(
             events,
             MessageLevel::Info,
-            "Hashing output for dynobox-manifest.json.".to_string(),
+            "manifest: hashing output".to_string(),
         );
         let manifest = crate::integrity::write_output_manifest_for_dir_with_input_artifacts(
             output_dir,
@@ -432,14 +432,14 @@ impl PipelineOps for RealPipelineOps {
             message(
                 events,
                 MessageLevel::Info,
-                "Manifest excludes root abl.elf after resign.".to_string(),
+                "manifest: root abl.elf excluded after resign".to_string(),
             );
         }
         message(
             events,
             MessageLevel::Info,
             format!(
-                "Manifest: {} input image digest(s), {} output artifact digest(s).",
+                "manifest: {} input digests, {} output digests",
                 manifest.input_artifacts.len(),
                 manifest.artifacts.len()
             ),
@@ -449,7 +449,7 @@ impl PipelineOps for RealPipelineOps {
             message(
                 events,
                 MessageLevel::Info,
-                format!("Signed dynobox-manifest.json with Ed25519 key {key_id}."),
+                format!("manifest: signed (Ed25519, key {key_id})"),
             );
         }
         Ok(())
@@ -477,8 +477,7 @@ where
             message(
                 events,
                 MessageLevel::Warning,
-                "--integrity-key ignored without repack; no dynobox-manifest.json written."
-                    .to_string(),
+                "manifest: --integrity-key ignored without repack; no manifest written".to_string(),
             );
         }
         return Ok(());
@@ -500,10 +499,7 @@ fn capture_original_input_artifacts(
     message(
         events,
         MessageLevel::Info,
-        format!(
-            "Captured {} input image SHA-256 digest(s).",
-            artifacts.len()
-        ),
+        format!("input: {} image SHA-256 digests captured", artifacts.len()),
     );
     Ok(artifacts)
 }
@@ -561,7 +557,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "Unpack workspace: {} hardlink(s), {} copy/copies.",
+            "unpack workspace: {} hardlinks, {} copies",
             prep_stats.hard_links, prep_stats.copies
         ),
     );
@@ -830,7 +826,7 @@ where
                         events,
                         MessageLevel::Warning,
                         format!(
-                            "Could not write report to `{}`: {e}. Close any open report viewer and retry.",
+                            "report: could not write {}: {e}; close any open report viewer and retry",
                             dst.display()
                         ),
                     );
@@ -839,7 +835,7 @@ where
             Err(e) => message(
                 events,
                 MessageLevel::Warning,
-                format!("Could not read report at `{}`: {e}", src.display()),
+                format!("report: could not read {}: {e}", src.display()),
             ),
         }
     }
@@ -856,7 +852,7 @@ where
                 message(
                     events,
                     MessageLevel::Warning,
-                    format!("Could not read retained input at `{}`: {e}", src.display()),
+                    format!("input: could not read {}: {e}", src.display()),
                 );
                 continue;
             }
@@ -865,7 +861,7 @@ where
             message(
                 events,
                 MessageLevel::Warning,
-                format!("Could not retain input at `{}`: {e}", dst.display()),
+                format!("input: could not retain {}: {e}", dst.display()),
             );
         }
     }
@@ -956,7 +952,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "Auto-unpacked {} dynamic partitions from super.",
+            "auto_unpack: extracted {} dynamic partitions from super",
             dynamic_names.len()
         ),
     );
@@ -1036,7 +1032,7 @@ where
     message(
         events,
         MessageLevel::Info,
-        format!("Auto-decrypted {decrypted} .x file(s) to .xml."),
+        format!("input: decrypted {decrypted} .x files to .xml"),
     );
 
     Ok(Some(workspace_dir))
@@ -1060,17 +1056,6 @@ where
     let mut unsupported_messages = Vec::new();
 
     for (index, zip_path) in ota_zips.iter().enumerate() {
-        events.emit(ProgressEvent::ItemStarted {
-            stage: StageKind::Preflight,
-            current: index + 1,
-            total: ota_zips.len(),
-            item: zip_path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_string(),
-        });
-
         let preflight_dir = scratch_dir.join(format!("preflight_ota_{index}"));
         let payload_path = dynobox_payload::extract_payload(zip_path, &preflight_dir)?;
         let report = dynobox_payload::inspect_payload(&payload_path)?;
@@ -1086,7 +1071,7 @@ where
                 events,
                 MessageLevel::Info,
                 format!(
-                    "Preflight `{}`: {} partitions, {} operations.",
+                    "preflight {}: {} partitions, {} ops",
                     zip_path.display(),
                     report.partition_count,
                     report.total_operations
@@ -1095,7 +1080,7 @@ where
         } else {
             for unsupported in report.unsupported_operations {
                 unsupported_messages.push(format!(
-                    "`{}` :: {} op #{} {} :: {}",
+                    "preflight {}: {} op #{} {} ({})",
                     zip_path.display(),
                     unsupported.partition_name,
                     unsupported.operation_index,
@@ -1111,7 +1096,7 @@ where
     } else {
         aggregate_counts
             .iter()
-            .map(|(name, count)| format!("{name}={count}"))
+            .map(|(name, count)| format!("{name} {count}"))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -1119,7 +1104,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "Preflight: {} OTA zip(s), {} partitions, {} operations [{}].",
+            "preflight: {} zips, {} partitions, {} ops ({})",
             ota_zips.len(),
             total_partitions,
             total_operations,
@@ -1136,7 +1121,7 @@ where
                 events,
                 MessageLevel::Warning,
                 format!(
-                    "{} more unsupported operation entries omitted.",
+                    "preflight: {} more unsupported entries omitted",
                     unsupported_messages.len() - 10
                 ),
             );
@@ -1168,7 +1153,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "Found super layout with {} partitions.",
+            "unpack: super layout with {} partitions",
             layout.partitions.len()
         ),
     );
@@ -1189,7 +1174,7 @@ where
     message(
         events,
         MessageLevel::Info,
-        format!("Unpacked {} images.", extracted.len()),
+        format!("unpack: {} images unpacked", extracted.len()),
     );
 
     events.emit(ProgressEvent::StageCompleted {
@@ -1342,7 +1327,7 @@ where
                 events,
                 MessageLevel::Info,
                 format!(
-                    "`--unpack`: extracting {} dynamic partitions to `{}`.",
+                    "unpack: extracting {} dynamic partitions to {}",
                     layout.dynamic_partition_names().len(),
                     auto_unpack_dir.display()
                 ),
@@ -1363,7 +1348,7 @@ where
             message(
                 events,
                 MessageLevel::Info,
-                format!("`--unpack`: extracted {} images.", extracted.len()),
+                format!("unpack: {} images extracted", extracted.len()),
             );
             events.emit(ProgressEvent::StageCompleted {
                 stage: StageKind::AutoUnpack,
@@ -1383,7 +1368,7 @@ where
                     events,
                     MessageLevel::Info,
                     format!(
-                        "{} dynamic partition image(s) missing; apply will extract them from super.",
+                        "apply: {} dynamic images missing; extracting from super",
                         missing_dynamic_count
                     ),
                 );
@@ -1393,7 +1378,7 @@ where
         message(
             events,
             MessageLevel::Warning,
-            "`--unpack`: no super layout; continuing without forced unpack.".to_string(),
+            "unpack: no super layout; continuing without forced unpack".to_string(),
         );
     }
 
@@ -1402,10 +1387,10 @@ where
             events,
             MessageLevel::Info,
             format!(
-                "OTA {}/{}: `{}`",
+                "apply: {} ({}/{})",
+                zip_path.display(),
                 zip_index + 1,
-                ota_zips.len(),
-                zip_path.display()
+                ota_zips.len()
             ),
         );
 
@@ -1417,7 +1402,7 @@ where
             events,
             MessageLevel::Info,
             format!(
-                "Payload: version {}, block size {}, {} partition(s)",
+                "apply: payload version {}, block size {}, {} partitions",
                 metadata.version,
                 metadata.block_size,
                 metadata.partitions.len()
@@ -1425,13 +1410,6 @@ where
         );
 
         for (partition_index, p_info) in metadata.partitions.iter().enumerate() {
-            events.emit(ProgressEvent::ItemStarted {
-                stage: StageKind::Apply,
-                current: partition_index + 1,
-                total: metadata.partitions.len(),
-                item: p_info.name.clone(),
-            });
-
             validate_partition_digest_metadata(
                 p_info.old_size,
                 &p_info.old_hash,
@@ -1453,7 +1431,7 @@ where
                         events,
                         MessageLevel::Info,
                         format!(
-                            "Split source {}: reconstructing {} fragment(s).",
+                            "apply {}: reconstructing {} fragments (split source)",
                             p_info.name,
                             split_fragments.len()
                         ),
@@ -1518,7 +1496,7 @@ where
                         message(
                             events,
                             MessageLevel::Info,
-                            format!("Split source {}: rebuilt {}.", p_info.name, rebuilt),
+                            format!("apply {}: rebuilt {}", p_info.name, rebuilt),
                         );
                     }
                     let _ = std::fs::remove_file(&recon_src);
@@ -1569,10 +1547,7 @@ where
                             message(
                                 events,
                                 MessageLevel::Info,
-                                format!(
-                                    "Packed super detected; extracting dynamic partitions to `{}`.",
-                                    auto_unpack_dir.display()
-                                ),
+                                format!("auto_unpack: extracting to {}", auto_unpack_dir.display()),
                             );
                             auto_unpack_announced = true;
                         }
@@ -2214,7 +2189,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "{img_label} dm-verity root digest {} -> {}",
+            "resign {img_label}: dm-verity root digest {} -> {}",
             &old_hex[..16.min(old_hex.len())],
             &new_hex[..16.min(new_hex.len())]
         ),
@@ -2306,7 +2281,7 @@ where
         message(
             events,
             MessageLevel::Warning,
-            "--debloat: no supported ext4 partitions; skipped.".to_string(),
+            "debloat: no supported ext4 partitions; skipped".to_string(),
         );
         return Ok(());
     }
@@ -2319,7 +2294,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "--debloat: wrote `{}` ({} path(s), {} partition(s)).",
+            "debloat: {} written ({} paths, {} partitions)",
             blobs_path.display(),
             blob_lines.len(),
             scanned
@@ -2361,7 +2336,7 @@ where
                 message(
                     events,
                     MessageLevel::Info,
-                    "--debloat: non-interactive; using debloat.txt as-is.".to_string(),
+                    "debloat: non-interactive; using debloat.txt as-is".to_string(),
                 );
             }
             std::fs::read_to_string(&debloat_path).unwrap_or_default()
@@ -2381,7 +2356,7 @@ where
             message(
                 events,
                 MessageLevel::Warning,
-                format!("--debloat: malformed `{line}`; expected partition:/path."),
+                format!("debloat: malformed entry {line}; expected partition:/path"),
             );
             continue;
         };
@@ -2400,7 +2375,7 @@ where
         message(
             events,
             MessageLevel::Info,
-            "--debloat: debloat.txt has no valid entries; nothing removed.".to_string(),
+            "debloat: no valid entries in debloat.txt; nothing removed".to_string(),
         );
         return Ok(());
     }
@@ -2415,7 +2390,7 @@ where
             message(
                 events,
                 MessageLevel::Warning,
-                format!("--debloat: partition `{stem}` was not scanned; skipped its entries."),
+                format!("debloat: partition {stem} not scanned; skipped its entries"),
             );
             continue;
         }
@@ -2425,7 +2400,7 @@ where
             message(
                 events,
                 MessageLevel::Warning,
-                format!("--debloat: `{img_name}` not found; skipped its entries."),
+                format!("debloat: {img_name} not found; skipped its entries"),
             );
             continue;
         }
@@ -2442,7 +2417,7 @@ where
                     message(
                         events,
                         MessageLevel::Warning,
-                        format!("--debloat: {stem}:{path} not found; skipped."),
+                        format!("debloat: {stem}:{path} not found; skipped"),
                     );
                 }
             }
@@ -2450,7 +2425,7 @@ where
         message(
             events,
             MessageLevel::Info,
-            format!("--debloat: {stem}: hid {removed} path(s), missing {not_found}."),
+            format!("debloat {stem}: {removed} hidden, {not_found} missing"),
         );
         if removed == 0 {
             continue;
@@ -2506,7 +2481,7 @@ where
         message(
             events,
             MessageLevel::Warning,
-            format!("--add-overlay: `{img_name}` not found; skipped."),
+            format!("overlay: {img_name} not found; skipped"),
         );
         return Ok(());
     }
@@ -2558,14 +2533,7 @@ where
         message(
             events,
             MessageLevel::Info,
-            format!(
-                "--add-overlay: {PARTITION}:/{} placed `{}` ({} bytes, inode {}, {} block(s)).",
-                crate::add_overlay::DEFAULT_OVERLAY_DIR,
-                item.name,
-                item.size,
-                item.inode,
-                item.blocks
-            ),
+            format!("overlay: +{} ({} B)", item.name, item.size),
         );
         records.push(ReportOverlayFileRecord {
             name: item.name.clone(),
@@ -2689,7 +2657,8 @@ where
                 message(
                     events,
                     MessageLevel::Warning,
-                    "Rollback reset declined; re-signing without rollback override.".to_string(),
+                    "resign: rollback reset declined; re-signing without rollback override"
+                        .to_string(),
                 );
                 effective_rollback = None;
                 images = all_images;
@@ -2706,7 +2675,7 @@ where
                 message(
                     events,
                     MessageLevel::Warning,
-                    "Rollback reset needs a terminal prompt; re-signing without override."
+                    "resign: rollback reset needs a terminal prompt; re-signing without override"
                         .to_string(),
                 );
                 effective_rollback = None;
@@ -2764,7 +2733,7 @@ where
                     events,
                     MessageLevel::Info,
                     format!(
-                        "vendor.img {}: {} -> {} (build.prop + AVB; verity deferred)",
+                        "resign vendor.img: {} {} -> {} (verity deferred)",
                         VENDOR_SPL_PROPERTY, old, new
                     ),
                 );
@@ -2783,7 +2752,7 @@ where
                     events,
                     MessageLevel::Warning,
                     format!(
-                        "vendor.img SPL unchanged ({}): requested {} is not newer than current {}; image still re-signed.",
+                        "resign vendor.img: {} unchanged (requested {}, current {}); image re-signed",
                         VENDOR_SPL_PROPERTY, requested, old
                     ),
                 );
@@ -2848,7 +2817,7 @@ where
                     events,
                     MessageLevel::Info,
                     format!(
-                        "system.img {}: {} -> {} (build.prop + AVB; verity deferred)",
+                        "resign system.img: {} {} -> {} (verity deferred)",
                         SYSTEM_SPL_PROPERTY, old, new
                     ),
                 );
@@ -2867,7 +2836,7 @@ where
                     events,
                     MessageLevel::Warning,
                     format!(
-                        "system.img SPL unchanged ({}): requested {} is not newer than current {}; image still re-signed.",
+                        "resign system.img: {} unchanged (requested {}, current {}); image re-signed",
                         SYSTEM_SPL_PROPERTY, requested, old
                     ),
                 );
@@ -2943,9 +2912,7 @@ where
                     message(
                         events,
                         MessageLevel::Info,
-                        format!(
-                            "[lgsi] {name}: {from} -> {to} (invoke-direct offset {invoke_direct_offset_in_jar:#x})"
-                        ),
+                        format!("lgsi {name}: {from} -> {to} @{invoke_direct_offset_in_jar:#x}"),
                     );
                 }
                 for skip in &skipped {
@@ -2953,16 +2920,13 @@ where
                     message(
                         events,
                         MessageLevel::Warning,
-                        format!("[lgsi] {name}: skipped ({reason})"),
+                        format!("lgsi {name}: skipped ({reason})"),
                     );
                 }
                 message(
                     events,
                     MessageLevel::Info,
-                    format!(
-                        "LGSI: flipped {} feature(s) in system.img (verity deferred)",
-                        applied.len(),
-                    ),
+                    format!("lgsi: {} features toggled in system.img", applied.len(),),
                 );
                 let report_applied: Vec<ReportLgsiChange> = applied
                     .iter()
@@ -2994,9 +2958,7 @@ where
                 message(
                     events,
                     MessageLevel::Warning,
-                    format!(
-                        "--fuck-lgsi skipped: {reason}; system.img and vbmeta_system.img left untouched"
-                    ),
+                    format!("lgsi: skipped ({reason}); system.img and vbmeta_system.img untouched"),
                 );
             }
         }
@@ -3061,7 +3023,7 @@ where
                     message(
                         events,
                         MessageLevel::Warning,
-                        format!("--plus {source}: {img_name} not found; skipped its ops"),
+                        format!("patch {source}: {img_name} not found; skipped its ops"),
                     );
                     continue;
                 }
@@ -3082,7 +3044,7 @@ where
                             events,
                             MessageLevel::Warning,
                             format!(
-                                "--plus {source}: target {partition}:{} not found; skipped {} op(s)",
+                                "patch {source}: {partition}:{} not found; skipped {} ops",
                                 r.file, r.ops_skipped
                             ),
                         );
@@ -3094,7 +3056,7 @@ where
                             events,
                             MessageLevel::Warning,
                             format!(
-                                "--plus {source}: target {partition}:{} applied none of {} op(s) (no exact site or refused by safety validation)",
+                                "patch {source} -> {partition}:{}: 0 applied, {} skipped (no exact site)",
                                 r.file, r.ops_skipped
                             ),
                         );
@@ -3103,7 +3065,7 @@ where
                             events,
                             MessageLevel::Info,
                             format!(
-                                "[plus] {source} → {partition}:{}: {} op(s) applied, {} skipped (verity deferred)",
+                                "patch {source} -> {partition}:{}: {} applied, {} skipped (verity deferred)",
                                 r.file, r.ops_applied, r.ops_skipped
                             ),
                         );
@@ -3130,10 +3092,7 @@ where
                 message(
                     events,
                     MessageLevel::Warning,
-                    format!(
-                        "--plus {source}: patch `{}` {reason}; images left untouched",
-                        doc.name,
-                    ),
+                    format!("patch {source}: {} {reason}; images untouched", doc.name,),
                 );
             }
             plus_patches.push(ReportPlusPatchRecord {
@@ -3248,6 +3207,12 @@ where
 
     let mut resigned_count = 0usize;
     let mut skipped_unsigned_count = 0usize;
+    let mut unsigned_skip_hint_emitted = false;
+    let resign_algorithm = config.algorithm.clone().or_else(|| {
+        avbtool_rs::crypto::load_key_from_spec(&config.key)
+            .ok()
+            .and_then(|key| key.algorithm().ok())
+    });
 
     for (index, path) in images.iter().enumerate() {
         let filename = path
@@ -3255,13 +3220,6 @@ where
             .and_then(|name| name.to_str())
             .unwrap_or_default()
             .to_string();
-
-        events.emit(ProgressEvent::ItemStarted {
-            stage: StageKind::Resign,
-            current: index + 1,
-            total: images.len(),
-            item: filename.clone(),
-        });
 
         let out_path = out_dir.join(&filename);
         // Every resign write must hit a private inode. The boot SPL update now
@@ -3302,9 +3260,41 @@ where
             avbtool_rs::resign::ResignOutcome::Resigned => {
                 resigned_count += 1;
                 report.resigned_images.push(filename.clone());
+                let algorithm = resign_algorithm
+                    .as_deref()
+                    .map(|name| format!(" ({name})"))
+                    .unwrap_or_default();
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!(
+                        "resign [{}/{}] {}: signed{}",
+                        index + 1,
+                        images.len(),
+                        filename,
+                        algorithm
+                    ),
+                );
             }
             avbtool_rs::resign::ResignOutcome::SkippedUnsigned => {
                 skipped_unsigned_count += 1;
+                let hint = if unsigned_skip_hint_emitted {
+                    ""
+                } else {
+                    unsigned_skip_hint_emitted = true;
+                    "; --force signs unsigned AVB images"
+                };
+                message(
+                    events,
+                    MessageLevel::Info,
+                    format!(
+                        "resign [{}/{}] {}: skipped (AVB NONE{})",
+                        index + 1,
+                        images.len(),
+                        filename,
+                        hint
+                    ),
+                );
             }
         }
 
@@ -3314,7 +3304,7 @@ where
                     message(
                         events,
                         MessageLevel::Info,
-                        format!("boot.img {}: {} -> {}", BOOT_SPL_PROPERTY, old, new),
+                        format!("resign boot.img: {} {} -> {}", BOOT_SPL_PROPERTY, old, new),
                     );
                     report.boot_spl = Some(ReportSplRecord {
                         property: BOOT_SPL_PROPERTY.to_string(),
@@ -3330,7 +3320,7 @@ where
                         events,
                         MessageLevel::Warning,
                         format!(
-                            "boot.img SPL unchanged ({}): requested {} is not newer than current {}; image still re-signed.",
+                            "resign boot.img: {} unchanged (requested {}, current {}); image re-signed",
                             BOOT_SPL_PROPERTY, requested, old
                         ),
                     );
@@ -3438,7 +3428,7 @@ where
             events,
             MessageLevel::Info,
             format!(
-                "rollback index reset to {} ({} images re-signed: {})",
+                "resign: rollback index reset to {} ({} images re-signed: {})",
                 format_unix_timestamp_utc(ri),
                 resigned_count,
                 images
@@ -3453,7 +3443,7 @@ where
             events,
             MessageLevel::Info,
             format!(
-                "Resigned {} image(s); skipped {} unsigned AVB image(s).",
+                "resign: {} signed, {} skipped (unsigned AVB)",
                 resigned_count, skipped_unsigned_count
             ),
         );
@@ -3468,7 +3458,7 @@ where
             events,
             MessageLevel::Warning,
             format!(
-                "Signing key changed: {} -> {}. Flash an abl.elf that accepts the new key or the device may not boot.",
+                "resign: signing key changed {} -> {}; flash an abl.elf that accepts the new key or the device may not boot",
                 orig, new
             ),
         );
@@ -3491,7 +3481,7 @@ where
                 events,
                 MessageLevel::Warning,
                 format!(
-                    "Could not write report to `{}`: {e}; resign continues",
+                    "report: could not write {}: {e}; resign continues",
                     report_path.display()
                 ),
             );
@@ -3499,7 +3489,7 @@ where
             message(
                 events,
                 MessageLevel::Info,
-                format!("Report: `{}`", report_path.display()),
+                format!("report: {}", report_path.display()),
             );
         }
     }
@@ -3691,7 +3681,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "Repack staging: {} rawprogram XML(s), {} super chunk(s), {} image(s); {} hardlink(s), {} copy/copies.",
+            "prepare_repack: {} rawprogram XMLs, {} super chunks, {} images ({} hardlinks, {} copies)",
             prep_stats.xml_count,
             prep_stats.super_count,
             prep_stats.image_count,
@@ -3709,7 +3699,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "Final images: {} hardlink(s), {} copy/copies.",
+            "repack: {} hardlinks, {} copies",
             final_copy_stats.hard_links, final_copy_stats.copies
         ),
     );
@@ -3731,7 +3721,7 @@ where
                 events,
                 MessageLevel::Info,
                 format!(
-                    "Removed {} standalone dynamic image(s) now packed in super.",
+                    "repack: {} standalone dynamic images packed into super",
                     removed
                 ),
             );
@@ -4301,7 +4291,7 @@ where
         message(
             events,
             MessageLevel::Info,
-            format!("--complete: copied {} additional input file(s).", copied),
+            format!("complete: {} input files copied", copied),
         );
     }
     Ok(())
@@ -4623,7 +4613,7 @@ where
             OtaDigestProgress {
                 current,
                 total,
-                item: &format!("{partition_name}: verify OTA target digest"),
+                item: &format!("{partition_name}: verifying target digest"),
             },
             target.path,
             target.size,
@@ -4636,7 +4626,7 @@ where
             OtaDigestProgress {
                 current,
                 total,
-                item: &format!("{partition_name}: diagnose OTA source digest"),
+                item: &format!("{partition_name}: diagnosing source digest"),
             },
             source.path,
             source.size,

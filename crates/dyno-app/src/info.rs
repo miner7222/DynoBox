@@ -72,7 +72,7 @@ where
         message(
             events,
             MessageLevel::Info,
-            "--info: no standalone partition images; scanning super chunks.".to_string(),
+            "info: no standalone partition images; scanning super chunks".to_string(),
         );
         scan_images(&chunks, &mut blob_lines, &mut scanned);
     }
@@ -81,7 +81,7 @@ where
         message(
             events,
             MessageLevel::Warning,
-            "--info: no supported ext4 partitions; skipped blobs.txt.".to_string(),
+            "info: no supported ext4 partitions; skipped blobs.txt".to_string(),
         );
         None
     } else {
@@ -92,7 +92,7 @@ where
             events,
             MessageLevel::Info,
             format!(
-                "--info: wrote `{}` ({} path(s), {} partition(s)).",
+                "info: {} written ({} paths, {} partitions)",
                 blobs_path.display(),
                 blob_lines.len(),
                 scanned
@@ -174,7 +174,7 @@ where
         message(
             events,
             MessageLevel::Warning,
-            "--info: product.img not found; skipped lgsi_features.json.".to_string(),
+            "info: product.img not found; skipped lgsi_features.json".to_string(),
         );
         return Ok(None);
     }
@@ -184,7 +184,7 @@ where
             message(
                 events,
                 MessageLevel::Warning,
-                "--info: no lgsi_build_info*.html in product.img:/etc/; skipped lgsi_features.json."
+                "info: no lgsi_build_info*.html in product.img:/etc; skipped lgsi_features.json"
                     .to_string(),
             );
             return Ok(None);
@@ -205,7 +205,7 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "--info: wrote `{}` ({} feature(s) from {html_name}).",
+            "info: {} written ({} features from {html_name})",
             json_path.display(),
             html_features.len(),
         ),

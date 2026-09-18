@@ -631,7 +631,7 @@ where
         events.emit(ProgressEvent::Message {
             level: MessageLevel::Info,
             text: format!(
-                "Verify AVB: clean ({} image(s), {} AVB image(s)).",
+                "verify AVB: clean ({} images, {} AVB)",
                 report.image_file_count, report.avb_image_count
             ),
         });
@@ -641,7 +641,7 @@ where
         events.emit(ProgressEvent::Message {
             level: MessageLevel::Info,
             text: format!(
-                "Verify super: clean ({} chunk(s), {} dynamic partition(s)).",
+                "verify super: clean ({} chunks, {} dynamic partitions)",
                 summary.chunk_count, summary.dynamic_partition_count
             ),
         });
