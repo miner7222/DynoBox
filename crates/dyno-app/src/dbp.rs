@@ -3142,7 +3142,7 @@ value = false
         assert_eq!(uc.ops.len(), 56);
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
         assert_eq!(fc.name, "fix-common");
-        assert_eq!(fc.ops.len(), 14);
+        assert_eq!(fc.ops.len(), 15);
         let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
         assert_eq!(wj.name, "debloat-wuji");
         assert_eq!(wj.ops.len(), 4);
@@ -7977,6 +7977,116 @@ value = false
         let (name, mut dex) = landed.pop().expect("one dex carries the AOD date op");
         assert_eq!(name, "classes.dex", "the AOD op lands in the first dex");
         if let Ok(out) = std::env::var("DYNOBOX_ZUISYSTEMUI_AOD_DEX_OUT") {
+            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+            std::fs::write(&out, &dex).expect("write patched dex");
+        }
+    }
+
+    /// Shape check for the QS header date op: the skeleton formatter call in
+    /// `VariableDateViewController.access$updateClock` gives way to a
+    /// literal-pattern `android.icu.text.SimpleDateFormat`, so a translated
+    /// pattern such as "M월 d일 EEEE" keeps its month/day literals.
+    #[test]
+    fn bundled_fix_common_qs_header_date_op_shape() {
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let op = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/android/systemui/statusbar/policy/VariableDateViewController;"
+                        && method == "access$updateClock")
+            })
+            .expect("fix-common must carry the QS header date op");
+        match op {
+            DbpOp::MethodCodePatch {
+                partition,
+                file,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(partition, "system_ext");
+                assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
+                assert_eq!(
+                    proto,
+                    "(Lcom/android/systemui/statusbar/policy/VariableDateViewController;)V"
+                );
+                for name in ["get_instance_for_skeleton", "icu_sdf", "icu_sdf_init"] {
+                    assert!(
+                        symbols.iter().any(|symbol| symbol.name() == name),
+                        "symbol {name} must be declared"
+                    );
+                }
+                assert_eq!(replacements.len(), 1);
+                let replacement = &replacements[0];
+                assert_eq!(replacement.expected, 1);
+                assert_eq!(
+                    replacement.from,
+                    "71 20 ${get_instance_for_skeleton:u16} 10 00 0c 00 38 00 11 00"
+                );
+                assert_eq!(
+                    replacement.to,
+                    "22 02 ${icu_sdf:u16} 70 30 ${icu_sdf_init:u16} 02 01 07 20"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Land the QS header date op on the real ZuiSystemUI APK. Set
+    /// `DYNOBOX_ZUISYSTEMUI_APK`; optionally set
+    /// `DYNOBOX_ZUISYSTEMUI_QS_DATE_DEX_OUT` to write the patched dex file.
+    #[test]
+    fn bundled_fix_common_qs_header_date_lands_on_real_apk() {
+        let Ok(path) = std::env::var("DYNOBOX_ZUISYSTEMUI_APK") else {
+            return;
+        };
+        let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+        let op = fc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/android/systemui/statusbar/policy/VariableDateViewController;"
+                        && method == "access$updateClock")
+            })
+            .expect("QS header date op");
+        let apk = std::fs::read(&path).expect("read apk");
+        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let entries: Vec<_> = zip
+            .entries
+            .iter()
+            .filter(|e| {
+                e.name.ends_with(".dex")
+                    && e.compression_method == 0
+                    && !e.uses_data_descriptor
+                    && !e.is_zip64
+                    && e.data_start + e.compressed_size <= apk.len()
+            })
+            .collect();
+
+        let mut landed = Vec::new();
+        for entry in entries {
+            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
+            let mut dex = original.to_vec();
+            if apply_one_op(&mut dex, op).unwrap() {
+                assert_eq!(dex.len(), original.len(), "patch must preserve dex length");
+                landed.push((entry.name.clone(), dex));
+            }
+        }
+        assert_eq!(
+            landed.len(),
+            1,
+            "the QS header date op must land in one dex"
+        );
+        let (name, mut dex) = landed.pop().expect("one dex carries the QS header date op");
+        assert_eq!(
+            name, "classes2.dex",
+            "the QS header date op lands in classes2.dex"
+        );
+        if let Ok(out) = std::env::var("DYNOBOX_ZUISYSTEMUI_QS_DATE_DEX_OUT") {
             crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
             std::fs::write(&out, &dex).expect("write patched dex");
         }

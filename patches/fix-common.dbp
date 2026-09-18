@@ -891,6 +891,56 @@ from = "38 06 03 00 28 29"
 to = "38 06 03 00 28 2c"
 expected = 1
 
+# ZuiSystemUI's QS header date (VariableDateViewController.access$updateClock)
+# builds its displayed text from R.string.header_date_format_desc through
+# DateFormat.getInstanceForSkeleton(), so the resource is normalized as an ICU
+# skeleton and every non-skeleton character is dropped: a Korean translation
+# such as "M월 d일 EEEE" collapses to ko's "M. d. EEEE" ("9. 18. 금요일").
+# Construct the formatter from the same string as a literal pattern instead
+# (android.icu.text.SimpleDateFormat), so the pattern comes out as written
+# ("9월 18일 금요일"). getPatternInstance would be a bare method-id swap, but
+# ZuiSystemUI's dex carries no reference to it and symbol resolution never
+# inserts pool entries, so the (String, Locale) constructor that
+# EdgeBackGestureHandler already pulls into classes2.dex is used. The inline
+# constructor never returns null, so the null check goes away with the call
+# and the :cond_1 else becomes unreachable; the replacement window is the
+# same 12 bytes, keeping every later address fixed. The trailing move-object
+# byte is (source << 4) | destination - 07 20 is "move-object v0, v2", and
+# getting that pair backwards makes v0 a String at the DateFormat.format call
+# below, which fails class verification.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+class = "Lcom/android/systemui/statusbar/policy/VariableDateViewController;"
+method = "access$updateClock"
+proto = "(Lcom/android/systemui/statusbar/policy/VariableDateViewController;)V"
+
+[[op.symbol]]
+name = "get_instance_for_skeleton"
+kind = "method"
+class = "Landroid/icu/text/DateFormat;"
+method = "getInstanceForSkeleton"
+proto = "(Ljava/lang/String;Ljava/util/Locale;)Landroid/icu/text/DateFormat;"
+
+[[op.symbol]]
+name = "icu_sdf"
+kind = "type"
+descriptor = "Landroid/icu/text/SimpleDateFormat;"
+
+[[op.symbol]]
+name = "icu_sdf_init"
+kind = "method"
+class = "Landroid/icu/text/SimpleDateFormat;"
+method = "<init>"
+proto = "(Ljava/lang/String;Ljava/util/Locale;)V"
+
+[[op.replacement]]
+from = "71 20 ${get_instance_for_skeleton:u16} 10 00 0c 00 38 00 11 00"
+to = "22 02 ${icu_sdf:u16} 70 30 ${icu_sdf_init:u16} 02 01 07 20"
+expected = 1
+
 # The freeform sidebar's hover bar is created as an application-overlay window
 # (type 2038), so the system hides it and blocks its touch strip whenever a
 # sensitive window such as a permission dialog asks for non-system overlays to
