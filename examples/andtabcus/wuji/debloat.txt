@@ -31,6 +31,7 @@ system:/system/preinstall/Bilicomic/
 system:/system/preinstall/Canva/
 system:/system/preinstall/DouBao/
 system:/system/preinstall/DouYin/
+system:/system/preinstall/GameHub_Preinstalled/
 system:/system/preinstall/HSJPRO/
 system:/system/preinstall/HybridWorkSpace/
 system:/system/preinstall/JinDong/
