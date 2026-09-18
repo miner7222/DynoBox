@@ -40,6 +40,13 @@ const HISTORY_STORAGE_KEY: &str = "dynobox_run_history";
 const HISTORY_SCHEMA_VERSION: u32 = 1;
 const HISTORY_LIMIT: usize = 50;
 
+/// Serde default for the overlay/patch enable toggles: history entries
+/// written before those toggles existed always applied their lists, so
+/// they restore enabled.
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Default, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 enum Mode {
     #[default]
@@ -73,9 +80,13 @@ struct FormSnapshot {
     debloat_list: Option<PathBuf>,
     #[serde(default)]
     add_overlays: Vec<PathBuf>,
+    #[serde(default = "default_true")]
+    add_overlays_enabled: bool,
     #[serde(default)]
     info: bool,
     plus_patches: Vec<PathBuf>,
+    #[serde(default = "default_true")]
+    plus_patches_enabled: bool,
 }
 
 impl FormSnapshot {
@@ -102,8 +113,10 @@ impl FormSnapshot {
             debloat: gui.debloat,
             debloat_list: gui.debloat_list.clone(),
             add_overlays: gui.add_overlays.clone(),
+            add_overlays_enabled: gui.add_overlays_enabled,
             info: gui.info,
             plus_patches: gui.plus_patches.clone(),
+            plus_patches_enabled: gui.plus_patches_enabled,
         }
     }
 
@@ -131,8 +144,10 @@ impl FormSnapshot {
         gui.debloat = self.debloat;
         gui.debloat_list.clone_from(&self.debloat_list);
         gui.add_overlays.clone_from(&self.add_overlays);
+        gui.add_overlays_enabled = self.add_overlays_enabled;
         gui.info = self.info;
         gui.plus_patches.clone_from(&self.plus_patches);
+        gui.plus_patches_enabled = self.plus_patches_enabled;
     }
 
     fn command_line(&self) -> String {
@@ -243,8 +258,10 @@ struct DynoGui {
     debloat: bool,
     debloat_list: Option<PathBuf>,
     add_overlays: Vec<PathBuf>,
+    add_overlays_enabled: bool,
     info: bool,
     plus_patches: Vec<PathBuf>,
+    plus_patches_enabled: bool,
 
     // Last spawn result, surfaced inline next to the Run button so
     // the user knows whether the terminal launched OK.
@@ -252,6 +269,8 @@ struct DynoGui {
 
     history: RunHistory,
     history_open: bool,
+    overlay_manager_open: bool,
+    patch_manager_open: bool,
     missing_paths: MissingPaths,
 }
 
@@ -289,11 +308,15 @@ impl Default for DynoGui {
             debloat: false,
             debloat_list: None,
             add_overlays: Vec::new(),
+            add_overlays_enabled: true,
             info: false,
             plus_patches: Vec::new(),
+            plus_patches_enabled: true,
             last_status: None,
             history: RunHistory::default(),
             history_open: false,
+            overlay_manager_open: false,
+            patch_manager_open: false,
             missing_paths: MissingPaths::default(),
         }
     }
@@ -440,11 +463,15 @@ impl DynoGui {
                 a.push("--debloat=".into());
             }
         }
-        for patch in &self.plus_patches {
-            a.push(format!("--plus={}", patch.display()));
+        if self.plus_patches_enabled {
+            for patch in &self.plus_patches {
+                a.push(format!("--plus={}", patch.display()));
+            }
         }
-        for overlay in &self.add_overlays {
-            a.push(format!("--add-overlay={}", overlay.display()));
+        if self.add_overlays_enabled {
+            for overlay in &self.add_overlays {
+                a.push(format!("--add-overlay={}", overlay.display()));
+            }
         }
     }
 
@@ -585,6 +612,8 @@ impl eframe::App for DynoGui {
                 });
         });
         self.history_window(ui.ctx());
+        self.overlay_manager_window(ui.ctx());
+        self.patch_manager_window(ui.ctx());
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -659,6 +688,114 @@ impl DynoGui {
             self.history.delete(index);
         } else if let Some(snapshot) = load {
             self.load_history_entry(&snapshot);
+        }
+    }
+
+    fn overlay_manager_window(&mut self, ctx: &egui::Context) {
+        if !self.overlay_manager_open {
+            return;
+        }
+        let mut open = self.overlay_manager_open;
+        let mut remove = None;
+        egui::Window::new("Overlay APKs (--add-overlay)")
+            .open(&mut open)
+            .default_size([560.0, 320.0])
+            .show(ctx, |ui| {
+                if self.add_overlays.is_empty() {
+                    ui.label(egui::RichText::new("No overlay APKs added").weak());
+                } else {
+                    ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                        for (i, p) in self.add_overlays.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("🗑").on_hover_text("Remove").clicked() {
+                                    remove = Some(i);
+                                }
+                                let text = p.display().to_string();
+                                drag_scroll_path(
+                                    ui,
+                                    &text,
+                                    &format!("add-overlay-{i}"),
+                                    self.missing_paths.contains(p),
+                                );
+                            });
+                        }
+                    });
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("➕ Add overlay").clicked()
+                        && let Some(paths) = rfd::FileDialog::new()
+                            .add_filter("Android package", &["apk"])
+                            .pick_files()
+                    {
+                        for p in paths {
+                            if !self.add_overlays.contains(&p) {
+                                self.add_overlays.push(p);
+                            }
+                        }
+                    }
+                    if !self.add_overlays.is_empty() && ui.button("Clear").clicked() {
+                        self.add_overlays.clear();
+                    }
+                });
+            });
+        self.overlay_manager_open = open;
+        if let Some(index) = remove {
+            self.add_overlays.remove(index);
+        }
+    }
+
+    fn patch_manager_window(&mut self, ctx: &egui::Context) {
+        if !self.patch_manager_open {
+            return;
+        }
+        let mut open = self.patch_manager_open;
+        let mut remove = None;
+        egui::Window::new("External patches (--plus)")
+            .open(&mut open)
+            .default_size([560.0, 320.0])
+            .show(ctx, |ui| {
+                if self.plus_patches.is_empty() {
+                    ui.label(egui::RichText::new("No external patches added").weak());
+                } else {
+                    ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                        for (i, p) in self.plus_patches.iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("🗑").on_hover_text("Remove").clicked() {
+                                    remove = Some(i);
+                                }
+                                let text = p.display().to_string();
+                                drag_scroll_path(
+                                    ui,
+                                    &text,
+                                    &format!("plus-dbp-{i}"),
+                                    self.missing_paths.contains(p),
+                                );
+                            });
+                        }
+                    });
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("➕ Add .dbp").clicked()
+                        && let Some(paths) = rfd::FileDialog::new()
+                            .add_filter("DynoBox patch", &["dbp"])
+                            .pick_files()
+                    {
+                        for p in paths {
+                            if !self.plus_patches.contains(&p) {
+                                self.plus_patches.push(p);
+                            }
+                        }
+                    }
+                    if !self.plus_patches.is_empty() && ui.button("Clear").clicked() {
+                        self.plus_patches.clear();
+                    }
+                });
+            });
+        self.patch_manager_open = open;
+        if let Some(index) = remove {
+            self.plus_patches.remove(index);
         }
     }
 
@@ -906,71 +1043,53 @@ impl DynoGui {
             });
 
             ui.horizontal(|ui| {
-                if ui.button("➕ Add overlay").clicked()
-                    && let Some(paths) = rfd::FileDialog::new()
-                        .add_filter("Android package", &["apk"])
-                        .pick_files()
-                {
-                    for p in paths {
-                        if !self.add_overlays.contains(&p) {
-                            self.add_overlays.push(p);
-                        }
-                    }
+                ui.checkbox(&mut self.add_overlays_enabled, "")
+                    .on_hover_text("Apply the --add-overlay list during resign");
+                let overlays_missing = self
+                    .add_overlays
+                    .iter()
+                    .any(|p| self.missing_paths.contains(p));
+                let mut overlay_text =
+                    egui::RichText::new(format!("{} overlay(s)", self.add_overlays.len()));
+                if overlays_missing {
+                    overlay_text = overlay_text.color(egui::Color32::LIGHT_RED);
                 }
-                if !self.add_overlays.is_empty() && ui.button("Clear").clicked() {
-                    self.add_overlays.clear();
-                }
-                ui.label(format!(
-                    "--add-overlay ({} APK(s))",
-                    self.add_overlays.len()
-                ))
-                .on_hover_text(
-                    "Static RRO APKs inserted into product.img:/overlay/ during resign \
-                         (no mount). \
-                         The partition's dm-verity is regenerated and re-signed.",
-                );
-            });
-            for (i, p) in self.add_overlays.iter().enumerate() {
-                let text = p.display().to_string();
-                drag_scroll_path(
-                    ui,
-                    &text,
-                    &format!("add-overlay-{i}"),
-                    self.missing_paths.contains(p),
-                );
-            }
-
-            ui.horizontal(|ui| {
-                if ui.button("➕ Add .dbp").clicked() {
-                    if let Some(paths) = rfd::FileDialog::new()
-                        .add_filter("DynoBox patch", &["dbp"])
-                        .pick_files()
-                    {
-                        for p in paths {
-                            if !self.plus_patches.contains(&p) {
-                                self.plus_patches.push(p);
-                            }
-                        }
-                    }
-                }
-                if !self.plus_patches.is_empty() && ui.button("Clear").clicked() {
-                    self.plus_patches.clear();
-                }
-                ui.label(format!("--plus ({} patch(es))", self.plus_patches.len()))
+                if ui
+                    .link(overlay_text)
                     .on_hover_text(
-                        "External .dbp patches applied to files inside the partition \
-                         images during resign.",
-                    );
+                        "Manage the --add-overlay list: static RRO APKs inserted into \
+                         product.img:/overlay/ during resign (no mount). The \
+                         partition's dm-verity is regenerated and re-signed.",
+                    )
+                    .clicked()
+                {
+                    self.overlay_manager_open = true;
+                }
+
+                ui.add_space(12.0);
+
+                ui.checkbox(&mut self.plus_patches_enabled, "")
+                    .on_hover_text("Apply the --plus list during resign");
+                let patches_missing = self
+                    .plus_patches
+                    .iter()
+                    .any(|p| self.missing_paths.contains(p));
+                let mut patch_text =
+                    egui::RichText::new(format!("{} patch(es)", self.plus_patches.len()));
+                if patches_missing {
+                    patch_text = patch_text.color(egui::Color32::LIGHT_RED);
+                }
+                if ui
+                    .link(patch_text)
+                    .on_hover_text(
+                        "Manage the --plus list: external .dbp patches applied to files \
+                         inside the partition images during resign.",
+                    )
+                    .clicked()
+                {
+                    self.patch_manager_open = true;
+                }
             });
-            for (i, p) in self.plus_patches.iter().enumerate() {
-                let text = p.display().to_string();
-                drag_scroll_path(
-                    ui,
-                    &text,
-                    &format!("plus-dbp-{i}"),
-                    self.missing_paths.contains(p),
-                );
-            }
         });
     }
 
@@ -1470,6 +1589,41 @@ mod tests {
             !off.build_args().contains(&"--info".to_string()),
             "info off should not emit --info"
         );
+    }
+
+    #[test]
+    fn overlay_and_patch_lists_are_omitted_when_disabled() {
+        let mut gui = populated_gui(Mode::Resign);
+        gui.add_overlays = vec![PathBuf::from("overlay.apk")];
+        gui.plus_patches = vec![PathBuf::from("extra.dbp")];
+        let args = gui.build_args();
+        assert!(args.iter().any(|a| a.starts_with("--add-overlay=")));
+        assert!(args.iter().any(|a| a.starts_with("--plus=")));
+
+        gui.add_overlays_enabled = false;
+        gui.plus_patches_enabled = false;
+        let args = gui.build_args();
+        assert!(
+            !args.iter().any(|a| a.starts_with("--add-overlay=")),
+            "disabled overlay list must not emit --add-overlay, got: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a.starts_with("--plus=")),
+            "disabled patch list must not emit --plus, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn snapshots_without_enable_toggles_restore_enabled() {
+        let snapshot = FormSnapshot::capture(&populated_gui(Mode::Apply));
+        let mut value = serde_json::to_value(&snapshot).expect("serialize snapshot");
+        let object = value.as_object_mut().expect("snapshot object");
+        object.remove("add_overlays_enabled");
+        object.remove("plus_patches_enabled");
+
+        let legacy: FormSnapshot = serde_json::from_value(value).expect("legacy snapshot");
+        assert!(legacy.add_overlays_enabled);
+        assert!(legacy.plus_patches_enabled);
     }
 
     #[test]
