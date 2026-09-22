@@ -266,6 +266,11 @@ struct DynoGui {
     // Last spawn result, surfaced inline next to the Run button so
     // the user knows whether the terminal launched OK.
     last_status: Option<Result<String, String>>,
+    // Command line of the last successful launch. The "command" link
+    // next to the Run button opens it in a popup with a copy button.
+    last_command: Option<String>,
+    command_open: bool,
+    command_copied: bool,
 
     history: RunHistory,
     history_open: bool,
@@ -313,6 +318,9 @@ impl Default for DynoGui {
             plus_patches: Vec::new(),
             plus_patches_enabled: true,
             last_status: None,
+            last_command: None,
+            command_open: false,
+            command_copied: false,
             history: RunHistory::default(),
             history_open: false,
             overlay_manager_open: false,
@@ -497,11 +505,8 @@ impl DynoGui {
         match spawn_in_terminal(&exe, &args) {
             Ok(()) => {
                 self.history.insert(FormSnapshot::capture(self));
-                self.last_status = Some(Ok(format!(
-                    "Launched: {} {}",
-                    exe.display(),
-                    args.join(" ")
-                )));
+                self.last_command = Some(format!("{} {}", exe.display(), args.join(" ")));
+                self.last_status = None;
             }
             Err(e) => self.last_status = Some(Err(format!("Spawn failed: {e}"))),
         }
@@ -612,6 +617,7 @@ impl eframe::App for DynoGui {
                 });
         });
         self.history_window(ui.ctx());
+        self.command_window(ui.ctx());
         self.overlay_manager_window(ui.ctx());
         self.patch_manager_window(ui.ctx());
     }
@@ -689,6 +695,34 @@ impl DynoGui {
         } else if let Some(snapshot) = load {
             self.load_history_entry(&snapshot);
         }
+    }
+
+    fn command_window(&mut self, ctx: &egui::Context) {
+        if !self.command_open {
+            return;
+        }
+        let mut open = self.command_open;
+        let command = self.last_command.clone().unwrap_or_default();
+        egui::Window::new("Command")
+            .open(&mut open)
+            .default_size([560.0, 160.0])
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Copy").clicked() {
+                        ui.ctx().copy_text(command.clone());
+                        self.command_copied = true;
+                    }
+                    if self.command_copied {
+                        ui.label(egui::RichText::new("copied to clipboard").weak().small());
+                    }
+                });
+                ui.add_space(6.0);
+                ui.style_mut().interaction.selectable_labels = true;
+                ScrollArea::vertical().show(ui, |ui| {
+                    ui.label(egui::RichText::new(&command).monospace().small());
+                });
+            });
+        self.command_open = open;
     }
 
     fn overlay_manager_window(&mut self, ctx: &egui::Context) {
@@ -1098,6 +1132,15 @@ impl DynoGui {
             if ui.button("▶ Run in terminal").clicked() {
                 self.run_in_terminal();
             }
+            if self.last_command.is_some()
+                && ui
+                    .link("command")
+                    .on_hover_text("Show the last launched command line")
+                    .clicked()
+            {
+                self.command_open = true;
+                self.command_copied = false;
+            }
         });
         if let Some(status) = &self.last_status {
             match status {
@@ -1466,7 +1509,7 @@ fn run_gui() -> eframe::Result {
     eframe::run_native(
         "DynoBox",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 720.0]),
+            viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 650.0]),
             persist_window: false,
             ..Default::default()
         },
