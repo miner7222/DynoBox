@@ -1191,23 +1191,6 @@ from = "6e 20 5e 30 35 00"
 to = "00 00 00 00 00 00"
 expected = 1
 
-# Game Assistant: the Game Manager popup lists games plus every non-game
-# third-party app; drop the normal-app add so the adapter only renders the
-# game section.
-
-[[op]]
-kind = "method_code_patch"
-partition = "system"
-file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
-class = "Lcom/zui/game/service/ui/gamelist/GameManagerActivity$initData$1;"
-method = "invokeSuspend"
-proto = "(Ljava/lang/Object;)Ljava/lang/Object;"
-
-[[op.replacement]]
-from = "71 10 3f 36 01 00 0c 02 6e 20 c0 48 32 00"
-to = "71 10 3f 36 01 00 0c 02 00 00 00 00 00 00"
-expected = 1
-
 
 # The launcher's cloud-switch row is kept only while the Lenovo cloud folder
 # service is online; pin that read false inside the settings fragment so the

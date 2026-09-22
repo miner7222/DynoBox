@@ -3136,7 +3136,7 @@ value = false
     fn bundled_dbp_files_inventory() {
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
         assert_eq!(dc.name, "debloat-common");
-        assert_eq!(dc.ops.len(), 77);
+        assert_eq!(dc.ops.len(), 76);
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
         assert_eq!(uc.name, "unlock-common");
         assert_eq!(uc.ops.len(), 58);
@@ -7731,62 +7731,6 @@ value = false
             crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
             std::fs::write(&out, &patched).expect("write patched dex");
         }
-    }
-
-    /// Land the Game Manager popup op (the normal-app add dropped from the
-    /// Game Assistant popup) on the real ZuiGameHelper APK. Set
-    /// `DYNOBOX_GAMEHELPER_APK`; optionally set
-    /// `DYNOBOX_GAMEHELPER_POPUP_DEX_OUT` to dump the patched dex.
-    #[test]
-    fn bundled_debloat_gamehelper_game_manager_popup_lands_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_GAMEHELPER_APK") else {
-            return;
-        };
-        let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
-        let op = dc
-            .ops
-            .iter()
-            .find(|op| {
-                matches!(op, DbpOp::MethodCodePatch { class, method, replacements, .. }
-                    if class == "Lcom/zui/game/service/ui/gamelist/GameManagerActivity$initData$1;"
-                        && method == "invokeSuspend"
-                        && replacements.len() == 1
-                        && replacements[0].expected == 1
-                        && replacements[0].to.ends_with("00 00 00 00 00 00"))
-            })
-            .expect("debloat-common must carry the Game Manager popup op");
-        let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
-        let mut landed = 0usize;
-        for entry in zip.entries.iter().filter(|e| {
-            e.name.ends_with(".dex")
-                && e.compression_method == 0
-                && !e.uses_data_descriptor
-                && !e.is_zip64
-                && e.data_start + e.compressed_size <= apk.len()
-        }) {
-            let original = &apk[entry.data_start..entry.data_start + entry.compressed_size];
-            let mut patched = original.to_vec();
-            if apply_one_op(&mut patched, op).unwrap() {
-                assert_eq!(
-                    patched.len(),
-                    original.len(),
-                    "patch must preserve dex length"
-                );
-                assert_eq!(
-                    entry.name, "classes4.dex",
-                    "the popup op lives in classes4.dex"
-                );
-                landed += 1;
-                if let Ok(out) = std::env::var("DYNOBOX_GAMEHELPER_POPUP_DEX_OUT") {
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
-                    std::fs::create_dir_all(&out).expect("create dex out dir");
-                    std::fs::write(std::path::Path::new(&out).join(&entry.name), &patched)
-                        .expect("write patched dex");
-                }
-            }
-        }
-        assert_eq!(landed, 1, "the popup op must land in one dex");
     }
 
     /// Shape of the Game Assistant region-list ops: each pins Settings.isRow
