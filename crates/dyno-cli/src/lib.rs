@@ -12,7 +12,7 @@ use dynobox_app::{
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
 use std::borrow::Cow;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{info, warn};
@@ -438,12 +438,11 @@ enum Commands {
 fn setup_logging() {
     // `tracing_subscriber::FmtSubscriber` defaults to ANSI escape
     // codes regardless of stdout being a tty, which renders as
-    // literal `␛[2m`/`␛[32m` garbage when the GUI captures the
-    // child's stdout into its log pane. Honour the `NO_COLOR`
-    // convention (https://no-color.org) plus the GUI's own
-    // `DYNOBOX_GUI=1` marker so plain text comes through whenever a
-    // non-tty front-end is consuming the stream.
-    let plain = std::env::var_os("NO_COLOR").is_some() || std::env::var_os("DYNOBOX_GUI").is_some();
+    // literal `␛[2m`/`␛[32m` garbage when stdout is redirected to a
+    // file or pipe. Honour the `NO_COLOR` convention
+    // (https://no-color.org) and drop colour whenever stdout is not a
+    // terminal.
+    let plain = std::env::var_os("NO_COLOR").is_some() || !std::io::stdout().is_terminal();
     // Concise, uniform line style for every log line: `<LEVEL> <message>`.
     // The module target (`dynobox_cli:`) and per-line timestamp are dropped —
     // they add width without value for an interactive one-shot CLI, and

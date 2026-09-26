@@ -3567,13 +3567,7 @@ fn confirm_rollback_change(
     // previous order printed the entire prompt to stdout then
     // discovered stdin isn't a terminal, leaving JSONL consumers
     // with non-JSON bytes ahead of the next event.
-    //
-    // `DYNOBOX_GUI=1` from the egui front-end opts out of the
-    // is-terminal short-circuit: the GUI pipes our stdin/stdout but
-    // stands in for a real tty by surfacing buttons that write to
-    // stdin on click.
-    let force_interactive = std::env::var_os("DYNOBOX_GUI").is_some();
-    if !force_interactive && !std::io::stdin().is_terminal() {
+    if !std::io::stdin().is_terminal() {
         // Send the skip notice to stderr instead of stdout so a
         // `--progress-format jsonl` consumer reading stdout never
         // sees this notice interleaved with structured events.
@@ -3599,11 +3593,7 @@ fn confirm_rollback_change(
             format_unix_timestamp_utc(new_ri),
         )?;
     }
-    // Prompt with a trailing newline so a `dynobox-gui` child reading
-    // stdout line-by-line can detect the `[y/N]` prompt as a complete
-    // line and surface Yes/No buttons. Plain CLI users see the cursor
-    // on the line below the prompt, which is fine.
-    writeln!(handle, "Proceed with rollback rewrite? [y/N] ")?;
+    write!(handle, "Proceed with rollback rewrite? [y/N] ")?;
     handle.flush()?;
     drop(handle);
 
