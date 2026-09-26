@@ -194,10 +194,7 @@ fn quote_bat(s: &str) -> String {
 }
 
 #[cfg(unix)]
-fn write_unix_launcher(
-    exe: &std::path::Path,
-    args: &[String],
-) -> std::io::Result<std::path::PathBuf> {
+fn write_unix_launcher(exe: &Path, args: &[String]) -> std::io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let mut path = std::env::temp_dir();
