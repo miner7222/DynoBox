@@ -29,6 +29,7 @@ use crate::avb_descriptor::{
     regenerate_hashtree_with_progress,
 };
 use crate::ext4_helpers::{lookup_inode_at_path, map_file_offset_to_disk, open_ext4_volume};
+use crate::spl::is_newer_spl;
 use anyhow::{Context, Result, anyhow};
 use memchr::memmem;
 
@@ -96,7 +97,7 @@ pub fn apply_spl_mutation(
         Some(value) => value,
         None => return Ok(SplMutationOutcome::NotFound),
     };
-    if new_spl <= current_avb.as_str() {
+    if !is_newer_spl(new_spl, &current_avb) {
         return Ok(SplMutationOutcome::SkippedNotNewer {
             old: current_avb,
             requested: new_spl.to_string(),
@@ -164,7 +165,7 @@ pub fn apply_spl_with_progress(
         Some(value) => value,
         None => return Ok(SplOutcome::NotFound),
     };
-    if new_spl <= current_avb.as_str() {
+    if !is_newer_spl(new_spl, &current_avb) {
         return Ok(SplOutcome::SkippedNotNewer {
             old: current_avb,
             requested: new_spl.to_string(),

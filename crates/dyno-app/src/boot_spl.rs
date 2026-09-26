@@ -120,7 +120,7 @@ pub fn patch_security_patch(image_path: &Path, new_spl: &str) -> Result<BootSplP
         None => return Ok(BootSplPatchOutcome::NotFound),
     };
 
-    if new_spl <= current_value.as_str() {
+    if !crate::spl::is_newer_spl(new_spl, &current_value) {
         return Ok(BootSplPatchOutcome::SkippedNotNewer {
             old: current_value,
             requested: new_spl.to_string(),

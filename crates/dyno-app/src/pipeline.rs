@@ -3972,8 +3972,8 @@ where
     ensure_images_local(local_inode_cache, out_dir, &[step.image, step.vbmeta])?;
     let image_path = out_dir.join(step.image);
     let vbmeta_path = out_dir.join(step.vbmeta);
-    let will_change =
-        (step.read_current)(&image_path)?.is_some_and(|current| new_spl > current.as_str());
+    let will_change = (step.read_current)(&image_path)?
+        .is_some_and(|current| crate::spl::is_newer_spl(new_spl, &current));
     if will_change {
         prepare_vbmeta_mutation(
             step.vbmeta,
