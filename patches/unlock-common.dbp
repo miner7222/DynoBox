@@ -780,3 +780,79 @@ target_class = "Lcom/zui/game/service/util/MMKVUtil;"
 target_method = "getBoolean"
 proto = "(Ljava/lang/String;Z)Z"
 value = false
+
+# Newer builds compile Settings.supportSuperGogMode as a plain
+# boolean field that the dex never assigns, so every HID reader (the item's
+# isHidDevice, HidDeviceCommunicator, UsbDeviceReceiver, the service exit
+# cleanup) sees false and the cooling fan can never be recognized. Pin the
+# getter true so those readers match the older lazy { isBaldurPrc() ||
+# isWuJiPrc() } build. On older builds the symbol resolves to nothing and the
+# op is skipped; the other ZuiGameHelper ops still land.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/di/Settings;"
+method = "getSupportSuperGogMode"
+proto = "()Z"
+
+[[op.symbol]]
+name = "support_super_gog"
+kind = "field"
+class = "Lcom/zui/game/service/di/Settings;"
+field = "supportSuperGogMode"
+ty = "Z"
+
+[[op.replacement]]
+from = "55 10 ${support_super_gog:u16} 0f 00"
+to = "12 10 00 00 0f 00"
+expected = 1
+
+# The floating assistant's mode button cycles 4 -> 1 -> 2 -> 16 only while a
+# cooling fan answers the HID handshake (getNextMode appends the 16 entry only
+# when isHidDeviceConnected() is true), so a fan-less device can never reach
+# super god mode from the floating window. Nop the skip branch in the portrait
+# and landscape views so the add(16) below always runs. The landscape view
+# assembles two mode lists (PC-mode games and the rest), each with its own
+# identical gate, so that op expects two sites.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/ui/view/FloatingMainViewNew;"
+method = "getNextMode"
+proto = "(I)I"
+
+[[op.symbol]]
+name = "is_hid_connected"
+kind = "method"
+class = "Lcom/zui/game/service/ui/view/FloatingMainViewNew;"
+method = "isHidDeviceConnected"
+proto = "()Z"
+
+[[op.replacement]]
+from = "70 10 ${is_hid_connected:u16} 03 00 0a 01 38 01 0b 00"
+to = "70 10 ${is_hid_connected:u16} 03 00 0a 01 00 00 00 00"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/ui/view/FloatingMainViewRight;"
+method = "getNextMode"
+proto = "(I)I"
+
+[[op.symbol]]
+name = "is_hid_connected"
+kind = "method"
+class = "Lcom/zui/game/service/ui/view/FloatingMainViewRight;"
+method = "isHidDeviceConnected"
+proto = "()Z"
+
+[[op.replacement]]
+from = "70 10 ${is_hid_connected:u16} 05 00 0a 01 38 01 05 00"
+to = "70 10 ${is_hid_connected:u16} 05 00 0a 01 00 00 00 00"
+expected = 2
