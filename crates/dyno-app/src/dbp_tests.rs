@@ -7375,3 +7375,408 @@ fn arsc_raw_value(arsc: &[u8], resource: &str) -> Result<Option<(u8, u32)>> {
     let mut data = arsc.to_vec();
     find_or_patch_resources_arsc_value(&mut data, resource, None)
 }
+
+struct AuditFs {
+    dir: std::path::PathBuf,
+    bytes: std::collections::HashMap<(String, String), Option<Vec<u8>>>,
+}
+
+impl AuditFs {
+    fn load(&mut self, partition: &str, file: &str) -> Result<Option<&mut Vec<u8>>> {
+        let key = (partition.to_string(), file.to_string());
+        if !self.bytes.contains_key(&key) {
+            let img = self.dir.join(format!("{partition}.img"));
+            let bytes = if img.is_file() {
+                let mut volume = open_ext4_volume(&img)?;
+                let comps: Vec<&str> = file.split('/').filter(|c| !c.is_empty()).collect();
+                match lookup_inode_at_path(&mut volume, &comps)? {
+                    Some(inode) if inode.is_file() => Some(
+                        inode
+                            .open_read(&mut volume)
+                            .map_err(|e| anyhow!("read {file}: {e}"))?,
+                    ),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            self.bytes.insert(key.clone(), bytes);
+        }
+        Ok(self.bytes.get_mut(&key).expect("cache entry").as_mut())
+    }
+}
+
+/// Apply a single op to in-memory file bytes, mirroring the dispatch in
+/// `apply_ops_to_file` minus the ext4 write-back. Ops see the mutations of
+/// earlier ops on the same file, exactly as the engine applies them in
+/// document order.
+fn audit_apply_op(buf: &mut [u8], op: &DbpOp) -> Result<bool> {
+    if let DbpOp::TextReplace { from, to, all, .. } = op {
+        return Ok(patch_text_replacement(buf, from.as_bytes(), to.as_bytes(), *all) > 0);
+    }
+    let zip = parse_zip_central_directory(buf)?;
+    let dex_ranges: Vec<(usize, usize)> = zip
+        .entries
+        .iter()
+        .filter(|e| e.is_classes_dex())
+        .filter(|e| !(e.compression_method != 0 || e.uses_data_descriptor || e.is_zip64))
+        .map(|e| (e.data_start, e.compressed_size))
+        .filter(|&(start, size)| start + size <= buf.len())
+        .collect();
+    let arsc_range = zip
+        .entries
+        .iter()
+        .find(|e| {
+            e.name == "resources.arsc"
+                && e.compression_method == 0
+                && !e.uses_data_descriptor
+                && !e.is_zip64
+        })
+        .map(|e| (e.data_start, e.compressed_size))
+        .filter(|&(start, size)| start + size <= buf.len());
+    let mut landed = false;
+    for (start, size) in dex_ranges {
+        if apply_one_op(&mut buf[start..start + size], op)? {
+            landed = true;
+        }
+    }
+    if let Some((start, size)) = arsc_range {
+        let arsc = &mut buf[start..start + size];
+        let hit = match op {
+            DbpOp::ResourceBool {
+                resource, value, ..
+            } => patch_resources_arsc_bool(arsc, resource, *value)?,
+            DbpOp::ResourceDimen { resource, dp, .. } => {
+                patch_resources_arsc_dimen(arsc, resource, *dp)?
+            }
+            _ => false,
+        };
+        landed |= hit;
+    }
+    let hit = match op {
+        DbpOp::ZipEntryReplace {
+            entries, payload, ..
+        } => {
+            let template = parse_code_template(payload).map_err(anyhow::Error::msg)?;
+            force_zip_entry_replace(buf, entries, &template.bytes)?
+        }
+        DbpOp::LayoutCollapse {
+            node_id, expected, ..
+        } => force_axml_collapse(buf, *node_id as u32, *expected)?,
+        DbpOp::LayoutBackground {
+            node_id,
+            drawable,
+            expected,
+            ..
+        } => force_axml_background(buf, *node_id as u32, *drawable as u32, *expected)?,
+        _ => false,
+    };
+    Ok(landed || hit)
+}
+
+fn audit_op_kind(op: &DbpOp) -> &'static str {
+    match op {
+        DbpOp::MethodConstBool { .. } => "method_const_bool",
+        DbpOp::MethodConstInt { .. } => "method_const_int",
+        DbpOp::MethodConstString { .. } => "method_const_string",
+        DbpOp::MethodNop { .. } => "method_nop",
+        DbpOp::MethodCodePatch { .. } => "method_code_patch",
+        DbpOp::MethodCodeRedirect { .. } => "method_code_redirect",
+        DbpOp::PreferenceControllerHide { .. } => "preference_controller_hide",
+        DbpOp::ResourceBool { .. } => "resource_bool",
+        DbpOp::ResourceDimen { .. } => "resource_dimen",
+        DbpOp::TextReplace { .. } => "text_replace",
+        DbpOp::ZipEntryReplace { .. } => "zip_entry_replace",
+        DbpOp::LayoutCollapse { .. } => "layout_collapse",
+        DbpOp::LayoutBackground { .. } => "layout_background",
+        DbpOp::InvokeConstBool { .. } => "invoke_const_bool",
+        DbpOp::InvokeConstInt { .. } => "invoke_const_int",
+        DbpOp::FieldConstBool { .. } => "field_const_bool",
+        DbpOp::IntentActionBroadcast { .. } => "intent_action_broadcast",
+        DbpOp::MethodBroadcastFinish { .. } => "method_broadcast_finish",
+        DbpOp::FragmentHide { .. } => "fragment_hide",
+        DbpOp::NopInvoke { .. } => "nop_invoke",
+        DbpOp::ForceViewGone { .. } => "force_view_gone",
+        DbpOp::RemoteviewsHide { .. } => "remoteviews_hide",
+    }
+}
+
+fn audit_op_label(op: &DbpOp) -> String {
+    match op {
+        DbpOp::MethodConstBool {
+            class,
+            method,
+            value,
+            ..
+        } => format!("{class}.{method} -> {value}"),
+        DbpOp::MethodConstInt {
+            class,
+            method,
+            value,
+            ..
+        } => format!("{class}.{method} -> {value}"),
+        DbpOp::MethodConstString {
+            class,
+            method,
+            value,
+            ..
+        } => format!("{class}.{method} -> \"{value}\""),
+        DbpOp::MethodNop {
+            class,
+            method,
+            proto,
+            ..
+        } => format!("nop {class}.{method}{proto}"),
+        DbpOp::MethodCodePatch {
+            class,
+            method,
+            proto,
+            replacements,
+            ..
+        } => format!(
+            "code_patch {class}.{method}{proto} ({} repl)",
+            replacements.len()
+        ),
+        DbpOp::MethodCodeRedirect {
+            class,
+            method,
+            donor_class,
+            donor_method,
+            ..
+        } => format!("redirect {class}.{method} -> {donor_class}.{donor_method}"),
+        DbpOp::PreferenceControllerHide {
+            class,
+            preference_key,
+            ..
+        } => format!("pref_hide {class} key={preference_key}"),
+        DbpOp::ResourceBool {
+            resource, value, ..
+        } => format!("arsc bool {resource} -> {value}"),
+        DbpOp::ResourceDimen { resource, dp, .. } => {
+            format!("arsc dimen {resource} -> {dp}dp")
+        }
+        DbpOp::TextReplace { from, to, all, .. } => {
+            let truncate = |s: &str| {
+                let s = s.replace('\n', "\\n");
+                if s.chars().count() > 44 {
+                    format!("{}...", s.chars().take(43).collect::<String>())
+                } else {
+                    s
+                }
+            };
+            format!(
+                "text \"{}\" -> \"{}\"{}",
+                truncate(from),
+                truncate(to),
+                if *all { " (all)" } else { "" }
+            )
+        }
+        DbpOp::ZipEntryReplace { entries, .. } => format!(
+            "zip {} entries [{}...]",
+            entries.len(),
+            entries.first().map(|e| e.as_str()).unwrap_or("")
+        ),
+        DbpOp::LayoutCollapse {
+            node_id, expected, ..
+        } => format!("collapse id={node_id:#x} x{expected}"),
+        DbpOp::LayoutBackground {
+            node_id,
+            drawable,
+            expected,
+            ..
+        } => format!("background id={node_id:#x} -> {drawable:#x} x{expected}"),
+        DbpOp::InvokeConstBool {
+            scan_class,
+            scan_method,
+            target_class,
+            target_method,
+            value,
+            ..
+        } => format!(
+            "{}{} :: {target_class}.{target_method} -> {value}",
+            scan_class,
+            scan_method
+                .as_deref()
+                .map(|m| format!(".{m}"))
+                .unwrap_or_default()
+        ),
+        DbpOp::InvokeConstInt {
+            scan_class,
+            scan_method,
+            target_class,
+            target_method,
+            value,
+            ..
+        } => format!(
+            "{}{} :: {target_class}.{target_method} -> {value}",
+            scan_class,
+            scan_method
+                .as_deref()
+                .map(|m| format!(".{m}"))
+                .unwrap_or_default()
+        ),
+        DbpOp::FieldConstBool {
+            scan_class,
+            scan_method,
+            target_class,
+            target_field,
+            value,
+            ..
+        } => format!(
+            "{}{} :: field {target_class}.{target_field} -> {value}",
+            scan_class,
+            scan_method
+                .as_deref()
+                .map(|m| format!(".{m}"))
+                .unwrap_or_default()
+        ),
+        DbpOp::IntentActionBroadcast { from_action, .. } => {
+            format!("action {from_action} -> broadcast")
+        }
+        DbpOp::MethodBroadcastFinish {
+            class,
+            method,
+            action,
+            ..
+        } => format!("{class}.{method} broadcast {action} + finish"),
+        DbpOp::FragmentHide {
+            class,
+            method,
+            layout,
+            ..
+        } => format!("fragment {class}.{method} layout={layout:#x}"),
+        DbpOp::NopInvoke {
+            scan_class,
+            scan_method,
+            target_class,
+            target_method,
+            ..
+        } => format!("nop invoke {scan_class}.{scan_method} :: {target_class}.{target_method}"),
+        DbpOp::ForceViewGone {
+            scan_class,
+            scan_method,
+            view_ids,
+            ..
+        } => format!("view_gone {scan_class}.{scan_method} ids={view_ids:?}"),
+        DbpOp::RemoteviewsHide {
+            scan_class,
+            scan_method,
+            view_id,
+            ..
+        } => format!("rv_hide {scan_class}.{scan_method} id={view_id:#x}"),
+    }
+}
+
+/// Per-op landing audit for every bundled `.dbp` against a directory of
+/// unpacked partition images (`<partition>.img`). Set
+/// `DYNOBOX_DBP_AUDIT_DIR` to the unpack output; prints one line per op —
+/// `APPLIED`, `SKIPPED` (target found, no site), `NOFILE` (path absent from
+/// the image), `NOPART` (image missing), or `ERROR` — then a summary of the
+/// non-landed ops. Read-only: nothing is written back to the images.
+#[test]
+#[ignore = "fixture: set DYNOBOX_DBP_AUDIT_DIR"]
+fn audit_bundled_dbps_per_op() {
+    let dir = std::path::PathBuf::from(crate::test_fixtures::env("DYNOBOX_DBP_AUDIT_DIR"));
+    let mut fs = AuditFs {
+        dir,
+        bytes: std::collections::HashMap::new(),
+    };
+    let mut misses: Vec<String> = Vec::new();
+    let mut landed_total = 0usize;
+    let mut op_total = 0usize;
+
+    for source in [
+        "debloat-common.dbp",
+        "debloat-wuji.dbp",
+        "enable-adb-debug.dbp",
+        "fix-common.dbp",
+        "show-google-lens.dbp",
+        "unlock-common.dbp",
+    ] {
+        let doc = load_dbp(&patches_dir().join(source)).expect("load bundled dbp");
+        for (i, op) in doc.ops.iter().enumerate() {
+            op_total += 1;
+            let partition = op.partition();
+            let file = op.file();
+            let label = format!(
+                "{source}#{i:02} {} {partition}:{file} :: {}",
+                audit_op_kind(op),
+                audit_op_label(op)
+            );
+            let status = if !fs.dir.join(format!("{partition}.img")).is_file() {
+                "NOPART "
+            } else {
+                match fs.load(partition, file) {
+                    Ok(None) => "NOFILE ",
+                    Ok(Some(buf)) => match audit_apply_op(buf, op) {
+                        Ok(true) => {
+                            landed_total += 1;
+                            "APPLIED"
+                        }
+                        Ok(false) => "SKIPPED",
+                        Err(e) => {
+                            misses.push(format!("ERROR   {label} ({e})"));
+                            println!("ERROR   {label} ({e})");
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        misses.push(format!("ERROR   {label} ({e})"));
+                        println!("ERROR   {label} ({e})");
+                        continue;
+                    }
+                }
+            };
+            if status != "APPLIED" {
+                misses.push(format!("{status} {label}"));
+            }
+            println!("{status} {label}");
+        }
+    }
+
+    println!();
+    println!(
+        "=== audit: {landed_total}/{op_total} ops landed; {} not landed ===",
+        misses.len()
+    );
+    for m in &misses {
+        println!("  {m}");
+    }
+}
+
+/// Dump every file referenced by the bundled `.dbp` ops out of the unpacked
+/// partition images into `DYNOBOX_DBP_DUMP_OUT` as `<partition>__<name>`,
+/// so the real target bytes are available for disassembly. Set
+/// `DYNOBOX_DBP_AUDIT_DIR` to the unpacked output too.
+#[test]
+#[ignore = "fixture: set DYNOBOX_DBP_AUDIT_DIR + DYNOBOX_DBP_DUMP_OUT"]
+fn dump_bundled_dbp_targets() {
+    let dir = std::path::PathBuf::from(crate::test_fixtures::env("DYNOBOX_DBP_AUDIT_DIR"));
+    let out = std::path::PathBuf::from(crate::test_fixtures::env("DYNOBOX_DBP_DUMP_OUT"));
+    std::fs::create_dir_all(&out).expect("create dump dir");
+    let mut fs = AuditFs {
+        dir,
+        bytes: std::collections::HashMap::new(),
+    };
+    for source in [
+        "debloat-common.dbp",
+        "debloat-wuji.dbp",
+        "enable-adb-debug.dbp",
+        "fix-common.dbp",
+        "show-google-lens.dbp",
+        "unlock-common.dbp",
+    ] {
+        let doc = load_dbp(&patches_dir().join(source)).expect("load bundled dbp");
+        for op in &doc.ops {
+            let name = format!("{}__{}", op.partition(), op.file().replace('/', "__"));
+            match fs.load(op.partition(), op.file()) {
+                Ok(Some(buf)) => {
+                    std::fs::write(out.join(&name), &*buf).expect("write dump");
+                    println!("dumped {name} ({} bytes)", buf.len());
+                }
+                Ok(None) => println!("MISSING {}:{}", op.partition(), op.file()),
+                Err(e) => println!("ERROR {}:{} ({e})", op.partition(), op.file()),
+            }
+        }
+    }
+}

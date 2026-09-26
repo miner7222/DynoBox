@@ -404,4 +404,111 @@ mod tests {
         );
         let _ = fs::remove_file(path);
     }
+
+    /// Per-partition OTA size breakdown for a real OTA zip.
+    /// `DYNOBOX_OTA_ZIP` points at the zip; payload.bin is extracted to a temp
+    /// file. Prints, per partition: new/old image sizes, per-op-type counts,
+    /// and payload data bytes (what actually drives the zip size).
+    #[test]
+    #[ignore = "fixture: set DYNOBOX_OTA_ZIP"]
+    fn dump_ota_partition_breakdown() {
+        use prost::Message;
+        use std::collections::BTreeMap;
+        use std::fs::File;
+        use std::io::{Read, Seek, SeekFrom};
+
+        let zip_path = std::env::var("DYNOBOX_OTA_ZIP").unwrap();
+        let out_dir = std::env::temp_dir().join("dynobox-ota-dump");
+        let payload_path =
+            crate::payload::extract_payload(std::path::Path::new(&zip_path), &out_dir).unwrap();
+        let metadata = parse_payload_metadata(&payload_path).unwrap();
+        let mut payload_file = File::open(&payload_path).unwrap();
+        payload_file
+            .seek(SeekFrom::Start(metadata.manifest_offset))
+            .unwrap();
+        let mut manifest_buf = vec![0u8; metadata.manifest_size as usize];
+        payload_file.read_exact(&mut manifest_buf).unwrap();
+        let manifest = super::proto::DeltaArchiveManifest::decode(&manifest_buf[..]).unwrap();
+
+        println!("OTA zip: {zip_path}");
+        println!(
+            "payload.bin {} bytes, manifest {} bytes, block_size {}",
+            std::fs::metadata(&payload_path).unwrap().len(),
+            metadata.manifest_size,
+            metadata.block_size
+        );
+        let mut total_data = 0u64;
+        for p in &manifest.partitions {
+            let new_size = p
+                .new_partition_info
+                .as_ref()
+                .and_then(|i| i.size)
+                .unwrap_or(0);
+            let old_size = p
+                .old_partition_info
+                .as_ref()
+                .and_then(|i| i.size)
+                .unwrap_or(0);
+            let mut by_type: BTreeMap<String, (usize, u64)> = BTreeMap::new();
+            let mut part_data = 0u64;
+            for op in &p.operations {
+                let t = super::proto::install_operation::Type::try_from(op.r#type)
+                    .map(|t| format!("{t:?}"))
+                    .unwrap_or_else(|_| format!("?{}", op.r#type));
+                let dl = op.data_length.unwrap_or(0);
+                let e = by_type.entry(t).or_default();
+                e.0 += 1;
+                e.1 += dl;
+                part_data += dl;
+            }
+            total_data += part_data;
+            println!(
+                "{:<24} new={:>12} old={:>12} ops={:<5} data={:>12}",
+                p.partition_name,
+                new_size,
+                old_size,
+                p.operations.len(),
+                part_data
+            );
+            for (t, (n, b)) in &by_type {
+                println!("    {t:<20} x{n:<5} {b:>12} bytes");
+            }
+            let mut ops_sorted = p.operations.clone();
+            ops_sorted.sort_by_key(|o| std::cmp::Reverse(o.data_length.unwrap_or(0)));
+            for (i, op) in ops_sorted.iter().take(8).enumerate() {
+                let t = super::proto::install_operation::Type::try_from(op.r#type)
+                    .map(|t| format!("{t:?}"))
+                    .unwrap_or_else(|_| format!("?{}", op.r#type));
+                let dst: String = op
+                    .dst_extents
+                    .iter()
+                    .map(|e| {
+                        format!(
+                            "{}+{}",
+                            e.start_block.unwrap_or(0),
+                            e.num_blocks.unwrap_or(0)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let src: String = op
+                    .src_extents
+                    .iter()
+                    .map(|e| {
+                        format!(
+                            "{}+{}",
+                            e.start_block.unwrap_or(0),
+                            e.num_blocks.unwrap_or(0)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!(
+                    "    #{i} {t:<14} data={:>12} dst=[{dst}] src=[{src}]",
+                    op.data_length.unwrap_or(0)
+                );
+            }
+        }
+        println!("TOTAL payload data bytes: {total_data}");
+    }
 }
