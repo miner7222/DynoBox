@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::payload::proto::{Extent, InstallOperation, install_operation::Type};
 use crate::puffin::{PuffPatchKind, apply_puffpatch_bytes, inspect_puff_patch_type};
 use dynobox_core::error::{DynoError, Result};
+use dynobox_core::hex::hex_encode;
 
 /// Hard cap on in-memory REPLACE_BZ / REPLACE_XZ decompression.
 ///
@@ -47,16 +48,6 @@ fn validate_sha256(label: &str, data: &[u8], expected_hash: Option<&[u8]>) -> Re
     validate_sha256_len(label, expected_hash)?;
     let actual_hash = Sha256::digest(data);
     compare_sha256(label, &actual_hash, expected_hash)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
 }
 
 /// Read from `reader` until EOF or `limit + 1` bytes, whichever comes first.

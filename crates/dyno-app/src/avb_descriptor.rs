@@ -690,13 +690,7 @@ pub(crate) fn next_pow2(value: u64) -> u64 {
     p
 }
 
-pub fn hex_encode(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{:02x}", b));
-    }
-    s
-}
+pub use dynobox_core::hex::hex_encode;
 
 #[cfg(test)]
 mod tests {

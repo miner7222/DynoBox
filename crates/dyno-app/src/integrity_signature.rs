@@ -11,6 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use dynobox_core::hex::hex_encode;
 use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey, EncodePrivateKey, EncodePublicKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use pkcs8::LineEnding;
@@ -383,16 +384,6 @@ fn hex_nibble(value: u8) -> Result<u8> {
         b'a'..=b'f' => Ok(value - b'a' + 10),
         _ => Err(anyhow!("invalid lowercase hexadecimal digit")),
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
 }
 
 fn write_atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {

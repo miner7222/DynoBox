@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use dynobox_core::hex::hex_encode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -887,16 +888,6 @@ fn issue_sort_key(issue: &ManifestIssue) -> (&str, u8) {
         ManifestIssue::DigestMismatch { path, .. } => (path, 3),
         ManifestIssue::Malformed { message } => (message, 4),
     }
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
 }
 
 fn is_lowercase_hex_sha256(value: &str) -> bool {
