@@ -200,6 +200,69 @@ mod tests {
         }
     }
 
+    /// Minimal STORED zip (local headers, central directory, EOCD).
+    fn stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut central = Vec::new();
+        for (name, data) in entries {
+            let offset = out.len() as u32;
+            let crc = crc32_ieee(data);
+            let len = data.len() as u32;
+            out.extend_from_slice(&ZIP_LOCAL_FILE_HEADER_SIG.to_le_bytes());
+            out.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            out.extend_from_slice(&crc.to_le_bytes());
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&len.to_le_bytes());
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(data);
+
+            central.extend_from_slice(&ZIP_CENTRAL_DIRECTORY_SIG.to_le_bytes());
+            central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            central.extend_from_slice(&crc.to_le_bytes());
+            central.extend_from_slice(&len.to_le_bytes());
+            central.extend_from_slice(&len.to_le_bytes());
+            central.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            central.extend_from_slice(&[0u8; 12]);
+            central.extend_from_slice(&offset.to_le_bytes());
+            central.extend_from_slice(name.as_bytes());
+        }
+        let cd_offset = out.len() as u32;
+        out.extend_from_slice(&central);
+        out.extend_from_slice(&ZIP_END_OF_CENTRAL_DIRECTORY_SIG.to_le_bytes());
+        out.extend_from_slice(&[0u8; 4]);
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(entries.len() as u16).to_le_bytes());
+        out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+        out.extend_from_slice(&cd_offset.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out
+    }
+
+    #[test]
+    fn parse_zip_central_directory_survives_mutated_input() {
+        let seed = stored_zip(&[
+            (
+                "classes.dex",
+                b"dex
+035 payload",
+            ),
+            ("res/a.xml", b"<a/>"),
+        ]);
+        let layout = parse_zip_central_directory(&seed).unwrap();
+        assert_eq!(layout.entries.len(), 2);
+
+        dynobox_core::testutil::for_each_mutation(&seed, 0x5A1F, 4000, |bytes| {
+            if let Ok(layout) = parse_zip_central_directory(bytes) {
+                for entry in &layout.entries {
+                    // Accepted entries must describe in-bounds data.
+                    assert!(entry.data_start + entry.compressed_size <= bytes.len());
+                }
+            }
+        });
+    }
+
     #[test]
     fn is_classes_dex_matches_only_top_level_classes_entries() {
         for name in ["classes.dex", "classes2.dex", "classes13.dex"] {

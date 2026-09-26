@@ -756,6 +756,21 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_walkers_survive_mutated_input() {
+        let mut seed =
+            build_property_descriptor("com.android.build.system.security_patch", "2025-01-05");
+        seed.extend(build_hashtree_descriptor(
+            "system",
+            &[0xAB; 32],
+            &[0xCD; 32],
+        ));
+        dynobox_core::testutil::for_each_mutation(&seed, 0xA7B0, 4000, |bytes| {
+            let _ = find_property_descriptor(bytes, "com.android.build.system.security_patch");
+            let _ = find_hashtree_descriptor(bytes, "system");
+        });
+    }
+
+    #[test]
     fn find_descriptors_in_synthetic_blob() {
         let mut blob = Vec::new();
         blob.extend(build_property_descriptor(

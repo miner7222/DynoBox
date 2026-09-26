@@ -319,6 +319,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_payload_metadata_survives_mutated_input() {
+        use super::proto::{DeltaArchiveManifest, PartitionInfo, PartitionUpdate};
+        use prost::Message;
+
+        let manifest = DeltaArchiveManifest {
+            block_size: Some(4096),
+            partitions: vec![PartitionUpdate {
+                partition_name: "system".to_string(),
+                new_partition_info: Some(PartitionInfo {
+                    size: Some(4096),
+                    hash: Some(vec![0xAB; 32]),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let mut seed = Vec::new();
+        seed.extend_from_slice(PAYLOAD_MAGIC);
+        seed.extend_from_slice(&2u64.to_be_bytes());
+        seed.extend_from_slice(&(manifest.len() as u64).to_be_bytes());
+        seed.extend_from_slice(&0u32.to_be_bytes());
+        seed.extend_from_slice(&manifest);
+
+        let path = temp_payload_path("mutated");
+        fs::write(&path, &seed).unwrap();
+        assert!(parse_payload_metadata(&path).is_ok());
+        dynobox_core::testutil::for_each_mutation(&seed, 0x9A71, 1500, |bytes| {
+            fs::write(&path, bytes).unwrap();
+            let _ = parse_payload_metadata(&path);
+        });
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn rejects_manifest_size_above_allocation_cap() {
         let path = temp_payload_path("manifest-cap");
         // Claim a manifest larger than the defensive ceiling while keeping

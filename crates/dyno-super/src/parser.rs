@@ -619,6 +619,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_full_super_image_survives_mutated_input() {
+        let seed = crate::serialize_metadata(&SuperLayout {
+            geometry: SuperGeometry {
+                metadata_max_size: 4096,
+                metadata_slot_count: 2,
+                logical_block_size: 4096,
+            },
+            header_flags: 0,
+            block_devices: vec![SuperBlockDevice {
+                name: "super".to_string(),
+                size: 4096 * 1024,
+            }],
+            groups: vec![SuperGroup {
+                name: "default".to_string(),
+                maximum_size: 4096 * 1024,
+            }],
+            partitions: vec![SuperPartition {
+                name: "system_a".to_string(),
+                attributes: 1,
+                group_name: "default".to_string(),
+                extents: vec![SuperExtent {
+                    num_sectors: 16,
+                    target_type: LP_TARGET_TYPE_LINEAR,
+                    target_data: 2048,
+                    target_source: 0,
+                }],
+            }],
+            chunks: Vec::new(),
+        })
+        .unwrap();
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("super.img");
+        fs::write(&path, &seed).unwrap();
+        assert!(parse_full_super_image(&path).is_ok());
+        dynobox_core::testutil::for_each_mutation(&seed, 0x5E9E, 1500, |bytes| {
+            fs::write(&path, bytes).unwrap();
+            let _ = parse_full_super_image(&path);
+        });
+    }
+
+    #[test]
     fn parse_metadata_rejects_partition_extent_range_out_of_bounds() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("super_1.img");

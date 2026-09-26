@@ -1787,6 +1787,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn puffpatch_survives_mutated_input() {
+        dynobox_core::testutil::for_each_mutation(PATCH_1_TO_2, 0x9FF1, 3000, |patch| {
+            let _ = super::inspect_puff_patch_type(patch);
+            let _ = apply_puffpatch_bytes(DEFLATES_SAMPLE1, patch);
+        });
+        dynobox_core::testutil::for_each_mutation(DEFLATES_SAMPLE1, 0x9FF2, 3000, |source| {
+            let _ = apply_puffpatch_bytes(source, PATCH_1_TO_2);
+        });
+    }
+
     /// Moving the second source puff extent from byte 120 to 112 makes the
     /// preceding raw segment overshoot it. `puff_stream` used to spin forever
     /// copying zero bytes; it must now reject the layout.

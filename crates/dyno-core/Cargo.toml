@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 description = "Shared orchestration and workspace types for the DynoBox Rust workspace"
 
+[features]
+# Parser robustness helpers; enabled only through dev-dependencies.
+testutil = []
+
 [dependencies]
 thiserror.workspace = true
 

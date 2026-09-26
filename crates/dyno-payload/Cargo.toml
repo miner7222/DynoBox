@@ -26,5 +26,8 @@ cmake = "0.1.58"
 prost-build = "0.14"
 protoc-bin-vendored = "3.2.0"
 
+[dev-dependencies]
+dynobox-core = { workspace = true, features = ["testutil"] }
+
 [lints]
 workspace = true

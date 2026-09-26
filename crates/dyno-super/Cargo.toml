@@ -17,6 +17,7 @@ tracing.workspace = true
 zerocopy = { version = "0.8.56", features = ["derive"] }
 
 [dev-dependencies]
+dynobox-core = { workspace = true, features = ["testutil"] }
 tempfile.workspace = true
 
 [lints]

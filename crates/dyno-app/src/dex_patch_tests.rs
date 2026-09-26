@@ -358,6 +358,31 @@ const DONOR_REF: DexMethodRef<'static> = DexMethodRef {
 };
 
 #[test]
+fn dex_ops_survive_mutated_input() {
+    let seed = synthetic_public_redirect_dex();
+    dynobox_core::testutil::for_each_mutation(&seed, 0xDE70, 3000, |bytes| {
+        let mut dex = bytes.to_vec();
+        let _ = redirect_method_code(&mut dex, TARGET_REF, DONOR_REF);
+        let mut dex = bytes.to_vec();
+        let _ = force_method_return_int(&mut dex, "LTarget;", "target", "I", &[], 7);
+        let mut dex = bytes.to_vec();
+        let _ = force_method_return_void(&mut dex, "LTarget;", "target", "I", &[]);
+        let mut dex = bytes.to_vec();
+        let _ = force_invoke_const_bool(
+            &mut dex,
+            "LTarget;",
+            None,
+            "LDonor;",
+            "donor",
+            "I",
+            &[],
+            true,
+        );
+        let _ = crate::fuck_lgsi::dex_walker::extract_lgsi_features(bytes);
+    });
+}
+
+#[test]
 fn method_code_redirect_repoints_same_shape_same_width() {
     let (mut dex, target, donor) = synthetic_redirect_fixture(0x100, 0x180);
     let h = synthetic_shape_header();

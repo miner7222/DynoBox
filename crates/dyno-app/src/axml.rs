@@ -333,6 +333,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_axml_elements_survives_mutated_input() {
+        dynobox_core::testutil::for_each_mutation(&build_test_axml(), 0xA7F1, 4000, |bytes| {
+            let _ = parse_axml_elements(bytes);
+        });
+    }
+
+    #[test]
     fn axml_synthetic_element_round_trip() {
         let xml = build_test_axml();
         let elements = parse_axml_elements(&xml).expect("synthetic parses");
