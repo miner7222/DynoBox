@@ -163,7 +163,7 @@ fn read_descriptor_header(remaining: &[u8], cursor: usize) -> Result<(u64, usize
             cursor
         ));
     }
-    let tag = u64::from_be_bytes(remaining[0..8].try_into().unwrap());
+    let tag = be_u64(remaining, 0);
     let num_bytes_following = read_be_u64_as_usize(&remaining[8..16], "descriptor payload length")?;
     let total = checked_add_usize(
         DESCRIPTOR_HEADER_SIZE,
@@ -182,11 +182,26 @@ fn read_descriptor_header(remaining: &[u8], cursor: usize) -> Result<(u64, usize
 }
 
 fn read_be_u64_as_usize(bytes: &[u8], field_name: &str) -> Result<usize> {
-    checked_usize_from_u64(u64::from_be_bytes(bytes.try_into().unwrap()), field_name)
+    checked_usize_from_u64(be_u64(bytes, 0), field_name)
 }
 
 fn checked_usize_from_u64(value: u64, field_name: &str) -> Result<usize> {
     usize::try_from(value).map_err(|_| anyhow!("{field_name} exceeds usize: {value}"))
+}
+
+// Fixed-width big-endian reads for AVB structures. Callers validate the
+// surrounding range first, so an out-of-range offset panics like any slice index.
+
+fn be_u32(data: &[u8], offset: usize) -> u32 {
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(&data[offset..offset + 4]);
+    u32::from_be_bytes(bytes)
+}
+
+fn be_u64(data: &[u8], offset: usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&data[offset..offset + 8]);
+    u64::from_be_bytes(bytes)
 }
 
 fn checked_add_usize(left: usize, right: usize, label: &str) -> Result<usize> {
@@ -243,10 +258,9 @@ pub fn find_hashtree_descriptor(
         let (tag, total) = read_descriptor_header(remaining, cursor)?;
         if tag == DESCRIPTOR_TAG_HASHTREE && total >= HASHTREE_DESCRIPTOR_FIXED_SIZE {
             let body = &remaining[..total];
-            let partition_name_len =
-                u32::from_be_bytes(body[104..108].try_into().unwrap()) as usize;
-            let salt_len = u32::from_be_bytes(body[108..112].try_into().unwrap()) as usize;
-            let root_digest_len = u32::from_be_bytes(body[112..116].try_into().unwrap()) as usize;
+            let partition_name_len = be_u32(body, 104) as usize;
+            let salt_len = be_u32(body, 108) as usize;
+            let root_digest_len = be_u32(body, 112) as usize;
             let payload_start = HASHTREE_DESCRIPTOR_FIXED_SIZE;
             let partition_name_end =
                 checked_add_usize(payload_start, partition_name_len, "hashtree partition name")?;
@@ -289,15 +303,14 @@ pub fn read_hashtree_params(
         let (tag, total) = read_descriptor_header(remaining, cursor)?;
         if tag == DESCRIPTOR_TAG_HASHTREE && total >= HASHTREE_DESCRIPTOR_FIXED_SIZE {
             let body = &remaining[..total];
-            let image_size = u64::from_be_bytes(body[20..28].try_into().unwrap());
-            let tree_offset = u64::from_be_bytes(body[28..36].try_into().unwrap());
-            let tree_size = u64::from_be_bytes(body[36..44].try_into().unwrap());
-            let data_block_size = u32::from_be_bytes(body[44..48].try_into().unwrap());
+            let image_size = be_u64(body, 20);
+            let tree_offset = be_u64(body, 28);
+            let tree_size = be_u64(body, 36);
+            let data_block_size = be_u32(body, 44);
             let hash_algorithm = read_cstring(&body[72..104]);
-            let partition_name_len =
-                u32::from_be_bytes(body[104..108].try_into().unwrap()) as usize;
-            let salt_len = u32::from_be_bytes(body[108..112].try_into().unwrap()) as usize;
-            let root_digest_len = u32::from_be_bytes(body[112..116].try_into().unwrap()) as usize;
+            let partition_name_len = be_u32(body, 104) as usize;
+            let salt_len = be_u32(body, 108) as usize;
+            let root_digest_len = be_u32(body, 112) as usize;
             let payload = &body[HASHTREE_DESCRIPTOR_FIXED_SIZE..];
             let salt_end = checked_add_usize(partition_name_len, salt_len, "hashtree salt end")?;
             let digest_end = checked_add_usize(salt_end, root_digest_len, "hashtree digest end")?;

@@ -9,6 +9,21 @@ use crate::metadata::*;
 
 const HEADER_SCAN_SIZE: usize = 64 * 1024;
 
+// Fixed-width integer reads. Callers validate the surrounding range first,
+// so an out-of-range offset is a bug and panics like any slice index.
+
+fn le_u32(data: &[u8], offset: usize) -> u32 {
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(&data[offset..offset + 4]);
+    u32::from_le_bytes(bytes)
+}
+
+fn le_u64(data: &[u8], offset: usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&data[offset..offset + 8]);
+    u64::from_le_bytes(bytes)
+}
+
 fn read_header_region(path: &Path) -> Result<Vec<u8>> {
     let mut file = File::open(path)?;
     let mut buf = vec![0u8; HEADER_SCAN_SIZE];
@@ -20,7 +35,7 @@ fn read_header_region(path: &Path) -> Result<Vec<u8>> {
 fn find_geometry_offset(data: &[u8]) -> Result<usize> {
     for &offset in &[0x1000, 0x2000, 0] {
         if data.len() >= offset + 52 {
-            let magic = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            let magic = le_u32(data, offset);
             if magic == LP_METADATA_GEOMETRY_MAGIC {
                 return Ok(offset);
             }
@@ -59,15 +74,14 @@ fn parse_geometry(data: &[u8]) -> Result<SuperGeometry> {
         ));
     }
 
-    let magic = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+    let magic = le_u32(data, offset);
     if magic != LP_METADATA_GEOMETRY_MAGIC {
         return Err(DynoError::Tool("Invalid super geometry magic".into()));
     }
 
-    let metadata_max_size = u32::from_le_bytes(data[offset + 40..offset + 44].try_into().unwrap());
-    let metadata_slot_count =
-        u32::from_le_bytes(data[offset + 44..offset + 48].try_into().unwrap());
-    let logical_block_size = u32::from_le_bytes(data[offset + 48..offset + 52].try_into().unwrap());
+    let metadata_max_size = le_u32(data, offset + 40);
+    let metadata_slot_count = le_u32(data, offset + 44);
+    let logical_block_size = le_u32(data, offset + 48);
 
     Ok(SuperGeometry {
         metadata_max_size,
@@ -83,15 +97,9 @@ struct TableDescriptor {
 }
 
 fn parse_table_descriptor(data: &[u8], start_offset: usize) -> TableDescriptor {
-    let offset =
-        u32::from_le_bytes(data[start_offset..start_offset + 4].try_into().unwrap()) as usize;
-    let num_entries =
-        u32::from_le_bytes(data[start_offset + 4..start_offset + 8].try_into().unwrap()) as usize;
-    let entry_size = u32::from_le_bytes(
-        data[start_offset + 8..start_offset + 12]
-            .try_into()
-            .unwrap(),
-    ) as usize;
+    let offset = le_u32(data, start_offset) as usize;
+    let num_entries = le_u32(data, start_offset + 4) as usize;
+    let entry_size = le_u32(data, start_offset + 8) as usize;
 
     TableDescriptor {
         offset,
@@ -205,16 +213,12 @@ fn parse_metadata(
         )));
     }
 
-    let magic = u32::from_le_bytes(data[header_offset..header_offset + 4].try_into().unwrap());
+    let magic = le_u32(&data, header_offset);
     if magic != LP_METADATA_HEADER_MAGIC {
         return Err(DynoError::Tool("Invalid LP metadata header magic".into()));
     }
 
-    let header_size = u32::from_le_bytes(
-        data[header_offset + 8..header_offset + 12]
-            .try_into()
-            .unwrap(),
-    ) as usize;
+    let header_size = le_u32(&data, header_offset + 8) as usize;
 
     let partitions_desc = parse_table_descriptor(&data, header_offset + 80);
     let extents_desc = parse_table_descriptor(&data, header_offset + 92);
@@ -222,11 +226,7 @@ fn parse_metadata(
     let block_devices_desc = parse_table_descriptor(&data, header_offset + 116);
 
     let header_flags = if header_size >= 132 {
-        u32::from_le_bytes(
-            data[header_offset + 128..header_offset + 132]
-                .try_into()
-                .unwrap(),
-        )
+        le_u32(&data, header_offset + 128)
     } else {
         0
     };
@@ -252,23 +252,10 @@ fn parse_metadata(
     let mut extents = Vec::with_capacity(extents_desc.num_entries);
     for i in 0..extents_desc.num_entries {
         let entry_offset = table_offset + extents_desc.offset + i * extents_desc.entry_size;
-        let num_sectors =
-            u64::from_le_bytes(data[entry_offset..entry_offset + 8].try_into().unwrap());
-        let target_type = u32::from_le_bytes(
-            data[entry_offset + 8..entry_offset + 12]
-                .try_into()
-                .unwrap(),
-        );
-        let target_data = u64::from_le_bytes(
-            data[entry_offset + 12..entry_offset + 20]
-                .try_into()
-                .unwrap(),
-        );
-        let target_source = u32::from_le_bytes(
-            data[entry_offset + 20..entry_offset + 24]
-                .try_into()
-                .unwrap(),
-        );
+        let num_sectors = le_u64(&data, entry_offset);
+        let target_type = le_u32(&data, entry_offset + 8);
+        let target_data = le_u64(&data, entry_offset + 12);
+        let target_source = le_u32(&data, entry_offset + 20);
 
         extents.push(SuperExtent {
             num_sectors,
@@ -282,11 +269,7 @@ fn parse_metadata(
     for i in 0..groups_desc.num_entries {
         let entry_offset = table_offset + groups_desc.offset + i * groups_desc.entry_size;
         let name = decode_c_string(&data[entry_offset..entry_offset + 36]);
-        let maximum_size = u64::from_le_bytes(
-            data[entry_offset + 40..entry_offset + 48]
-                .try_into()
-                .unwrap(),
-        );
+        let maximum_size = le_u64(&data, entry_offset + 40);
 
         groups.push(SuperGroup { name, maximum_size });
     }
@@ -295,11 +278,7 @@ fn parse_metadata(
     for i in 0..block_devices_desc.num_entries {
         let entry_offset =
             table_offset + block_devices_desc.offset + i * block_devices_desc.entry_size;
-        let size = u64::from_le_bytes(
-            data[entry_offset + 16..entry_offset + 24]
-                .try_into()
-                .unwrap(),
-        );
+        let size = le_u64(&data, entry_offset + 16);
         let name = decode_c_string(&data[entry_offset + 24..entry_offset + 60]);
 
         block_devices.push(SuperBlockDevice { name, size });
@@ -309,26 +288,10 @@ fn parse_metadata(
     for i in 0..partitions_desc.num_entries {
         let entry_offset = table_offset + partitions_desc.offset + i * partitions_desc.entry_size;
         let name = decode_c_string(&data[entry_offset..entry_offset + 36]);
-        let attributes = u32::from_le_bytes(
-            data[entry_offset + 36..entry_offset + 40]
-                .try_into()
-                .unwrap(),
-        );
-        let first_extent_index = u32::from_le_bytes(
-            data[entry_offset + 40..entry_offset + 44]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let num_extents = u32::from_le_bytes(
-            data[entry_offset + 44..entry_offset + 48]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let group_index = u32::from_le_bytes(
-            data[entry_offset + 48..entry_offset + 52]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let attributes = le_u32(&data, entry_offset + 36);
+        let first_extent_index = le_u32(&data, entry_offset + 40) as usize;
+        let num_extents = le_u32(&data, entry_offset + 44) as usize;
+        let group_index = le_u32(&data, entry_offset + 48) as usize;
 
         let group_name = if group_index < groups.len() {
             groups[group_index].name.clone()
