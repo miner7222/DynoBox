@@ -4820,6 +4820,8 @@ fn path_starts_with(haystack: &Path, prefix: &Path) -> bool {
 /// differences (`./foo` vs `foo/`) don't slip through.
 fn assert_safe_to_wipe(target: &Path, protected: &[&Path]) -> anyhow::Result<()> {
     let target = normalise_for_compare(target);
+    assert_not_system_anchor(&target)?;
+    assert_disposable_existing_dir(&target)?;
     for p in protected {
         let candidate = normalise_for_compare(p);
         if paths_equal(&target, &candidate) {
@@ -4845,6 +4847,83 @@ fn assert_safe_to_wipe(target: &Path, protected: &[&Path]) -> anyhow::Result<()>
         }
     }
     Ok(())
+}
+
+/// Refuse to wipe a filesystem root, the user's home directory, or the
+/// current working directory (or any of its ancestors). None of these can
+/// be a sensible pipeline output, and a stray `--output .` / `--output ~`
+/// would otherwise erase them.
+fn assert_not_system_anchor(target: &Path) -> anyhow::Result<()> {
+    if target.parent().is_none() {
+        anyhow::bail!(
+            "refusing to recursively delete `{}`: it is a filesystem root",
+            target.display()
+        );
+    }
+    if let Some(home) = std::env::home_dir() {
+        if paths_equal(target, &normalise_for_compare(&home)) {
+            anyhow::bail!(
+                "refusing to recursively delete `{}`: it is the home directory",
+                target.display()
+            );
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if path_starts_with(&normalise_for_compare(&cwd), target) {
+            anyhow::bail!(
+                "refusing to recursively delete `{}`: it contains the current working directory",
+                target.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// An existing, non-empty output directory is only wiped when it looks like
+/// something DynoBox produced: every pipeline output carries partition
+/// images, a rawprogram XML, the resign report, or the sealed manifest at
+/// its top level. Anything else is most likely a mistyped `--output`
+/// pointing at unrelated user data, so bail instead of deleting it.
+fn assert_disposable_existing_dir(target: &Path) -> anyhow::Result<()> {
+    let entries = match std::fs::read_dir(target) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if !target.is_dir() => {
+            anyhow::bail!(
+                "output path `{}` exists but is not a directory ({e})",
+                target.display()
+            )
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("Failed to list {}", target.display()));
+        }
+    };
+    let mut empty = true;
+    for entry in entries.flatten() {
+        empty = false;
+        if is_dynobox_output_marker(&entry.file_name().to_string_lossy()) {
+            return Ok(());
+        }
+    }
+    if empty {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "refusing to recursively delete `{}`: it is not empty and does not look like a DynoBox \
+         output (no .img / rawprogram XML / {} / {} at its top level). Remove it yourself or \
+         choose a new or empty output directory",
+        target.display(),
+        crate::integrity::REPORT_FILE_NAME,
+        crate::integrity::MANIFEST_FILE_NAME,
+    )
+}
+
+fn is_dynobox_output_marker(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".img")
+        || (lower.starts_with("rawprogram") && lower.ends_with(".xml"))
+        || name == crate::integrity::REPORT_FILE_NAME
+        || name == crate::integrity::MANIFEST_FILE_NAME
 }
 
 fn assert_integrity_key_outside_input(
@@ -5888,6 +5967,52 @@ mod tests {
         assert!(assert_safe_to_wipe(&base, &[&input]).is_err());
         // disjoint sibling is allowed
         assert!(assert_safe_to_wipe(&base.join("output"), &[&input]).is_ok());
+    }
+
+    #[test]
+    fn assert_safe_to_wipe_refuses_unrelated_non_empty_dirs() {
+        let temp = TempDir::new().unwrap();
+        let input = temp.path().join("image");
+        let out = temp.path().join("out");
+
+        // Missing and empty directories are always fine.
+        assert!(assert_safe_to_wipe(&out, &[&input]).is_ok());
+        fs::create_dir_all(&out).unwrap();
+        assert!(assert_safe_to_wipe(&out, &[&input]).is_ok());
+
+        // Unrelated user data is refused.
+        fs::write(out.join("notes.txt"), b"keep me").unwrap();
+        let err = assert_safe_to_wipe(&out, &[&input])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not look like a DynoBox output"), "{err}");
+
+        // A prior DynoBox output (any top-level image / report) is disposable.
+        for marker in ["boot.img", "rawprogram_unsparse0.xml", "report.html"] {
+            let dir = temp.path().join(format!("prior-{marker}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("notes.txt"), b"x").unwrap();
+            fs::write(dir.join(marker), b"x").unwrap();
+            assert!(assert_safe_to_wipe(&dir, &[&input]).is_ok(), "{marker}");
+        }
+
+        // A regular file is never treated as an output directory.
+        let file = temp.path().join("file.bin");
+        fs::write(&file, b"x").unwrap();
+        assert!(assert_safe_to_wipe(&file, &[&input]).is_err());
+    }
+
+    #[test]
+    fn assert_safe_to_wipe_refuses_roots_home_and_cwd() {
+        let input = std::env::temp_dir().join("dynobox_wipe_anchor_input");
+        let cwd = std::env::current_dir().unwrap();
+        let root = cwd.ancestors().last().unwrap().to_path_buf();
+        assert!(assert_safe_to_wipe(&root, &[&input]).is_err());
+        assert!(assert_safe_to_wipe(&cwd, &[&input]).is_err());
+        assert!(assert_safe_to_wipe(Path::new("."), &[&input]).is_err());
+        if let Some(home) = std::env::home_dir() {
+            assert!(assert_safe_to_wipe(&home, &[&input]).is_err());
+        }
     }
 
     #[test]

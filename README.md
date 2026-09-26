@@ -102,6 +102,13 @@ tradeoff: use it only when you intend to trust that signer. DynoBox still hashes
 every current output artifact in full and never accepts the attestation if the
 manifest, signature, or artifact inventory is malformed or tampered with.
 
+### Output directory safety
+
+DynoBox recreates the output directory on every run. It refuses to delete a
+filesystem root, your home directory, the current working directory, or an
+existing non-empty directory that does not look like a DynoBox output (no
+top-level `.img`, rawprogram XML, `report.html`, or manifest).
+
 ---
 
 ## 🙏 Credits
