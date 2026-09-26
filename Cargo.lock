@@ -942,7 +942,7 @@ checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
 name = "dynobox-app"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "avbtool-rs",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-cli"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "avbtool-rs",
@@ -984,14 +984,14 @@ dependencies = [
 
 [[package]]
 name = "dynobox-core"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "thiserror 2.0.21",
 ]
 
 [[package]]
 name = "dynobox-gui"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "anyhow",
  "dynobox-cli",
@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-payload"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "avbtool-rs",
  "bsdiff-android",
@@ -1027,7 +1027,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-super"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "crc32fast",
  "dynobox-core",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "dynobox-xml"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "aes",
  "cbc",
