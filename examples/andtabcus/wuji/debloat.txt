@@ -68,6 +68,8 @@ system:/system/priv-app/UDSEngine/
 system:/system/priv-app/VantateResources/
 system:/system/priv-app/XiaotianTrigger/
 system:/system/priv-app/XuiEasySync/
+system:/system/priv-app/ZuiAIControl/
+system:/system/priv-app/ZuiAIHelper/
 system:/system/priv-app/ZuiFindMyPhone/
 system:/system/priv-app/ZuiNewBrowser/
 system:/system/priv-app/ZuiPermissionController/

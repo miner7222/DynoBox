@@ -31,6 +31,8 @@
   "xiangbb": false,
   "XiaotianTrigger": false,
   "XuiEasySync": false,
+  "ZuiAIControl": false,
+  "ZuiAIHelper": false,
   "ZuiAntiCrossSell": false,
   "ZuiAntutuForbidden": false,
   "ZuiAudioDpin": true,
