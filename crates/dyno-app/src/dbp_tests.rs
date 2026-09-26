@@ -4072,7 +4072,8 @@ fn bundled_debloat_light_row_lists_op_shape() {
             })
             .collect();
     assert_eq!(picks.len(), 3, "three lighting app-list ops");
-    let expected: [(&str, &str, &[(&str, &str)]); 3] = [
+    type ExpectedOp<'a> = (&'a str, &'a str, &'a [(&'a str, &'a str)]);
+    let expected: [ExpectedOp; 3] = [
         (
             "getPresetAppList",
             "(Landroid/content/Context;Lcom/lenovo/settings/light/data/config/LightScene;)Ljava/util/Map;",

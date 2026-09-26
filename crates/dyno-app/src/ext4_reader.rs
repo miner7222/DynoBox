@@ -30,6 +30,9 @@ use zerocopy::{FromZeros, Immutable, IntoBytes, KnownLayout, TryFromBytes};
 // Errors
 // ---------------------------------------------------------------------------
 
+/// One extent run: `(file_block_idx, disk_block_idx, block_count, is_unwritten)`.
+pub type ExtentRun = (u64, u64, u64, bool);
+
 #[derive(Error, Debug)]
 #[allow(dead_code)]
 pub enum Ext4Error {
@@ -598,7 +601,7 @@ impl Inode {
     pub fn extent_mapping<R: Read + Seek>(
         &self,
         volume: &mut Ext4Volume<R>,
-    ) -> Result<Vec<(u64, u64, u64, bool)>> {
+    ) -> Result<Vec<ExtentRun>> {
         if (self.inode.i_flags & inode_mode::EXT4_EXTENTS_FL) == 0 {
             return Ok(Vec::new());
         }
@@ -628,7 +631,7 @@ impl Inode {
     pub fn open_read_with_extents<R: Read + Seek>(
         &self,
         volume: &mut Ext4Volume<R>,
-    ) -> Result<(Vec<u8>, Vec<(u64, u64, u64, bool)>)> {
+    ) -> Result<(Vec<u8>, Vec<ExtentRun>)> {
         const MAX_FILE_SIZE: u64 = 16 * 1024 * 1024 * 1024;
         let file_size = self.inode.i_size();
         if file_size > MAX_FILE_SIZE {
@@ -713,7 +716,7 @@ impl Inode {
         &self,
         volume: &mut Ext4Volume<R>,
         data: &[u8],
-        mapping: &mut Vec<(u64, u64, u64, bool)>,
+        mapping: &mut Vec<ExtentRun>,
         depth: u8,
         visited_blocks: &mut HashSet<u64>,
     ) -> Result<()> {

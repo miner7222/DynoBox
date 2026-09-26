@@ -57,6 +57,7 @@ use crate::dex_patch::{
 };
 use crate::dex_util::recompute_dex_header_sums;
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
+use crate::ext4_reader::ExtentRun;
 use crate::zip_util::{crc32_ieee, parse_zip_central_directory};
 
 /// Default JVM descriptor for the boolean predicates these ops target.
@@ -1348,10 +1349,10 @@ fn apply_ops_to_file(
     }
 }
 
-fn read_file_from_ext4(
-    image_path: &Path,
-    file: &str,
-) -> Result<Option<(Vec<u8>, Vec<(u64, u64, u64, bool)>, u64)>> {
+/// File bytes, their extent runs, and the volume block size.
+type Ext4FileContents = (Vec<u8>, Vec<ExtentRun>, u64);
+
+fn read_file_from_ext4(image_path: &Path, file: &str) -> Result<Option<Ext4FileContents>> {
     let components: Vec<&str> = file.split('/').filter(|c| !c.is_empty()).collect();
     let mut volume = open_ext4_volume(image_path)?;
     let inode = match lookup_inode_at_path(&mut volume, &components)? {

@@ -85,10 +85,6 @@ manual_is_multiple_of = "allow"
 manual_div_ceil = "allow"
 doc_overindented_list_items = "allow"
 needless_borrows_for_generic_args = "allow"
-type_complexity = "allow"
-unnecessary_cast = "allow"
-absurd_extreme_comparisons = "allow"
-regex_creation_in_loops = "allow"
 
 # Release tuning for the dual-mode CLI/GUI binary. `panic` stays at the
 # default "unwind" on purpose so a failed task can unwind instead of

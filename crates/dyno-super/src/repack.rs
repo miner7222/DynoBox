@@ -125,10 +125,10 @@ pub fn repack_super_image(
         chunk_plans.push(SuperFlashChunk {
             filename,
             start_sector: base_start_sector + (extent.target_data * 512 / flash_sector_size),
-            num_sectors: (size_bytes as u64 + flash_sector_size - 1) / flash_sector_size,
+            num_sectors: (size_bytes + flash_sector_size - 1) / flash_sector_size,
             sector_size_bytes: flash_sector_size,
             source_offset_bytes: 0,
-            size_bytes: size_bytes as u64,
+            size_bytes,
         });
 
         created_files.push(out_path);

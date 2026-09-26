@@ -189,14 +189,15 @@ fn read_metadata_region(path: &Path) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn parse_metadata(
-    path: &Path,
-) -> Result<(
+/// `(header_flags, block_devices, groups, partitions)` from one LP metadata slot.
+type ParsedMetadata = (
     u32,
     Vec<SuperBlockDevice>,
     Vec<SuperGroup>,
     Vec<SuperPartition>,
-)> {
+);
+
+fn parse_metadata(path: &Path) -> Result<ParsedMetadata> {
     let data = read_metadata_region(path)?;
     let header_offset = find_header_offset(&data)?;
 

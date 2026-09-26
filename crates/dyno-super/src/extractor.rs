@@ -85,7 +85,7 @@ pub fn extract_partition_images_with_progress(
     let mut extracted = HashMap::new();
 
     for partition in &layout.partitions {
-        if partition.slot_suffix() == Some("b") || partition.logical_size() <= 0 {
+        if partition.slot_suffix() == Some("b") || partition.logical_size() == 0 {
             continue;
         }
 

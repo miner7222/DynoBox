@@ -21,7 +21,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::ext4_reader::{Ext4Volume, Inode};
+use crate::ext4_reader::{Ext4Volume, ExtentRun, Inode};
 
 /// Open `image_path` as an ext4 volume backed by a buffered file reader.
 pub fn open_ext4_volume(image_path: &Path) -> Result<Ext4Volume<BufReader<File>>> {
@@ -79,7 +79,7 @@ pub fn lookup_inode_at_path<R: Read + Seek>(
 /// `is_unwritten` (logically-zero) extent — in either case there's no
 /// concrete disk byte to patch.
 pub fn map_file_offset_to_disk(
-    extents: &[(u64, u64, u64, bool)],
+    extents: &[ExtentRun],
     file_offset: u64,
     block_size: u64,
 ) -> Option<u64> {
@@ -108,7 +108,7 @@ pub fn map_file_offset_to_disk(
 pub fn write_via_extents(
     image_path: &Path,
     buffer: &[u8],
-    extents: &[(u64, u64, u64, bool)],
+    extents: &[ExtentRun],
     block_size: u64,
 ) -> Result<()> {
     let mut file = OpenOptions::new()
