@@ -163,35 +163,9 @@ pub(crate) fn checked_range_end(start: usize, len: usize, label: &str) -> Result
         .ok_or_else(|| anyhow!("{label} offset overflow"))
 }
 
-/// IEEE CRC32 (ZIP / PNG polynomial 0xEDB88320). The lookup table
-/// is identical for every call, so it's built once at process
-/// startup via `LazyLock` rather than rebuilt per call. Callers hit
-/// this once per patched `classes*.dex` (framework.jar rewrite here,
-/// plus the `.dbp` APK patcher); the previous per-call table rebuild
-/// was ~256 * 9 = ~2304 ops of pure waste per CRC computation.
-static CRC32_TABLE: std::sync::LazyLock<[u32; 256]> = std::sync::LazyLock::new(|| {
-    let mut table = [0u32; 256];
-    for (n, slot) in table.iter_mut().enumerate() {
-        let mut c = n as u32;
-        for _ in 0..8 {
-            c = if c & 1 != 0 {
-                0xEDB88320 ^ (c >> 1)
-            } else {
-                c >> 1
-            };
-        }
-        *slot = c;
-    }
-    table
-});
-
+/// IEEE CRC-32 (the ZIP / PNG polynomial).
 pub(crate) fn crc32_ieee(data: &[u8]) -> u32 {
-    let table = &*CRC32_TABLE;
-    let mut crc = 0xFFFFFFFFu32;
-    for &b in data {
-        crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8);
-    }
-    crc ^ 0xFFFFFFFF
+    crc32fast::hash(data)
 }
 
 #[cfg(test)]

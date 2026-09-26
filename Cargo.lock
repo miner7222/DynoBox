@@ -946,6 +946,7 @@ version = "0.3.3"
 dependencies = [
  "anyhow",
  "avbtool-rs",
+ "crc32fast",
  "dynobox-core",
  "dynobox-payload",
  "dynobox-super",
@@ -957,6 +958,7 @@ dependencies = [
  "pkcs8 0.11.0",
  "serde",
  "serde_json",
+ "sha1 0.11.0",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.20",
