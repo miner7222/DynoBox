@@ -280,6 +280,17 @@ impl<'a> BufferBitReader<'a> {
         self.cache_bits -= nbits as u8;
     }
 
+    /// Drop a just-decoded Huffman code of `nbits`. Near the end of a
+    /// truncated stream the reader may hold fewer bits than the matched
+    /// code is long, so refuse instead of underflowing the bit cache.
+    fn drop_code_bits(&mut self, nbits: usize, what: &str) -> Result<()> {
+        if nbits > usize::from(self.cache_bits) {
+            return Err(tool_error(format!("{what} Huffman stream truncated")));
+        }
+        self.drop_bits(nbits);
+        Ok(())
+    }
+
     fn read_boundary_bits(&self) -> u8 {
         let nbits = usize::from(self.cache_bits & 7);
         if nbits == 0 {
@@ -862,7 +873,7 @@ impl HuffmanTable {
             }
             let bits = reader.read_bits(max_bits);
             let (code, nbits) = self.code_alphabet(bits)?;
-            reader.drop_bits(nbits);
+            reader.drop_code_bits(nbits, "Dynamic Huffman code length")?;
 
             if code < 16 {
                 metadata_out.push(code as u8);
@@ -1072,7 +1083,7 @@ impl Puffer {
                 }
                 let bits = reader.read_bits(bits_to_cache);
                 let (lit_len_alphabet, nbits) = table.lit_len_alphabet(bits)?;
-                reader.drop_bits(nbits);
+                reader.drop_code_bits(nbits, "Literal/length")?;
 
                 if lit_len_alphabet < 256 {
                     writer.insert(PuffData::Literal(lit_len_alphabet as u8))?;
@@ -1109,7 +1120,7 @@ impl Puffer {
                 }
                 let bits = reader.read_bits(distance_bits);
                 let (distance_alphabet, nbits) = table.distance_alphabet(bits)?;
-                reader.drop_bits(nbits);
+                reader.drop_code_bits(nbits, "Deflate distance")?;
 
                 let extra_dist_bits = usize::from(DISTANCE_EXTRA_BITS[distance_alphabet as usize]);
                 let extra_dist = if extra_dist_bits > 0 {
@@ -1478,6 +1489,12 @@ fn puff_stream(source: &[u8], layout: &StreamLayout) -> Result<Vec<u8>> {
             continue;
         }
 
+        // A raw segment sized from the deflate side can overshoot the next
+        // puff extent on a malformed layout; the extent could then never
+        // complete and the loop below would spin without progress.
+        if skip_bytes == 0 && puff_pos != current_puff.offset {
+            return Err(tool_error("Puff stream and deflate stream cursor desynced"));
+        }
         let start_byte = (current_deflate.offset / 8) as usize;
         let end_byte = (current_deflate.offset + current_deflate.length).div_ceil(8) as usize;
         let deflate_bytes = source
@@ -1492,6 +1509,9 @@ fn puff_stream(source: &[u8], layout: &StreamLayout) -> Result<Vec<u8>> {
             )));
         }
         let bytes_to_copy = remaining.min((current_puff.length - skip_bytes) as usize);
+        if bytes_to_copy == 0 {
+            return Err(tool_error("Failed to advance puffed segment while puffing"));
+        }
         let start = skip_bytes as usize;
         output.extend_from_slice(&puffed[start..start + bytes_to_copy]);
         skip_bytes += bytes_to_copy as u64;
@@ -1572,6 +1592,9 @@ fn huff_stream(puffed: &[u8], layout: &StreamLayout) -> Result<Vec<u8>> {
         let needed =
             (current_puff.length + u64::from(extra_byte)).saturating_sub(skip_bytes) as usize;
         let copy_len = needed.min(puffed.len() - input_index);
+        if copy_len == 0 && skip_bytes != current_puff.length + u64::from(extra_byte) {
+            return Err(tool_error("Failed to advance puffed segment while huffing"));
+        }
         if skip_bytes == 0 {
             puff_buffer.clear();
         }
@@ -1762,6 +1785,18 @@ mod tests {
             huff_stream(PUFFS_SAMPLE1, &layout).unwrap(),
             DEFLATES_SAMPLE1
         );
+    }
+
+    /// Moving the second source puff extent from byte 120 to 112 makes the
+    /// preceding raw segment overshoot it. `puff_stream` used to spin forever
+    /// copying zero bytes; it must now reject the layout.
+    #[test]
+    fn puff_stream_rejects_raw_segment_overshooting_puff_extent() {
+        let mut patch = PATCH_1_TO_2.to_vec();
+        assert_eq!(patch[39], 0x78);
+        patch[39] = 0x70;
+        let err = apply_puffpatch_bytes(DEFLATES_SAMPLE1, &patch).unwrap_err();
+        assert!(err.to_string().contains("desynced"), "{err}");
     }
 
     #[test]
