@@ -50,10 +50,10 @@ use std::io::{Read, Write};
 use anyhow::{Result, anyhow};
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 
-use crate::fuck_lgsi::{
-    crc32_ieee, dex_walker, parse_axml_elements, parse_zip_central_directory, read_u16_le,
-    read_u32_le, write_u16_le, write_u32_le,
-};
+use crate::axml::parse_axml_elements;
+use crate::byte_io::{read_u16_le, read_u32_le, write_u16_le, write_u32_le};
+use crate::fuck_lgsi::dex_walker;
+use crate::zip_util::{crc32_ieee, parse_zip_central_directory};
 
 // ---------------------------------------------------------------------------
 // JVM method descriptor parsing
@@ -3599,9 +3599,9 @@ struct AxmlEntryWork {
 }
 
 fn axml_attr<'a>(
-    attrs: &'a [crate::fuck_lgsi::AxmlAttr],
+    attrs: &'a [crate::axml::AxmlAttr],
     name: &str,
-) -> Option<&'a crate::fuck_lgsi::AxmlAttr> {
+) -> Option<&'a crate::axml::AxmlAttr> {
     attrs
         .iter()
         .find(|a| a.ns.as_deref() == Some(AXML_ANDROID_NS) && a.name.as_deref() == Some(name))
@@ -3611,7 +3611,7 @@ fn axml_attr<'a>(
 /// 0; a `@dimen` reference becomes a literal 0px dimension). Returns false
 /// when the attribute is absent (nothing to do) or has any other shape, in
 /// which case the caller skips the node.
-fn axml_zero_dim(attr: &crate::fuck_lgsi::AxmlAttr, edits: &mut Vec<AxmlEdit>) -> bool {
+fn axml_zero_dim(attr: &crate::axml::AxmlAttr, edits: &mut Vec<AxmlEdit>) -> bool {
     match attr.data_type {
         AXML_TYPE_DIMENSION => {
             edits.push(AxmlEdit {
@@ -3650,7 +3650,7 @@ enum AxmlEditKind {
 /// writing a partial one.
 fn collect_axml_works(
     zip_bytes: &[u8],
-    layout: &crate::fuck_lgsi::ZipLayout,
+    layout: &crate::zip_util::ZipLayout,
     node_id: u32,
     kind: &AxmlEditKind,
 ) -> Result<Vec<AxmlEntryWork>> {
@@ -3887,7 +3887,7 @@ const ZIP_EOCD_SIG: u32 = 0x06054b50;
 /// anything unexpected rather than writing a half-updated archive.
 fn axml_descriptor_offsets(
     zip_bytes: &[u8],
-    entry: &crate::fuck_lgsi::ZipEntry,
+    entry: &crate::zip_util::ZipEntry,
     data_end: usize,
 ) -> Result<Option<(usize, usize)>> {
     if !entry.uses_data_descriptor {
@@ -3922,7 +3922,7 @@ fn axml_descriptor_offsets(
 /// so the file length never changes), then fix CRCs and compressed sizes.
 fn commit_axml_works(
     zip_bytes: &mut [u8],
-    layout: &crate::fuck_lgsi::ZipLayout,
+    layout: &crate::zip_util::ZipLayout,
     works: Vec<AxmlEntryWork>,
 ) -> Result<bool> {
     // Phase 1: apply edits to copies and fit recompression; nothing written.
@@ -4906,8 +4906,8 @@ mod tests {
     fn method_const_int_lands_on_real_services() {
         let path = crate::test_fixtures::env("DYNOBOX_SERVICES_ARCHIVE");
         let archive = std::fs::read(path).expect("read services archive");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&archive)
-            .expect("parse services archive");
+        let zip =
+            crate::zip_util::parse_zip_central_directory(&archive).expect("parse services archive");
         let mut hits = 0;
         for entry in zip.entries.iter().filter(|entry| {
             entry.name.ends_with(".dex")
@@ -5184,7 +5184,7 @@ mod tests {
     fn nop_invoke_lands_on_real_zuisecurity() {
         let path = crate::test_fixtures::env("DYNOBOX_ZUISECURITY_APK");
         let apk = std::fs::read(path).expect("read ZuiSecurity.apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("parse apk");
         let (mut list_sites, mut update_sites) = (0usize, 0usize);
         for entry in zip.entries.iter().filter(|e| {
             e.name.ends_with(".dex")
@@ -5364,7 +5364,7 @@ mod tests {
     fn force_view_gone_lands_on_real_zuisecurity() {
         let path = crate::test_fixtures::env("DYNOBOX_ZUISECURITY_APK");
         let apk = std::fs::read(path).expect("read ZuiSecurity.apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("parse apk");
         let mut hidden = 0usize;
         for entry in zip.entries.iter().filter(|e| {
             e.name.ends_with(".dex")
@@ -5394,7 +5394,7 @@ mod tests {
     fn isrowversion_forced_in_permission_controller_on_real_zuisettings() {
         let path = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_APK");
         let apk = std::fs::read(path).expect("read ZuiSettings.apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("parse apk");
         let mut sites = 0usize;
         for entry in zip.entries.iter().filter(|e| {
             e.name.ends_with(".dex")
@@ -5477,7 +5477,7 @@ mod tests {
     fn method_nop_lands_on_real_zuisecurity_antivirus() {
         let path = crate::test_fixtures::env("DYNOBOX_ZUISECURITY_APK");
         let apk = std::fs::read(path).expect("read ZuiSecurity.apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("parse apk");
         let mut hits = 0usize;
         for entry in zip.entries.iter().filter(|e| {
             e.name.ends_with(".dex")
@@ -5515,7 +5515,7 @@ mod tests {
             // structural validator (dexdump / dex2oat) can confirm it still loads.
             if let Ok(out) = std::env::var("DYNOBOX_ZUISECURITY_DEX_OUT") {
                 if dex_modified {
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     std::fs::write(std::path::Path::new(&out).join(&entry.name), &dex)
                         .expect("write patched dex");
                 }

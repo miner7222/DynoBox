@@ -43,6 +43,7 @@ use anyhow::{Context, Result, anyhow};
 use memchr::memmem;
 use serde::Deserialize;
 
+use crate::byte_io::write_u32_le;
 use crate::dex_patch::{
     DexMethodRef, DexPoolSymbol, DexPoolSymbolKind, MethodCodeReplacement, MethodCodeTemplateSlot,
     NopAnchor, force_axml_background, force_axml_collapse, force_field_const_bool,
@@ -54,10 +55,9 @@ use crate::dex_patch::{
     redirect_intent_action_to_broadcast, redirect_method_code, resolve_dex_pool_symbol,
     validate_method_code_template_slots,
 };
+use crate::dex_util::recompute_dex_header_sums;
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
-use crate::fuck_lgsi::{
-    crc32_ieee, parse_zip_central_directory, recompute_dex_header_sums, write_u32_le,
-};
+use crate::zip_util::{crc32_ieee, parse_zip_central_directory};
 
 /// Default JVM descriptor for the boolean predicates these ops target.
 fn default_bool_proto() -> String {
@@ -2276,7 +2276,7 @@ proto = "(Landroid/content/Context;Z)V"
 
     #[test]
     fn axml_collapse_and_background_round_trip() {
-        use crate::fuck_lgsi::{build_test_axml, parse_axml_elements};
+        use crate::axml::{build_test_axml, parse_axml_elements};
 
         let xml = build_test_axml();
         let zip = build_test_zip(&[("res/layout.xml", &xml, 0, 0)]);
@@ -2422,7 +2422,7 @@ proto = "(Landroid/content/Context;Z)V"
 
     #[test]
     fn axml_edit_keeps_footprint_with_local_extra_field() {
-        use crate::fuck_lgsi::{build_test_axml, parse_axml_elements};
+        use crate::axml::{build_test_axml, parse_axml_elements};
         use std::io::{Read as _, Write as _};
 
         let xml = build_test_axml();
@@ -3346,7 +3346,7 @@ value = false
     fn bundled_debloat_antispam_land_on_real_apks() {
         fn land(apk_path: &str, op: &DbpOp, dump_name: &str) -> usize {
             let apk = std::fs::read(apk_path).expect("read apk");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
             let mut hits = 0usize;
             for e in zip.entries.iter().filter(|e| {
                 e.name.ends_with(".dex")
@@ -3359,7 +3359,7 @@ value = false
                 if apply_one_op(&mut dex, op).unwrap() {
                     hits += 1;
                     if let Ok(dir) = std::env::var("DYNOBOX_ANTISPAM_DEX_OUT") {
-                        crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                        crate::dex_util::recompute_dex_header_sums(&mut dex);
                         let _ = std::fs::write(std::path::Path::new(&dir).join(dump_name), &dex);
                     }
                 }
@@ -5367,7 +5367,7 @@ value = false
         );
 
         let zip =
-            crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("parse services.jar zip");
+            crate::zip_util::parse_zip_central_directory(&jar).expect("parse services.jar zip");
         let mut landed = 0usize;
         let mut changed_entries = Vec::new();
         for entry in zip.entries.iter().filter(|entry| {
@@ -5383,7 +5383,7 @@ value = false
                 landed += 1;
                 assert_eq!(dex.len(), original.len(), "DEX size changed");
                 assert_ne!(dex, original, "reported landing without a byte change");
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                crate::dex_util::recompute_dex_header_sums(&mut dex);
                 changed_entries.push(entry.name.clone());
                 if let Ok(out) = std::env::var("DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_DEX_OUT") {
                     std::fs::write(&out, &dex).expect("write patched services DEX");
@@ -5440,7 +5440,7 @@ value = false
 
         fn land_on_jar(jar: &[u8], op: &DbpOp, out: Option<&str>) -> (usize, Vec<String>) {
             let zip =
-                crate::fuck_lgsi::parse_zip_central_directory(jar).expect("parse services.jar zip");
+                crate::zip_util::parse_zip_central_directory(jar).expect("parse services.jar zip");
             let mut landed = 0usize;
             let mut changed_entries = Vec::new();
             for entry in zip.entries.iter().filter(|entry| {
@@ -5456,7 +5456,7 @@ value = false
                     landed += 1;
                     assert_eq!(dex.len(), original.len(), "DEX size changed");
                     assert_ne!(dex, original, "reported landing without a byte change");
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     changed_entries.push(entry.name.clone());
                     if let Some(path) = out {
                         std::fs::write(path, &dex).expect("write patched services DEX");
@@ -5611,7 +5611,7 @@ value = false
                 .collect::<String>();
             assert_eq!(digest, expected_digest, "unexpected ZuiSystemUI.apk digest");
 
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse APK zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("parse APK zip");
             let mut landed = 0usize;
             let mut op_hits = vec![0usize; ops.len()];
             let mut changed_entries = Vec::new();
@@ -5635,7 +5635,7 @@ value = false
                 if entry_hits != 0 {
                     assert_eq!(dex.len(), original.len(), "DEX size changed");
                     assert_ne!(dex, original, "reported landing without a byte change");
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     changed_entries.push(entry.name.clone());
                     if let Ok(out) = std::env::var(out_env) {
                         std::fs::write(out, &dex).expect("write patched classes2.dex");
@@ -5665,7 +5665,7 @@ value = false
         }
 
         fn land_on_apk(apk: &[u8], ops: &[&DbpOp], out: Option<&str>) -> (usize, Vec<String>) {
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(apk).expect("parse APK zip");
+            let zip = crate::zip_util::parse_zip_central_directory(apk).expect("parse APK zip");
             let mut landed = 0usize;
             let mut changed = Vec::new();
             for entry in zip.entries.iter().filter(|entry| {
@@ -5686,7 +5686,7 @@ value = false
                 }
                 if entry_landed {
                     assert_eq!(dex.len(), original.len(), "DEX size changed");
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     changed.push(entry.name.clone());
                     if let Some(path) = out {
                         std::fs::write(path, dex).expect("write patched launcher classes2.dex");
@@ -5799,7 +5799,7 @@ value = false
                 .map(|byte| format!("{byte:02X}"))
                 .collect::<String>();
             assert_eq!(digest, expected_digest, "unexpected setup-wizard digest");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse APK");
+            let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("parse APK");
             let mut hits = [0usize; 2];
             for entry in zip.entries.iter().filter(|entry| {
                 entry.name.ends_with(".dex")
@@ -5823,7 +5823,7 @@ value = false
                 if changed > 0
                     && let Ok(out) = std::env::var(out_env)
                 {
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+                    crate::dex_util::recompute_dex_header_sums(&mut patched);
                     std::fs::create_dir_all(&out).unwrap();
                     std::fs::write(std::path::Path::new(&out).join(&entry.name), patched).unwrap();
                 }
@@ -5845,7 +5845,7 @@ value = false
         }
 
         fn dex_landing_count(apk: &[u8], op: &DbpOp) -> usize {
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(apk).expect("parse APK");
+            let zip = crate::zip_util::parse_zip_central_directory(apk).expect("parse APK");
             zip.entries
                 .iter()
                 .filter(|entry| {
@@ -6112,7 +6112,7 @@ value = false
                 .map(|byte| format!("{byte:02X}"))
                 .collect::<String>();
             assert_eq!(digest, expected_digest, "unexpected {label} APK digest");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse APK");
+            let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("parse APK");
             let mut hits = [0usize; 4];
             let mut shared_body_rewrite_hits = 0usize;
             for entry in zip.entries.iter().filter(|entry| {
@@ -6150,7 +6150,7 @@ value = false
                 if changed > 0
                     && let Ok(out) = std::env::var(out_env)
                 {
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+                    crate::dex_util::recompute_dex_header_sums(&mut patched);
                     std::fs::create_dir_all(&out).unwrap();
                     std::fs::write(std::path::Path::new(&out).join(&entry.name), patched).unwrap();
                 }
@@ -6379,7 +6379,7 @@ value = false
             if patched != original
                 && let Ok(out) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_OUT")
             {
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+                crate::dex_util::recompute_dex_header_sums(&mut patched);
                 std::fs::create_dir_all(&out).expect("create dex out dir");
                 std::fs::write(std::path::Path::new(&out).join(name), &patched)
                     .expect("write patched dex");
@@ -6473,7 +6473,7 @@ value = false
                 }
             }
             if modified {
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                crate::dex_util::recompute_dex_header_sums(&mut dex);
                 if let Ok(out) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_OUT") {
                     std::fs::write(std::path::Path::new(&out).join(name), &dex).unwrap();
                 }
@@ -6758,7 +6758,7 @@ value = false
                     }
                 }
                 if modified {
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     if let Ok(out) = std::env::var("DYNOBOX_TELEPHONY_DEX_OUT") {
                         std::fs::create_dir_all(&out).expect("create telephony dex out dir");
                         let case = var
@@ -6810,7 +6810,7 @@ value = false
             };
             if apply_one_op(&mut dex, op).unwrap() {
                 landed += 1;
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                crate::dex_util::recompute_dex_header_sums(&mut dex);
             }
         }
         assert_eq!(landed, 1, "updateState branch nop should land exactly once");
@@ -6834,7 +6834,7 @@ value = false
             value: 3,
         };
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         let mut hits = 0usize;
         for e in zip.entries.iter().filter(|e| {
             e.name.ends_with(".dex")
@@ -6875,7 +6875,7 @@ value = false
                 }
             }
             if modified {
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                crate::dex_util::recompute_dex_header_sums(&mut dex);
                 if let Ok(out) = std::env::var("DYNOBOX_ZUICAMERA_DEX_OUT") {
                     std::fs::write(std::path::Path::new(&out).join(name), &dex).unwrap();
                 }
@@ -7029,7 +7029,7 @@ value = false
             };
             if apply_one_op(&mut dex, op).unwrap() {
                 landed += 1;
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                crate::dex_util::recompute_dex_header_sums(&mut dex);
                 if let Ok(out) = std::env::var("DYNOBOX_ZUISECURITY_DEX_OUT") {
                     std::fs::write(std::path::Path::new(&out).join(name), &dex).unwrap();
                 }
@@ -7094,7 +7094,7 @@ value = false
                 continue;
             };
             let apk = std::fs::read(&path).expect("read apk");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
             let dex_entries: Vec<_> = zip
                 .entries
                 .iter()
@@ -7361,7 +7361,7 @@ value = false
             .find(|op| matches!(op, DbpOp::MethodConstString { .. }))
             .expect("unlock-common must carry the translator country-code op");
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         let mut hits = 0usize;
         for entry in zip.entries.iter().filter(|e| {
             e.name.ends_with(".dex")
@@ -7376,7 +7376,7 @@ value = false
                 hits += 1;
                 assert_eq!(dex.len(), original.len(), "patch must preserve dex length");
                 if let Ok(out_dir) = std::env::var("DYNOBOX_LEVOICECAPTION_DEX_OUT") {
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     std::fs::create_dir_all(&out_dir).expect("create dex out dir");
                     std::fs::write(std::path::Path::new(&out_dir).join(&entry.name), &dex)
                         .expect("write patched dex");
@@ -7404,7 +7404,7 @@ value = false
             })
             .expect("debloat-common must carry the Game Helper feature-key op");
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         let entries: Vec<_> = zip
             .entries
             .iter()
@@ -7429,7 +7429,7 @@ value = false
         assert_eq!(landed.len(), 1, "the feature-key op must land in one dex");
         let (name, mut dex) = landed.pop().expect("one dex carries the feature-key op");
         if let Ok(out_dir) = std::env::var("DYNOBOX_GAMEHELPER_DEX_OUT") {
-            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+            crate::dex_util::recompute_dex_header_sums(&mut dex);
             std::fs::create_dir_all(&out_dir).expect("create dex out dir");
             std::fs::write(std::path::Path::new(&out_dir).join(&name), &dex)
                 .expect("write patched dex");
@@ -7471,7 +7471,7 @@ value = false
             })
             .collect();
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         let entries: Vec<_> = zip
             .entries
             .iter()
@@ -7504,7 +7504,7 @@ value = false
                 }
             }
             if modified && let Ok(out) = std::env::var("DYNOBOX_GAMEHELPER_ROW_DEX_OUT") {
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+                crate::dex_util::recompute_dex_header_sums(&mut patched);
                 std::fs::create_dir_all(&out).expect("create dex out dir");
                 std::fs::write(std::path::Path::new(&out).join(&entry.name), &patched)
                     .expect("write patched dex");
@@ -7655,7 +7655,7 @@ value = false
             _ => unreachable!(),
         }
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         let mut landed = vec![0usize; 4];
         for entry in zip.entries.iter().filter(|e| {
             e.name.ends_with(".dex")
@@ -7709,7 +7709,7 @@ value = false
         );
         assert_eq!(landed, 8, "every NetworkAccelerate op must land");
         if let Ok(out) = std::env::var("DYNOBOX_NETWORKACCEL_DEX_OUT") {
-            crate::fuck_lgsi::recompute_dex_header_sums(&mut patched);
+            crate::dex_util::recompute_dex_header_sums(&mut patched);
             std::fs::write(&out, &patched).expect("write patched dex");
         }
     }
@@ -7875,7 +7875,7 @@ value = false
             })
             .expect("AOD date op");
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         let entries: Vec<_> = zip
             .entries
             .iter()
@@ -7901,7 +7901,7 @@ value = false
         let (name, mut dex) = landed.pop().expect("one dex carries the AOD date op");
         assert_eq!(name, "classes.dex", "the AOD op lands in the first dex");
         if let Ok(out) = std::env::var("DYNOBOX_ZUISYSTEMUI_AOD_DEX_OUT") {
-            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+            crate::dex_util::recompute_dex_header_sums(&mut dex);
             std::fs::write(&out, &dex).expect("write patched dex");
         }
     }
@@ -7977,7 +7977,7 @@ value = false
             })
             .expect("QS header date op");
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         let entries: Vec<_> = zip
             .entries
             .iter()
@@ -8010,7 +8010,7 @@ value = false
             "the QS header date op lands in classes2.dex"
         );
         if let Ok(out) = std::env::var("DYNOBOX_ZUISYSTEMUI_QS_DATE_DEX_OUT") {
-            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+            crate::dex_util::recompute_dex_header_sums(&mut dex);
             std::fs::write(&out, &dex).expect("write patched dex");
         }
     }
@@ -8125,7 +8125,7 @@ value = false
             .collect();
         assert_eq!(ops.len(), 2, "the super god unlock carries two ops");
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         let entries: Vec<_> = zip
             .entries
             .iter()
@@ -8171,7 +8171,7 @@ value = false
             "patches must preserve dex length"
         );
         if let Ok(out) = std::env::var("DYNOBOX_GAMEHELPER_GODMODE_DEX_OUT") {
-            crate::fuck_lgsi::recompute_dex_header_sums(&mut combined);
+            crate::dex_util::recompute_dex_header_sums(&mut combined);
             std::fs::write(&out, &combined).expect("write patched dex");
         }
     }
@@ -8269,7 +8269,7 @@ value = false
         let path = crate::test_fixtures::env("DYNOBOX_FREEFORMBAR_APK");
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
         let apk = std::fs::read(&path).expect("read apk");
-        let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+        let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
         for method in ["initSideBarView", "setNoMoveAnim"] {
             let op = fc
                 .ops
@@ -8302,7 +8302,7 @@ value = false
                 "the {method} op lands in one of the two app dex files"
             );
             if let Ok(out) = std::env::var("DYNOBOX_FREEFORMBAR_DEX_OUT") {
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                crate::dex_util::recompute_dex_header_sums(&mut dex);
                 let file = std::path::Path::new(&out).join(format!("{method}.dex"));
                 std::fs::write(&file, &dex).expect("write patched dex");
             }
@@ -8364,7 +8364,7 @@ value = false
     fn debloat_security_new_ops_land_on_real_apks() {
         fn land(apk_path: &str, op: &DbpOp) -> usize {
             let apk = std::fs::read(apk_path).expect("read apk");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
             let mut hits = 0usize;
             for e in zip.entries.iter().filter(|e| {
                 e.name.ends_with(".dex")
@@ -8421,7 +8421,7 @@ value = false
             // 2 setVisibility(GONE)).
             if let Ok(out) = std::env::var("DYNOBOX_ZUISECURITY_NAV_DEX_OUT") {
                 let apk = std::fs::read(&p).expect("read apk");
-                let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+                let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
                 for e in zip
                     .entries
                     .iter()
@@ -8430,7 +8430,7 @@ value = false
                     for nav in &navs {
                         let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
                         if apply_one_op(&mut dex, nav).unwrap() {
-                            crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                            crate::dex_util::recompute_dex_header_sums(&mut dex);
                             std::fs::write(std::path::Path::new(&out).join(&e.name), &dex).unwrap();
                         }
                     }
@@ -8458,7 +8458,7 @@ value = false
             // (sums recomputed) for structural validation via dexdump.
             if let Ok(out) = std::env::var("DYNOBOX_ZUIPACKAGEINSTALLER_DEX_OUT") {
                 let apk = std::fs::read(&p).expect("read apk");
-                let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+                let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
                 let e = zip
                     .entries
                     .iter()
@@ -8467,7 +8467,7 @@ value = false
                 let mut dex = apk[e.data_start..e.data_start + e.compressed_size].to_vec();
                 assert!(apply_one_op(&mut dex, rec).unwrap());
                 assert!(apply_one_op(&mut dex, scan).unwrap());
-                crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                crate::dex_util::recompute_dex_header_sums(&mut dex);
                 std::fs::write(std::path::Path::new(&out).join("classes.dex"), &dex).unwrap();
             }
         }
@@ -8481,7 +8481,7 @@ value = false
     fn debloat_security_autorun_defaults_land_on_real_apks() {
         fn land(apk_path: &str, op: &DbpOp) -> usize {
             let apk = std::fs::read(apk_path).expect("read apk");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
             let mut hits = 0usize;
             for e in zip.entries.iter().filter(|e| {
                 e.name.ends_with(".dex")
@@ -8565,7 +8565,7 @@ value = false
                 };
                 if apply_one_op(&mut dex, op).unwrap() {
                     landed += 1;
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     if let Ok(out) = std::env::var(env_out) {
                         std::fs::write(std::path::Path::new(&out).join(&name), &dex).unwrap();
                     }
@@ -8605,7 +8605,7 @@ value = false
     fn bundled_row_keyboard_names_land_on_real_services_jar() {
         fn land(jar_path: &str, op: &DbpOp, dump: &str) -> usize {
             let jar = std::fs::read(jar_path).expect("read services.jar");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&jar).expect("zip");
             let mut hits = 0usize;
             for e in zip.entries.iter().filter(|e| {
                 e.name.ends_with(".dex")
@@ -8617,7 +8617,7 @@ value = false
                 let mut dex = jar[e.data_start..e.data_start + e.compressed_size].to_vec();
                 if apply_one_op(&mut dex, op).unwrap() {
                     hits += 1;
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     if let Ok(dir) = std::env::var("DYNOBOX_ROW_SERVICES_DEX_OUT") {
                         let _ = std::fs::write(std::path::Path::new(&dir).join(dump), &dex);
                     }
@@ -8675,7 +8675,7 @@ value = false
     fn bundled_row_freeze_policy_lands_on_real_services_jar() {
         fn land(jar_path: &str, op: &DbpOp, dump: &str) -> usize {
             let jar = std::fs::read(jar_path).expect("read services.jar");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&jar).expect("zip");
             let mut hits = 0usize;
             for e in zip.entries.iter().filter(|e| {
                 e.name.ends_with(".dex")
@@ -8687,7 +8687,7 @@ value = false
                 let mut dex = jar[e.data_start..e.data_start + e.compressed_size].to_vec();
                 if apply_one_op(&mut dex, op).unwrap() {
                     hits += 1;
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     if let Ok(dir) = std::env::var("DYNOBOX_ROW_SERVICES_DEX_OUT") {
                         let _ = std::fs::write(std::path::Path::new(&dir).join(dump), &dex);
                     }
@@ -8740,7 +8740,7 @@ value = false
     fn bundled_row_notification_colors_land_on_real_services_jar() {
         fn land(jar_path: &str, op: &DbpOp, dump: &str) -> usize {
             let jar = std::fs::read(jar_path).expect("read services.jar");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&jar).expect("zip");
             let mut hits = 0usize;
             for e in zip.entries.iter().filter(|e| {
                 e.name.ends_with(".dex")
@@ -8752,7 +8752,7 @@ value = false
                 let mut dex = jar[e.data_start..e.data_start + e.compressed_size].to_vec();
                 if apply_one_op(&mut dex, op).unwrap() {
                     hits += 1;
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     if let Ok(dir) = std::env::var("DYNOBOX_ROW_SERVICES_DEX_OUT") {
                         let _ = std::fs::write(std::path::Path::new(&dir).join(dump), &dex);
                     }
@@ -8806,7 +8806,7 @@ value = false
     fn bundled_row_one_vision_packages_land_on_real_services_jar() {
         fn land(jar_path: &str, op: &DbpOp, dump: &str) -> usize {
             let jar = std::fs::read(jar_path).expect("read services.jar");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&jar).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&jar).expect("zip");
             let mut hits = 0usize;
             for e in zip.entries.iter().filter(|e| {
                 e.name.ends_with(".dex")
@@ -8818,7 +8818,7 @@ value = false
                 let mut dex = jar[e.data_start..e.data_start + e.compressed_size].to_vec();
                 if apply_one_op(&mut dex, op).unwrap() {
                     hits += 1;
-                    crate::fuck_lgsi::recompute_dex_header_sums(&mut dex);
+                    crate::dex_util::recompute_dex_header_sums(&mut dex);
                     if let Ok(dir) = std::env::var("DYNOBOX_ROW_SERVICES_DEX_OUT") {
                         let _ = std::fs::write(std::path::Path::new(&dir).join(dump), &dex);
                     }
@@ -9033,7 +9033,7 @@ value = false
     fn bundled_debloat_theme_lands_on_real_apk() {
         fn land(apk_path: &str, op: &DbpOp) -> usize {
             let apk = std::fs::read(apk_path).expect("read apk");
-            let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
+            let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
             let mut hits = 0usize;
             for e in zip.entries.iter().filter(|e| {
                 e.name.ends_with(".dex")

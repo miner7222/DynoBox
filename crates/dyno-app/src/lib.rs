@@ -1,9 +1,12 @@
 pub mod add_overlay;
 pub mod avb_descriptor;
+mod axml;
 pub mod boot_spl;
+mod byte_io;
 pub mod dbp;
 pub mod debloat;
 pub mod dex_patch;
+mod dex_util;
 pub mod events;
 pub mod ext4_helpers;
 pub mod ext4_reader;
@@ -21,6 +24,7 @@ mod test_fixtures;
 pub mod time_format;
 pub mod vendor_spl;
 pub mod verify;
+mod zip_util;
 
 pub use events::{
     CommandKind, EventSink, MessageLevel, NoopEventSink, ProgressEvent, Prompt, PromptReply,
