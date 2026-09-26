@@ -320,13 +320,11 @@ mod tests {
     /// Real-image round-trip, gated on `DYNOBOX_TEST_EXT4` pointing at a
     /// plain ext4 partition image (no metadata_csum). Copies it, lists paths,
     /// hides the first file entry, and asserts it disappears from a re-list.
-    /// Skipped when the env var is unset so CI stays hermetic.
+    /// Ignored by default; see [`crate::test_fixtures`].
     #[test]
+    #[ignore = "fixture: set DYNOBOX_TEST_EXT4"]
     fn hide_path_removes_entry_on_real_image() {
-        let Ok(src) = std::env::var("DYNOBOX_TEST_EXT4") else {
-            eprintln!("DYNOBOX_TEST_EXT4 unset; skipping real-image debloat test");
-            return;
-        };
+        let src = crate::test_fixtures::env("DYNOBOX_TEST_EXT4");
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("test.img");
         std::fs::copy(&src, &img).expect("copy test ext4 image");
@@ -359,12 +357,11 @@ mod tests {
 
     /// Read-only lister, gated on `DYNOBOX_LIST_EXT4`. Prints every path in
     /// the image so an external harness can grep it (e.g. to confirm a
-    /// debloated entry is gone). Skipped when the env var is unset.
+    /// debloated entry is gone).
     #[test]
+    #[ignore = "fixture: set DYNOBOX_LIST_EXT4"]
     fn list_real_image_when_env_set() {
-        let Ok(src) = std::env::var("DYNOBOX_LIST_EXT4") else {
-            return;
-        };
+        let src = crate::test_fixtures::env("DYNOBOX_LIST_EXT4");
         let paths = list_partition_paths(std::path::Path::new(&src)).expect("list image");
         for p in &paths {
             println!("LISTED {p}");

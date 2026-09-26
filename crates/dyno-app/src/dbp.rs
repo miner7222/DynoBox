@@ -5336,12 +5336,11 @@ value = false
     /// `DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_DEX_OUT` to dump the patched dex for
     /// disassembly.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_SERVICES_JAR"]
     fn bundled_hiddenapps_npe_fix_lands_on_real_services_jar() {
         use sha2::{Digest, Sha256};
 
-        let Ok(path) = std::env::var("DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_SERVICES_JAR") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_HIDDENAPPS_NPE_ZUXOS223_SERVICES_JAR");
         let doc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
         let op = doc
             .ops
@@ -6176,10 +6175,9 @@ value = false
     /// Wi-Fi band filter) on the real ZuiSettings dexes. Set
     /// `DYNOBOX_ZUISETTINGS_DEX_DIR`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_DEX_DIR"]
     fn bundled_unlock_region_rows_land_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_DEX_DIR");
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let targets = [
             "Lcom/android/settings/notification/BadgingNotificationPreferenceController;",
@@ -6225,10 +6223,9 @@ value = false
     /// the `onCreate` read-only branch patch) on the real ZuiSettings dexes.
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_DEX_DIR"]
     fn bundled_unlock_apn_editor_lands_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_DEX_DIR");
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let gate = uc
             .ops
@@ -6343,10 +6340,9 @@ value = false
     /// Land the lighting-effect applied-app ops on the real ZuiSettings dexes.
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_DEX_DIR"]
     fn bundled_debloat_light_row_lists_land_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_DEX_DIR");
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let ops: Vec<&DbpOp> = ["getPresetAppList", "getGameAppList", "initGameSceneData"]
             .iter()
@@ -6401,10 +6397,9 @@ value = false
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`; optionally
     /// `DYNOBOX_ZUISETTINGS_DEX_OUT` to dump patched dexes for disassembly.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_DEX_DIR"]
     fn bundled_debloat_settings_land_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_DEX_DIR");
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let ops: Vec<&DbpOp> = dc
@@ -6504,10 +6499,9 @@ value = false
     /// the source tree); optionally `DYNOBOX_BOOTANIM_OUT` to keep the patched
     /// copy for out-of-band inspection.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_BOOTANIM_ZIP"]
     fn zip_entry_replace_lands_on_real_bootanimation() {
-        let Ok(path) = std::env::var("DYNOBOX_BOOTANIM_ZIP") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_BOOTANIM_ZIP");
         let doc = load_dbp(&patches_dir().join("debloat-wuji.dbp")).unwrap();
         let op = doc
             .ops
@@ -6575,10 +6569,9 @@ value = false
     /// ZuiSecurity APK. Set `DYNOBOX_ZUISECURITY_APK`; optionally
     /// `DYNOBOX_AXML_OUT` to dump per-op patched APKs for disassembly.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISECURITY_APK"]
     fn axml_ops_land_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISECURITY_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUISECURITY_APK");
         let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let apk = std::fs::read(&path).expect("read apk");
         for (i, op) in doc.ops.iter().enumerate() {
@@ -6787,12 +6780,11 @@ value = false
 
     /// Land the unlock-common `DolbySwitchPreferenceController.updateState`
     /// branch nop on the real ZuiSettings dex. Set `DYNOBOX_ZUISETTINGS_DEX_DIR`
-    /// to the extracted STORED dex dir (skipped when unset).
+    /// to the extracted STORED dex dir.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_DEX_DIR"]
     fn bundled_allow_dolby_atmos_off_lands_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_DEX_DIR");
         let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let op = doc
             .ops
@@ -6829,10 +6821,9 @@ value = false
     /// `return 0` R8-shared with `ImmutableMap.isHashCodeFast():Z`) must be
     /// REFUSED, not corrupt the shared item. Set `DYNOBOX_ZUISETTINGS_APK`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_APK"]
     fn shared_code_item_guard_refuses_deduped_getavailability() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISETTINGS_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_APK");
         let op = DbpOp::MethodConstInt {
             partition: "system".into(),
             file: "system/priv-app/ZuiSettings/ZuiSettings.apk".into(),
@@ -6866,10 +6857,9 @@ value = false
     /// The third op (`resource_dimen`) targets resources.arsc, not a dex, so
     /// it is a no-op here and covered by the arsc test below.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUICAMERA_DEX_DIR"]
     fn bundled_show_google_lens_lands_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUICAMERA_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUICAMERA_DEX_DIR");
         let doc = load_dbp(&patches_dir().join("show-google-lens.dbp")).unwrap();
         let dir = std::path::Path::new(&dir);
         let mut landed = 0usize;
@@ -6899,10 +6889,9 @@ value = false
     /// `DYNOBOX_ZUICAMERA_ARSC`; optionally `DYNOBOX_ZUICAMERA_ARSC_OUT` to
     /// dump the patched arsc.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUICAMERA_ARSC"]
     fn bundled_show_google_lens_dimen_lands_on_real_arsc() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUICAMERA_ARSC") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUICAMERA_ARSC");
         let mut arsc = std::fs::read(&path).unwrap();
         // Stock value is 2.25dp — a compiled dimension (fractional, radix != 0).
         let before = arsc_raw_value(&arsc, "google_lens_button_padding")
@@ -6928,10 +6917,9 @@ value = false
     /// Set `DYNOBOX_PENSERVICE_ARSC`; optionally `DYNOBOX_PENSERVICE_ARSC_OUT`
     /// to dump the patched arsc.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_PENSERVICE_ARSC"]
     fn bundled_debloat_settings_penservice_bool_lands_on_real_arsc() {
-        let Ok(path) = std::env::var("DYNOBOX_PENSERVICE_ARSC") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_PENSERVICE_ARSC");
         let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let op = doc
             .ops
@@ -6974,10 +6962,9 @@ value = false
     /// Apply the unlock-common quick-kill op to the real ZuiMemCleanerConfig
     /// XML. Set `DYNOBOX_ZMC_XML` to the extracted file path.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZMC_XML"]
     fn bundled_disable_quick_kill_lands_on_real_xml() {
-        let Ok(path) = std::env::var("DYNOBOX_ZMC_XML") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZMC_XML");
         let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let op = doc
             .ops
@@ -7013,10 +7000,9 @@ value = false
     /// dex. Set `DYNOBOX_ZUISECURITY_DEX_DIR`; optionally
     /// `DYNOBOX_ZUISECURITY_DEX_OUT` to dump the patched dex for disassembly.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISECURITY_DEX_DIR"]
     fn bundled_selection_nop_lands_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISECURITY_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISECURITY_DEX_DIR");
         let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let op = doc
             .ops
@@ -7365,10 +7351,9 @@ value = false
     /// `DYNOBOX_LEVOICECAPTION_DEX_OUT` to dump the patched dex for
     /// disassembly.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_LEVOICECAPTION_APK"]
     fn unlock_wifi_country_code_op_lands_on_real_levoice_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_LEVOICECAPTION_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_LEVOICECAPTION_APK");
         let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let op = doc
             .ops
@@ -7406,10 +7391,9 @@ value = false
     /// the real ZuiGameHelper APK. Set `DYNOBOX_GAMEHELPER_APK`; optionally set
     /// `DYNOBOX_GAMEHELPER_DEX_OUT` to dump the patched dex for disassembly.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_GAMEHELPER_APK"]
     fn bundled_debloat_gamehelper_lands_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_GAMEHELPER_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_GAMEHELPER_APK");
         let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let op = doc
             .ops
@@ -7457,10 +7441,9 @@ value = false
     /// APK. Set `DYNOBOX_GAMEHELPER_APK`; optionally set
     /// `DYNOBOX_GAMEHELPER_ROW_DEX_OUT` to dump the patched dex.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_GAMEHELPER_APK"]
     fn bundled_debloat_gamehelper_row_lists_land_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_GAMEHELPER_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_GAMEHELPER_APK");
         let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let targets = [
             (
@@ -7603,10 +7586,9 @@ value = false
     /// Point rows survive their gates, and the layout dialog lists every n x n
     /// profile. Set `DYNOBOX_ZUILAUNCHER_APK`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUILAUNCHER_APK"]
     fn bundled_launcher_settings_ops_land_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUILAUNCHER_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUILAUNCHER_APK");
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let cloud = dc
@@ -7702,10 +7684,9 @@ value = false
     /// `DYNOBOX_NETWORKACCEL_DEX` (the extracted STORED classes.dex); optionally
     /// set `DYNOBOX_NETWORKACCEL_DEX_OUT` to dump the patched dex.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_NETWORKACCEL_DEX"]
     fn bundled_debloat_network_accel_lands_on_real_dex() {
-        let Ok(path) = std::env::var("DYNOBOX_NETWORKACCEL_DEX") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_NETWORKACCEL_DEX");
         let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let ops: Vec<&DbpOp> = dc
             .ops
@@ -7881,10 +7862,9 @@ value = false
     /// `DYNOBOX_ZUISYSTEMUI_APK`; optionally set
     /// `DYNOBOX_ZUISYSTEMUI_AOD_DEX_OUT` to write the patched dex file.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISYSTEMUI_APK"]
     fn bundled_fix_common_aod_date_lands_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISYSTEMUI_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUISYSTEMUI_APK");
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
         let op = fc
             .ops
@@ -7983,10 +7963,9 @@ value = false
     /// `DYNOBOX_ZUISYSTEMUI_APK`; optionally set
     /// `DYNOBOX_ZUISYSTEMUI_QS_DATE_DEX_OUT` to write the patched dex file.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISYSTEMUI_APK"]
     fn bundled_fix_common_qs_header_date_lands_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISYSTEMUI_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUISYSTEMUI_APK");
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
         let op = fc
             .ops
@@ -8129,10 +8108,9 @@ value = false
     /// optionally set `DYNOBOX_GAMEHELPER_GODMODE_DEX_OUT` to write the
     /// patched dex file with both ops applied.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_GAMEHELPER_APK"]
     fn bundled_unlock_common_super_god_mode_lands_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_GAMEHELPER_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_GAMEHELPER_APK");
         let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let ops: Vec<_> = uc
             .ops
@@ -8286,10 +8264,9 @@ value = false
     /// constant in `setNoMoveAnim`. Set `DYNOBOX_FREEFORMBAR_APK`; optionally
     /// set `DYNOBOX_FREEFORMBAR_DEX_OUT` to write the patched dex file.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_FREEFORMBAR_APK"]
     fn bundled_fix_common_sidebar_window_type_lands_on_real_apk() {
-        let Ok(path) = std::env::var("DYNOBOX_FREEFORMBAR_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_FREEFORMBAR_APK");
         let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
         let apk = std::fs::read(&path).expect("read apk");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("zip");
@@ -8336,10 +8313,9 @@ value = false
     /// `DYNOBOX_VENDOR_BUILD_PROP`; optionally set
     /// `DYNOBOX_VENDOR_BUILD_PROP_OUT` to write the patched bytes.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_VENDOR_BUILD_PROP"]
     fn change_name_lands_on_real_vendor_build_prop() {
-        let Ok(path) = std::env::var("DYNOBOX_VENDOR_BUILD_PROP") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_VENDOR_BUILD_PROP");
         let doc = load_dbp(&patches_dir().join("debloat-wuji.dbp")).unwrap();
         let ops: Vec<&DbpOp> = doc
             .ops
@@ -8981,10 +8957,9 @@ value = false
     /// Apply the debloat-common launcher ops to the real ZuiLauncher dexes.
     /// Set `DYNOBOX_ZUILAUNCHER_DEX_DIR`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUILAUNCHER_DEX_DIR"]
     fn bundled_debloat_launcher_lands_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUILAUNCHER_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUILAUNCHER_DEX_DIR");
         let doc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
         let ops: Vec<&DbpOp> = doc
             .ops
@@ -9100,10 +9075,9 @@ value = false
     /// Apply the bundled ZuiSettings locale ops to the real ZuiSettings dexes.
     /// Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_DEX_DIR"]
     fn bundled_unlock_locales_lands_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_DEX_DIR");
         let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let ops: Vec<&DbpOp> = doc
             .ops
@@ -9150,10 +9124,9 @@ value = false
     /// Apply the bundled PenService locale op to the real PenService dexes.
     /// Set `DYNOBOX_PENSERVICE_DEX_DIR`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_PENSERVICE_DEX_DIR"]
     fn bundled_unlock_locales_penservice_lands_on_real_dex() {
-        let Ok(dir) = std::env::var("DYNOBOX_PENSERVICE_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_PENSERVICE_DEX_DIR");
         let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
         let ops: Vec<&DbpOp> = doc
             .ops

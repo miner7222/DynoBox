@@ -590,12 +590,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "fixture: set DYNOBOX_BOOT_SPL_IMAGE"]
     fn resign_then_patch_lands_on_real_boot_image() {
         use avbtool_rs::verify::{VerifyImageOptions, verify_image};
 
-        let Ok(source) = std::env::var("DYNOBOX_BOOT_SPL_IMAGE") else {
-            return;
-        };
+        let source = crate::test_fixtures::env("DYNOBOX_BOOT_SPL_IMAGE");
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("boot.img");
         std::fs::copy(source, &image).unwrap();

@@ -16,6 +16,8 @@ pub mod report;
 mod spl;
 pub mod spl_patch;
 pub mod system_spl;
+#[cfg(test)]
+mod test_fixtures;
 pub mod time_format;
 pub mod vendor_spl;
 pub mod verify;

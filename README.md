@@ -109,6 +109,13 @@ filesystem root, your home directory, the current working directory, or an
 existing non-empty directory that does not look like a DynoBox output (no
 top-level `.img`, rawprogram XML, `report.html`, or manifest).
 
+### Fixture tests
+
+Tests that need real firmware artifacts are `#[ignore]`d, so a plain
+`cargo test` lists them as ignored. Export the variable named in each test's
+ignore reason (for example `DYNOBOX_FIRMWARE_DIR`) and run
+`cargo test -- --ignored`.
+
 ---
 
 ## 🙏 Credits

@@ -82,15 +82,11 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "fixture: set DYNOBOX_FIRMWARE_DIR"]
     fn test_real_xml_discovery() -> dynobox_core::error::Result<()> {
-        let test_dir =
-            std::path::Path::new(r"D:\Git\Project-LTBOX\TB322_ZUXOS_1.5.10.183_resigned");
-
-        // Skip test if the directory doesn't exist (e.g. in CI environments)
-        if !test_dir.exists() {
-            println!("Skipping real XML discovery test because test directory does not exist.");
-            return Ok(());
-        }
+        let test_dir = std::env::var("DYNOBOX_FIRMWARE_DIR")
+            .expect("fixture test needs `DYNOBOX_FIRMWARE_DIR` (a resigned firmware dir)");
+        let test_dir = std::path::Path::new(&test_dir);
 
         let catalog = XmlCatalog::from_dir(test_dir)?;
 

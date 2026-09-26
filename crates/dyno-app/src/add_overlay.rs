@@ -1299,14 +1299,11 @@ mod tests {
     /// payload into the existing `overlay` directory, one into a freshly
     /// created `overlay/dynobox-test` directory and one more into the now
     /// existing created directory, then reads all back through
-    /// [`crate::ext4_helpers`]. Skipped when the env var is unset so CI stays
-    /// hermetic.
+    /// [`crate::ext4_helpers`]. Ignored by default; see [`crate::test_fixtures`].
     #[test]
+    #[ignore = "fixture: set DYNOBOX_TEST_ADD_OVERLAY_IMG"]
     fn insert_files_on_real_image_when_env_set() {
-        let Ok(src) = std::env::var("DYNOBOX_TEST_ADD_OVERLAY_IMG") else {
-            eprintln!("DYNOBOX_TEST_ADD_OVERLAY_IMG unset; skipping real-image add-overlay test");
-            return;
-        };
+        let src = crate::test_fixtures::env("DYNOBOX_TEST_ADD_OVERLAY_IMG");
         let dir = tempfile::tempdir().unwrap();
         let img = dir.path().join("product.img");
         std::fs::copy(&src, &img).expect("copy test ext4 image");

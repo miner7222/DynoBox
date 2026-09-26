@@ -782,17 +782,13 @@ const featureData = [
             assert!(parse_lgsi_html(html.as_bytes()).is_err());
         }
 
-        /// Smoke test against a real TB322 `lgsi_build_info.html` if
-        /// available locally. Gated on the dump path; CI environments
-        /// without the dump silently no-op.
+        /// Smoke test against a real TB322 `lgsi_build_info.html`
+        /// (`product/etc/lgsi_build_info.html` from a firmware dump).
         #[test]
-        fn parse_real_tb322_html_when_available() {
-            let path = std::path::Path::new(
-                r"D:\Git\Project-DeZUX\dump\TB322_ZUXOS_1.5.10.183_resigned\system\product\etc\lgsi_build_info.html",
-            );
-            let Ok(bytes) = std::fs::read(path) else {
-                return;
-            };
+        #[ignore = "fixture: set DYNOBOX_LGSI_HTML"]
+        fn parse_real_tb322_html() {
+            let path = crate::test_fixtures::env("DYNOBOX_LGSI_HTML");
+            let bytes = std::fs::read(&path).expect("read DYNOBOX_LGSI_HTML");
             let features = parse_lgsi_html(&bytes).expect("real OEM html must parse");
             assert!(
                 features.len() > 50,
@@ -2991,16 +2987,12 @@ mod tests {
     /// the developer's machine. Walks ZIP -> finds candidate dexes ->
     /// runs `extract_lgsi_features` on each. Asserts at least one
     /// candidate returns `Found`. Surfaces per-dex diagnostics so
-    /// regressions point at the failing lookup step. Silent no-op when
-    /// the dump path doesn't exist (CI / fresh checkouts).
+    /// regressions point at the failing lookup step.
     #[test]
-    fn extract_real_framework_jar_when_available() {
-        let path = std::path::Path::new(
-            r"D:\Git\Project-DeZUX\dump\TB323_ZUXOS_2.0.11.043_Tool\system\framework\framework.jar",
-        );
-        let Ok(jar_bytes) = std::fs::read(path) else {
-            return;
-        };
+    #[ignore = "fixture: set DYNOBOX_FRAMEWORK_JAR"]
+    fn extract_real_framework_jar() {
+        let path = crate::test_fixtures::env("DYNOBOX_FRAMEWORK_JAR");
+        let jar_bytes = std::fs::read(&path).expect("read DYNOBOX_FRAMEWORK_JAR");
         let zip = parse_zip_central_directory(&jar_bytes).expect("zip parse");
         let candidates = collect_dex_candidates_referencing(
             &jar_bytes,

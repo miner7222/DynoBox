@@ -5,13 +5,11 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    #[ignore = "fixture: set DYNOBOX_FIRMWARE_DIR"]
     fn test_real_super_parsing_and_unpack() -> dynobox_core::error::Result<()> {
-        let test_dir = Path::new(r"D:\Git\Project-LTBOX\TB322_ZUXOS_1.5.10.183_resigned");
-
-        if !test_dir.exists() {
-            println!("Skipping real super parsing test because test directory does not exist.");
-            return Ok(());
-        }
+        let test_dir = std::env::var("DYNOBOX_FIRMWARE_DIR")
+            .expect("fixture test needs `DYNOBOX_FIRMWARE_DIR` (a resigned firmware dir)");
+        let test_dir = Path::new(&test_dir);
 
         // 1. Discover and parse XML catalog
         let catalog = XmlCatalog::from_dir(test_dir)?;

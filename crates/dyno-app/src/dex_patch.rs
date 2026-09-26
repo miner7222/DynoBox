@@ -4870,10 +4870,9 @@ mod tests {
     /// `force_method_return_bool` lands on the real ZuiLauncher
     /// `Utilities.isZuiRow()`. Set `DYNOBOX_ZUILAUNCHER_DEX_DIR`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUILAUNCHER_DEX_DIR"]
     fn method_const_lands_on_real_zuilauncher() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUILAUNCHER_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUILAUNCHER_DEX_DIR");
         let dir = std::path::Path::new(&dir);
         let mut hits = 0;
         for name in ["classes.dex", "classes2.dex", "classes3.dex"] {
@@ -4903,10 +4902,9 @@ mod tests {
     /// `PhoneWindowManager.getResolvedLongPressOnPowerBehavior()`.
     /// Set `DYNOBOX_SERVICES_ARCHIVE`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_SERVICES_ARCHIVE"]
     fn method_const_int_lands_on_real_services() {
-        let Ok(path) = std::env::var("DYNOBOX_SERVICES_ARCHIVE") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_SERVICES_ARCHIVE");
         let archive = std::fs::read(path).expect("read services archive");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&archive)
             .expect("parse services archive");
@@ -4940,10 +4938,9 @@ mod tests {
     /// land in one real ZuiSettings dex and refuse a second application. Set
     /// `DYNOBOX_ZUISETTINGS_DEX_DIR` to extracted original APK dexes.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_DEX_DIR"]
     fn preference_controller_hide_lands_on_real_zuisettings() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_DEX_DIR");
         let dir = std::path::Path::new(&dir);
         let mut hits = 0usize;
         for name in [
@@ -4986,10 +4983,9 @@ mod tests {
     /// `force_invoke_const_bool` rewrites the real ZuiSettings
     /// `LocaleListEditor` PRC gate. Set `DYNOBOX_ZUISETTINGS_DEX_DIR`.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_DEX_DIR"]
     fn invoke_const_lands_on_real_zuisettings() {
-        let Ok(dir) = std::env::var("DYNOBOX_ZUISETTINGS_DEX_DIR") else {
-            return;
-        };
+        let dir = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_DEX_DIR");
         let dir = std::path::Path::new(&dir);
         let mut sites = 0usize;
         for name in [
@@ -5184,10 +5180,9 @@ mod tests {
     /// `force_nop_anchored_invoke` lands on the real ZuiSecurity dexes.
     /// Set DYNOBOX_ZUISECURITY_APK to the real ZuiSecurity.apk.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISECURITY_APK"]
     fn nop_invoke_lands_on_real_zuisecurity() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISECURITY_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUISECURITY_APK");
         let apk = std::fs::read(path).expect("read ZuiSecurity.apk");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
         let (mut list_sites, mut update_sites) = (0usize, 0usize);
@@ -5365,10 +5360,9 @@ mod tests {
     /// `force_view_gone` hides the ZuiSecurity nav entries on the real dex.
     /// Set DYNOBOX_ZUISECURITY_APK to the real ZuiSecurity.apk.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISECURITY_APK"]
     fn force_view_gone_lands_on_real_zuisecurity() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISECURITY_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUISECURITY_APK");
         let apk = std::fs::read(path).expect("read ZuiSecurity.apk");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
         let mut hidden = 0usize;
@@ -5396,10 +5390,9 @@ mod tests {
     /// `AppPermissionPreferenceController` on the real ZuiSettings.apk, so the
     /// app-permission screen routes to the AOSP page. Set DYNOBOX_ZUISETTINGS_APK.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISETTINGS_APK"]
     fn isrowversion_forced_in_permission_controller_on_real_zuisettings() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISETTINGS_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_APK");
         let apk = std::fs::read(path).expect("read ZuiSettings.apk");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
         let mut sites = 0usize;
@@ -5480,10 +5473,9 @@ mod tests {
     /// `force_method_return_void` neutralizes the antivirus engine init on the
     /// real ZuiSecurity.apk. Set DYNOBOX_ZUISECURITY_APK.
     #[test]
+    #[ignore = "fixture: set DYNOBOX_ZUISECURITY_APK"]
     fn method_nop_lands_on_real_zuisecurity_antivirus() {
-        let Ok(path) = std::env::var("DYNOBOX_ZUISECURITY_APK") else {
-            return;
-        };
+        let path = crate::test_fixtures::env("DYNOBOX_ZUISECURITY_APK");
         let apk = std::fs::read(path).expect("read ZuiSecurity.apk");
         let zip = crate::fuck_lgsi::parse_zip_central_directory(&apk).expect("parse apk");
         let mut hits = 0usize;
