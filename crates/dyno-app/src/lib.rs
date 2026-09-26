@@ -22,7 +22,10 @@ pub mod time_format;
 pub mod vendor_spl;
 pub mod verify;
 
-pub use events::{CommandKind, EventSink, MessageLevel, NoopEventSink, ProgressEvent, StageKind};
+pub use events::{
+    CommandKind, EventSink, MessageLevel, NoopEventSink, ProgressEvent, Prompt, PromptReply,
+    StageKind,
+};
 pub use integrity::{
     MANIFEST_FILE_NAME, MANIFEST_SCHEMA, MANIFEST_SIGNATURE_FILE_NAME, MANIFEST_VERSION,
     ManifestArtifact, ManifestIssue, ManifestVerificationReport, OutputManifest,

@@ -3,11 +3,11 @@ use dynobox_app::debloat::DebloatMode;
 use dynobox_app::events::ProgressUnit;
 use dynobox_app::fuck_lgsi::FuckLgsiMode;
 use dynobox_app::{
-    ApplyRequest, MessageLevel, ProgressEvent, RepackRequest, ResignConfig, ResignRequest,
-    StageKind, UnpackRequest, VerificationOptions, default_output_name_for_apply,
-    default_output_name_for_resign, default_output_name_for_unpack, generate_integrity_keypair,
-    render_verification_report, run_apply, run_repack, run_resign, run_unpack,
-    verify_input_with_options,
+    ApplyRequest, EventSink, MessageLevel, ProgressEvent, Prompt, PromptReply, RepackRequest,
+    ResignConfig, ResignRequest, StageKind, UnpackRequest, VerificationOptions,
+    default_output_name_for_apply, default_output_name_for_resign, default_output_name_for_unpack,
+    generate_integrity_keypair, render_verification_report, run_apply, run_repack, run_resign,
+    run_unpack, verify_input_with_options,
 };
 use indicatif::{ProgressBar, ProgressStyle};
 use serde::Serialize;
@@ -993,17 +993,37 @@ fn unit_label(unit: ProgressUnit) -> &'static str {
 ///
 /// The bar/spinner is suppressed when stderr is not a terminal
 /// (`--progress-format jsonl`, redirected/piped invocations, CI).
-fn build_text_sink() -> impl FnMut(ProgressEvent) {
-    use std::io::IsTerminal;
+struct TextSink {
+    interactive: bool,
+    active_bar: Option<ProgressBar>,
+    active_item: Option<String>,
+    bar_is_determinate: bool,
+    path_shortener: TextPathShortener,
+}
 
-    let interactive = std::io::stderr().is_terminal();
-    let mut active_bar: Option<ProgressBar> = None;
-    let mut active_item: Option<String> = None;
-    let mut bar_is_determinate = false;
-    let mut path_shortener = TextPathShortener::default();
+fn build_text_sink() -> TextSink {
+    TextSink {
+        interactive: std::io::stderr().is_terminal(),
+        active_bar: None,
+        active_item: None,
+        bar_is_determinate: false,
+        path_shortener: TextPathShortener::default(),
+    }
+}
 
-    move |event: ProgressEvent| {
-        let event = path_shortener.shorten_event(event);
+impl TextSink {
+    fn clear_bar(&mut self) {
+        if let Some(pb) = self.active_bar.take() {
+            pb.finish_and_clear();
+        }
+        self.bar_is_determinate = false;
+        self.active_item = None;
+    }
+}
+
+impl EventSink for TextSink {
+    fn emit(&mut self, event: ProgressEvent) {
+        let event = self.path_shortener.shorten_event(event);
         match &event {
             ProgressEvent::ItemProgress {
                 item,
@@ -1012,16 +1032,17 @@ fn build_text_sink() -> impl FnMut(ProgressEvent) {
                 unit,
                 ..
             } => {
-                if !interactive {
+                if !self.interactive {
                     return;
                 }
                 let total = *total;
                 let done = *done;
                 let unit_str = unit_label(*unit);
 
-                let upgrade = !bar_is_determinate || active_item.as_deref() != Some(item.as_str());
+                let upgrade =
+                    !self.bar_is_determinate || self.active_item.as_deref() != Some(item.as_str());
                 if upgrade {
-                    if let Some(pb) = active_bar.take() {
+                    if let Some(pb) = self.active_bar.take() {
                         pb.finish_and_clear();
                     }
                     let pb = if total == 0 {
@@ -1061,11 +1082,11 @@ fn build_text_sink() -> impl FnMut(ProgressEvent) {
                         pb
                     };
                     pb.set_message(item.clone());
-                    active_bar = Some(pb);
-                    active_item = Some(item.clone());
-                    bar_is_determinate = total > 0;
+                    self.active_bar = Some(pb);
+                    self.active_item = Some(item.clone());
+                    self.bar_is_determinate = total > 0;
                 }
-                if let Some(pb) = active_bar.as_ref() {
+                if let Some(pb) = self.active_bar.as_ref() {
                     if total > 0 {
                         pb.set_length(total);
                         pb.set_position(done);
@@ -1073,11 +1094,11 @@ fn build_text_sink() -> impl FnMut(ProgressEvent) {
                 }
             }
             other => {
-                if let Some(pb) = active_bar.take() {
+                if let Some(pb) = self.active_bar.take() {
                     pb.finish_and_clear();
                 }
-                bar_is_determinate = false;
-                active_item = None;
+                self.bar_is_determinate = false;
+                self.active_item = None;
                 let starts_work = matches!(
                     other,
                     ProgressEvent::ItemStarted { .. } | ProgressEvent::StageStarted { .. }
@@ -1087,7 +1108,7 @@ fn build_text_sink() -> impl FnMut(ProgressEvent) {
                     _ => None,
                 };
                 log_event(event);
-                if interactive && starts_work {
+                if self.interactive && starts_work {
                     let pb = ProgressBar::new_spinner();
                     pb.set_style(
                         ProgressStyle::with_template("    {spinner:.cyan} {msg} ({elapsed})")
@@ -1096,12 +1117,73 @@ fn build_text_sink() -> impl FnMut(ProgressEvent) {
                     );
                     pb.set_message(item_label.clone().unwrap_or_else(|| "working…".into()));
                     pb.enable_steady_tick(Duration::from_millis(120));
-                    active_bar = Some(pb);
-                    active_item = item_label;
+                    self.active_bar = Some(pb);
+                    self.active_item = item_label;
                 }
             }
         }
     }
+
+    /// Terminal prompt. Prompts go to stderr so they never mix with the
+    /// stdout log stream, and the active spinner is cleared first so its
+    /// ticking does not overwrite the question.
+    fn prompt(&mut self, prompt: &Prompt) -> PromptReply {
+        if !std::io::stdin().is_terminal() {
+            return PromptReply::Unavailable;
+        }
+        self.clear_bar();
+        let mut stderr = std::io::stderr().lock();
+        let (details, question) = match prompt {
+            Prompt::Confirm { details, question } => (details, format!("{question} [y/N] ")),
+            Prompt::Continue { details, .. } => (details, String::new()),
+        };
+        let _ = writeln!(stderr);
+        for line in details {
+            let _ = writeln!(stderr, "{line}");
+        }
+        let _ = write!(stderr, "{question}");
+        let _ = stderr.flush();
+        drop(stderr);
+
+        if let Prompt::Continue {
+            reveal: Some(dir), ..
+        } = prompt
+        {
+            reveal_in_file_manager(dir);
+        }
+
+        let mut answer = String::new();
+        match std::io::stdin().read_line(&mut answer) {
+            Ok(0) | Err(_) => PromptReply::Unavailable,
+            Ok(_) => match prompt {
+                Prompt::Confirm { .. } => {
+                    let answer = answer.trim().to_ascii_lowercase();
+                    if answer == "y" || answer == "yes" {
+                        PromptReply::Accepted
+                    } else {
+                        PromptReply::Declined
+                    }
+                }
+                Prompt::Continue { .. } => PromptReply::Accepted,
+            },
+        }
+    }
+}
+
+/// Open `path` in the host OS file browser. Best-effort — spawn failures
+/// are ignored because the prompt already printed the path. Skipped when
+/// `DYNOBOX_NO_OPEN` is set so headless or scripted runs don't pop
+/// file-manager windows.
+fn reveal_in_file_manager(path: &Path) {
+    if std::env::var_os("DYNOBOX_NO_OPEN").is_some() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
 }
 
 /// Entry point for the DynoBox CLI. The `dynobox` binary is a thin

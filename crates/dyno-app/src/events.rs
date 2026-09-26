@@ -74,8 +74,45 @@ pub enum ProgressEvent {
     },
 }
 
+/// An operator decision the pipeline needs mid-run. Library code never
+/// touches the terminal itself; the front-end's [`EventSink::prompt`]
+/// decides how (and whether) to ask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Prompt {
+    /// Yes/no question. `details` are shown before `question`.
+    Confirm {
+        details: Vec<String>,
+        question: String,
+    },
+    /// Pause until the operator has finished editing files on disk.
+    /// `details` explain what to edit; `reveal` is a directory the
+    /// front-end may open in a file browser.
+    Continue {
+        details: Vec<String>,
+        reveal: Option<PathBuf>,
+    },
+}
+
+/// Answer to a [`Prompt`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptReply {
+    /// `Confirm` answered yes, or `Continue` acknowledged.
+    Accepted,
+    /// `Confirm` answered no.
+    Declined,
+    /// Nobody can answer (non-interactive front-end, stdin closed).
+    Unavailable,
+}
+
 pub trait EventSink {
     fn emit(&mut self, event: ProgressEvent);
+
+    /// Ask the operator something. The default is non-interactive, so
+    /// closures, [`NoopEventSink`], and structured (`jsonl`) front-ends
+    /// always take the pipeline's non-interactive path.
+    fn prompt(&mut self, _prompt: &Prompt) -> PromptReply {
+        PromptReply::Unavailable
+    }
 }
 
 impl<F> EventSink for F

@@ -44,8 +44,9 @@
 //!          HTML order, generated from the HTML.
 //!        - `lgsi_build_info.html` — verbatim copy of the file pulled
 //!          from product.img, kept as the human-readable reference.
-//!   8. Print the absolute paths and "Edit JSON, then press Enter to
-//!      continue (Ctrl-C to abort)". Block on stdin.
+//!   8. Ask the front-end (`EventSink::prompt`) to show the absolute
+//!      paths and "Edit JSON, then press Enter to continue (Ctrl-C to
+//!      abort)", and wait for the acknowledgement.
 //!   9. Re-read the JSON. JSON parse error -> print and re-prompt; loop
 //!      until valid.
 //!  10. Diff against the original HTML state. 0 changes -> return
@@ -72,7 +73,6 @@
 //! and stale FEC does not break boot.
 
 use std::collections::HashMap;
-use std::io::{self, IsTerminal, Read as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -82,6 +82,7 @@ use crate::avb_descriptor::{
     SHA256_DIGEST_SIZE, VerityProgressCallback, hex_encode, patch_hashtree_root_digest,
     read_hashtree_params, regenerate_hashtree_with_progress,
 };
+use crate::events::{EventSink, NoopEventSink, Prompt, PromptReply};
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
 
 // ---------------------------------------------------------------------------
@@ -183,7 +184,7 @@ impl std::fmt::Display for SkipReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FuckLgsiMode {
-    /// Write workspace files, block on stdin Enter, re-read JSON.
+    /// Write workspace files, pause via [`EventSink::prompt`], re-read JSON.
     Interactive,
     /// Read pre-edited JSON from this path; no pause.
     Config(PathBuf),
@@ -203,7 +204,7 @@ pub struct FuckLgsiInput<'a> {
 /// Equivalent to [`apply_fuck_lgsi_with_progress`] called with
 /// `verity_progress = None`.
 pub fn apply_fuck_lgsi(input: &FuckLgsiInput<'_>) -> Result<FuckLgsiOutcome> {
-    apply_fuck_lgsi_with_progress(input, false, None)
+    apply_fuck_lgsi_with_progress(input, false, None, &mut NoopEventSink)
 }
 
 /// Like [`apply_fuck_lgsi`] but invokes `verity_progress` with
@@ -211,11 +212,19 @@ pub fn apply_fuck_lgsi(input: &FuckLgsiInput<'_>) -> Result<FuckLgsiOutcome> {
 /// `system.img`. The other phases (ext4 walks, JAR byte patches, AVB
 /// descriptor rewrites) all run sub-second; only the SHA-256 walk over a
 /// ~12 GiB system.img is long enough to need a progress bar.
-pub fn apply_fuck_lgsi_with_progress(
+///
+/// [`FuckLgsiMode::Interactive`] pauses through `events`' [`EventSink::prompt`]
+/// while the operator edits the workspace JSON; a front-end that cannot
+/// prompt makes the interactive mode fail with a hint to pass a JSON path.
+pub fn apply_fuck_lgsi_with_progress<S>(
     input: &FuckLgsiInput<'_>,
     defer_verity: bool,
     verity_progress: Option<VerityProgressCallback>,
-) -> Result<FuckLgsiOutcome> {
+    events: &mut S,
+) -> Result<FuckLgsiOutcome>
+where
+    S: EventSink + ?Sized,
+{
     // 1. Read framework.jar (with extents) from system.img.
     let mut volume = open_ext4_volume(input.system_image)?;
     let inode = match lookup_inode_at_path(&mut volume, FRAMEWORK_JAR_PATH)? {
@@ -305,7 +314,7 @@ pub fn apply_fuck_lgsi_with_progress(
     let user_state = match &input.mode {
         FuckLgsiMode::Interactive => {
             workspace::write_workspace(input.workspace_dir, &html_features, &html_bytes)?;
-            workspace::interactive_collect_edited_state(input.workspace_dir)?
+            workspace::interactive_collect_edited_state(input.workspace_dir, events)?
         }
         FuckLgsiMode::Config(path) => workspace::read_user_json(path)?,
     };
@@ -1930,69 +1939,43 @@ mod workspace {
         Ok(())
     }
 
-    pub fn interactive_collect_edited_state(workspace_dir: &Path) -> Result<Vec<(String, bool)>> {
-        if !io::stdin().is_terminal() {
-            bail!(
-                "--fuck-lgsi needs an interactive terminal; pass --fuck-lgsi <JSON_PATH> instead"
-            );
-        }
+    pub fn interactive_collect_edited_state<S>(
+        workspace_dir: &Path,
+        events: &mut S,
+    ) -> Result<Vec<(String, bool)>>
+    where
+        S: EventSink + ?Sized,
+    {
         let json_path = workspace_dir.join(WORKSPACE_JSON_NAME);
         let html_path = workspace_dir.join(WORKSPACE_HTML_NAME);
-        eprintln!();
-        eprintln!("LGSI workspace ready:");
-        eprintln!("  JSON  : {}", json_path.display());
-        eprintln!("  HTML  : {} (reference, do not edit)", html_path.display());
-        eprintln!("Edit the JSON to flip individual features (true = enabled, false = disabled),");
-        eprintln!("then press Enter to continue. Ctrl-C aborts the resign stage.");
-        // Best-effort: pop the workspace folder in the OS file
-        // browser so the user doesn't have to copy-paste the path.
-        // Failures are swallowed — the path is already printed
-        // above and the user can navigate manually.
-        open_in_file_manager(workspace_dir);
+        let mut prompt = Prompt::Continue {
+            details: vec![
+                "LGSI workspace ready:".to_string(),
+                format!("  JSON  : {}", json_path.display()),
+                format!("  HTML  : {} (reference, do not edit)", html_path.display()),
+                "Edit the JSON to flip individual features (true = enabled, false = disabled),"
+                    .to_string(),
+                "then press Enter to continue. Ctrl-C aborts the resign stage.".to_string(),
+            ],
+            reveal: Some(workspace_dir.to_path_buf()),
+        };
         loop {
-            wait_for_enter()?;
+            if events.prompt(&prompt) != PromptReply::Accepted {
+                bail!(
+                    "--fuck-lgsi needs an interactive terminal; pass --fuck-lgsi <JSON_PATH> instead"
+                );
+            }
             match read_user_json(&json_path) {
                 Ok(state) => return Ok(state),
                 Err(e) => {
-                    eprintln!();
-                    eprintln!("JSON parse error: {e}");
-                    eprintln!("Fix the file and press Enter again, or Ctrl-C to abort.");
+                    prompt = Prompt::Continue {
+                        details: vec![
+                            format!("JSON parse error: {e:#}"),
+                            "Fix the file and press Enter again, or Ctrl-C to abort.".to_string(),
+                        ],
+                        reveal: None,
+                    };
                 }
-            }
-        }
-    }
-
-    /// Open `path` in the host OS file browser. Best-effort — any
-    /// spawn failure is silently ignored (the workspace path was
-    /// already printed to stderr immediately above the call site).
-    /// Skipped when `DYNOBOX_NO_OPEN` is set, so headless / scripted
-    /// runs that route stdin through the `--fuck-lgsi` interactive
-    /// flow don't pop spurious file-manager windows.
-    fn open_in_file_manager(path: &Path) {
-        if std::env::var_os("DYNOBOX_NO_OPEN").is_some() {
-            return;
-        }
-        #[cfg(target_os = "windows")]
-        let _ = std::process::Command::new("explorer").arg(path).spawn();
-        #[cfg(target_os = "macos")]
-        let _ = std::process::Command::new("open").arg(path).spawn();
-        #[cfg(all(unix, not(target_os = "macos")))]
-        let _ = std::process::Command::new("xdg-open").arg(path).spawn();
-    }
-
-    fn wait_for_enter() -> Result<()> {
-        let mut buf = [0u8; 1];
-        let mut stdin = io::stdin().lock();
-        loop {
-            let n = stdin.read(&mut buf).context("failed to read from stdin")?;
-            if n == 0 {
-                bail!(
-                    "stdin closed before Enter was pressed; --fuck-lgsi requires an \
-                     interactive terminal"
-                );
-            }
-            if buf[0] == b'\n' {
-                return Ok(());
             }
         }
     }
@@ -2932,6 +2915,50 @@ pub(crate) fn build_test_axml() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Prompt sink that rewrites the workspace JSON on each `Continue`,
+    /// emulating an operator who fixes the file between prompts.
+    struct EditingSink {
+        json_path: PathBuf,
+        edits: Vec<&'static str>,
+        prompts: usize,
+    }
+
+    impl EventSink for EditingSink {
+        fn emit(&mut self, _event: crate::events::ProgressEvent) {}
+
+        fn prompt(&mut self, prompt: &Prompt) -> PromptReply {
+            assert!(matches!(prompt, Prompt::Continue { .. }));
+            self.prompts += 1;
+            if self.edits.is_empty() {
+                return PromptReply::Unavailable;
+            }
+            std::fs::write(&self.json_path, self.edits.remove(0)).unwrap();
+            PromptReply::Accepted
+        }
+    }
+
+    #[test]
+    fn interactive_workspace_reprompts_until_json_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sink = EditingSink {
+            json_path: dir.path().join(WORKSPACE_JSON_NAME),
+            edits: vec!["{ broken", r#"{"ZuiFeature": true}"#],
+            prompts: 0,
+        };
+        let state = workspace::interactive_collect_edited_state(dir.path(), &mut sink).unwrap();
+        assert_eq!(state, vec![("ZuiFeature".to_string(), true)]);
+        assert_eq!(sink.prompts, 2);
+    }
+
+    #[test]
+    fn interactive_workspace_fails_without_prompt_support() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = workspace::interactive_collect_edited_state(dir.path(), &mut NoopEventSink)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs an interactive terminal"), "{err}");
+    }
 
     #[test]
     fn adler32_known_values() {

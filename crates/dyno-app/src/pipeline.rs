@@ -11,7 +11,10 @@ use crate::boot_spl::{
     BOOT_SPL_PROPERTY, BootSplPatchOutcome, PreparedVbmetaResign,
     prepare_vbmeta_for_descriptor_mutation, resign_image_with_security_patch, validate_spl_format,
 };
-use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
+use crate::events::{
+    CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, Prompt, PromptReply,
+    StageKind,
+};
 use crate::fuck_lgsi::{
     FuckLgsiInput, FuckLgsiMode, FuckLgsiOutcome, LgsiFeatureChange, LgsiFeatureSkip,
     WORKSPACE_JSON_NAME, apply_fuck_lgsi_with_progress,
@@ -2236,8 +2239,6 @@ fn run_debloat<S>(
 where
     S: EventSink + ?Sized,
 {
-    use std::io::{IsTerminal, Write};
-
     let configured_list = match mode {
         crate::debloat::DebloatMode::ListFile(path) => {
             Some(retain_configured_input(path, out_dir, DEBLOAT_LIST_NAME)?)
@@ -2322,17 +2323,14 @@ where
                 )
                 .with_context(|| format!("writing {}", debloat_path.display()))?;
             }
-            if std::io::stdin().is_terminal() {
-                // Prompt on stderr so it never corrupts a `--progress-format
-                // jsonl` event stream on stdout.
-                eprint!(
-                    "Edit {}, then press Enter to continue (leave empty to skip)... ",
+            let prompt = Prompt::Continue {
+                details: vec![format!(
+                    "Edit {}, then press Enter to continue (leave it empty to skip).",
                     debloat_path.display()
-                );
-                let _ = std::io::stderr().flush();
-                let mut line = String::new();
-                let _ = std::io::stdin().read_line(&mut line);
-            } else {
+                )],
+                reveal: None,
+            };
+            if events.prompt(&prompt) == PromptReply::Unavailable {
                 message(
                     events,
                     MessageLevel::Info,
@@ -2640,7 +2638,7 @@ where
         // "from" for the pipeline report. All targets share the same
         // requested "to" value.
         let representative_from = current_ris.first().map(|(_, ri)| *ri).unwrap_or(0);
-        match confirm_rollback_change(&current_ris, new_ri)? {
+        match confirm_rollback_change(events, &current_ris, new_ri) {
             RollbackConfirmation::Accepted => {
                 effective_rollback = Some(new_ri);
                 images = filtered;
@@ -2686,7 +2684,7 @@ where
                     from_iso: format_unix_to_iso8601_utc(representative_from),
                     to_iso: format_unix_to_iso8601_utc(new_ri),
                     applied: false,
-                    reason: "stdin is not a terminal".to_string(),
+                    reason: "no interactive prompt available".to_string(),
                 });
             }
         }
@@ -2894,7 +2892,7 @@ where
         // Defer dm-verity regen: the mutation (framework.jar / ZuiSettings
         // patches) runs here, but system.img's hash tree is rebuilt once by
         // the deferred pass so it folds in any --system-spl / --debloat edits.
-        let outcome = apply_fuck_lgsi_with_progress(&lgsi_input, true, None)?;
+        let outcome = apply_fuck_lgsi_with_progress(&lgsi_input, true, None, events)?;
         match outcome {
             FuckLgsiOutcome::Patched {
                 applied,
@@ -3550,60 +3548,39 @@ enum RollbackConfirmation {
     SkippedNonInteractive,
 }
 
-/// Print the current and requested AVB `rollback_index` for each target image
-/// in UTC date form and prompt the operator with `[y/N]`. Skips automatically
-/// (returns `SkippedNonInteractive`) when stdin is not a terminal — typical
-/// for `--progress-format jsonl` and CI invocations — so the rest of the
-/// pipeline can keep running without blocking on a prompt nobody can answer.
-fn confirm_rollback_change(
+/// Show the current and requested AVB `rollback_index` for each target image
+/// in UTC date form and ask the operator to confirm through the front-end's
+/// [`EventSink::prompt`]. Front-ends that cannot ask (`--progress-format
+/// jsonl`, piped stdin, CI) answer `Unavailable`, which maps to
+/// `SkippedNonInteractive` so the rest of the pipeline keeps running.
+fn confirm_rollback_change<S>(
+    events: &mut S,
     current_ris: &[(PathBuf, u64)],
     new_ri: u64,
-) -> anyhow::Result<RollbackConfirmation> {
-    use std::io::{IsTerminal, Write};
-
-    // Tty check happens FIRST so non-interactive runs (`--progress-
-    // format jsonl`, piped invocations, CI) never see the multi-line
-    // prompt text bleed into the structured event stream. The
-    // previous order printed the entire prompt to stdout then
-    // discovered stdin isn't a terminal, leaving JSONL consumers
-    // with non-JSON bytes ahead of the next event.
-    if !std::io::stdin().is_terminal() {
-        // Send the skip notice to stderr instead of stdout so a
-        // `--progress-format jsonl` consumer reading stdout never
-        // sees this notice interleaved with structured events.
-        let _ = writeln!(
-            std::io::stderr(),
-            "(stdin is not a terminal; skipping AVB rollback_index rewrite to new_ri={new_ri})"
-        );
-        return Ok(RollbackConfirmation::SkippedNonInteractive);
-    }
-
-    let stdout = std::io::stdout();
-    let mut handle = stdout.lock();
-    writeln!(handle, "About to rewrite AVB rollback_index:")?;
+) -> RollbackConfirmation
+where
+    S: EventSink + ?Sized,
+{
+    let mut details = vec!["About to rewrite AVB rollback_index:".to_string()];
     for (path, current_ri) in current_ris {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        writeln!(
-            handle,
+        details.push(format!(
             "  {filename}: {current_ri} ({}) -> {new_ri} ({})",
             format_unix_timestamp_utc(*current_ri),
             format_unix_timestamp_utc(new_ri),
-        )?;
+        ));
     }
-    write!(handle, "Proceed with rollback rewrite? [y/N] ")?;
-    handle.flush()?;
-    drop(handle);
-
-    let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer)?;
-    let trimmed = answer.trim().to_ascii_lowercase();
-    if trimmed == "y" || trimmed == "yes" {
-        Ok(RollbackConfirmation::Accepted)
-    } else {
-        Ok(RollbackConfirmation::DeclinedByUser)
+    let prompt = Prompt::Confirm {
+        details,
+        question: "Proceed with rollback rewrite?".to_string(),
+    };
+    match events.prompt(&prompt) {
+        PromptReply::Accepted => RollbackConfirmation::Accepted,
+        PromptReply::Declined => RollbackConfirmation::DeclinedByUser,
+        PromptReply::Unavailable => RollbackConfirmation::SkippedNonInteractive,
     }
 }
 
@@ -4999,6 +4976,50 @@ mod tests {
 
     use super::*;
     use crate::events::NoopEventSink;
+
+    /// Event sink that answers every prompt with a fixed reply and records
+    /// what it was asked.
+    struct ScriptedPromptSink {
+        reply: PromptReply,
+        asked: Vec<Prompt>,
+    }
+
+    impl EventSink for ScriptedPromptSink {
+        fn emit(&mut self, _event: ProgressEvent) {}
+
+        fn prompt(&mut self, prompt: &Prompt) -> PromptReply {
+            self.asked.push(prompt.clone());
+            self.reply
+        }
+    }
+
+    #[test]
+    fn rollback_confirmation_maps_prompt_replies() {
+        let targets = vec![(PathBuf::from("boot.img"), 1_700_000_000u64)];
+        for (reply, expected) in [
+            (PromptReply::Accepted, RollbackConfirmation::Accepted),
+            (PromptReply::Declined, RollbackConfirmation::DeclinedByUser),
+            (
+                PromptReply::Unavailable,
+                RollbackConfirmation::SkippedNonInteractive,
+            ),
+        ] {
+            let mut sink = ScriptedPromptSink {
+                reply,
+                asked: Vec::new(),
+            };
+            assert_eq!(confirm_rollback_change(&mut sink, &targets, 0), expected);
+            let [Prompt::Confirm { details, .. }] = sink.asked.as_slice() else {
+                panic!("expected one confirm prompt, got {:?}", sink.asked);
+            };
+            assert!(details.iter().any(|line| line.contains("boot.img")));
+        }
+        // Sinks without prompt support never block and skip the rewrite.
+        assert_eq!(
+            confirm_rollback_change(&mut NoopEventSink, &targets, 0),
+            RollbackConfirmation::SkippedNonInteractive
+        );
+    }
 
     fn write_sparse_fixture(path: &std::path::Path, block: u32, ranges: &[(u64, u64)], total: u64) {
         let mut image = avbtool_rs::sparse::SparseImage::new(block).unwrap();
