@@ -26,6 +26,18 @@ pub(crate) struct ZipEntry {
     pub(crate) is_zip64: bool,
 }
 
+impl ZipEntry {
+    /// A top-level `classes.dex` / `classesN.dex` entry: the dex files ART
+    /// actually loads. Dex blobs elsewhere in the archive (e.g. under
+    /// `assets/`) are plain data and must be left alone.
+    pub(crate) fn is_classes_dex(&self) -> bool {
+        self.name
+            .strip_prefix("classes")
+            .and_then(|rest| rest.strip_suffix(".dex"))
+            .is_some_and(|index| index.bytes().all(|b| b.is_ascii_digit()))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ZipLayout {
     pub(crate) entries: Vec<ZipEntry>,
@@ -171,6 +183,38 @@ pub(crate) fn crc32_ieee(data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(name: &str) -> ZipEntry {
+        ZipEntry {
+            name: name.to_string(),
+            data_start: 0,
+            compressed_size: 0,
+            local_header_offset: 0,
+            local_header_crc_offset: 0,
+            cd_crc_offset: 0,
+            local_header_comp_size_offset: 0,
+            cd_comp_size_offset: 0,
+            compression_method: 0,
+            uses_data_descriptor: false,
+            is_zip64: false,
+        }
+    }
+
+    #[test]
+    fn is_classes_dex_matches_only_top_level_classes_entries() {
+        for name in ["classes.dex", "classes2.dex", "classes13.dex"] {
+            assert!(entry(name).is_classes_dex(), "{name}");
+        }
+        for name in [
+            "assets/payload.dex",
+            "assets/classes.dex",
+            "classesX.dex",
+            "classes.dex.bak",
+            "lib/classes2.dex",
+        ] {
+            assert!(!entry(name).is_classes_dex(), "{name}");
+        }
+    }
 
     #[test]
     fn crc32_ieee_known_values() {

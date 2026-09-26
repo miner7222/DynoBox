@@ -2164,7 +2164,7 @@ fn collect_dex_candidates_referencing(
     let needle = build_dex_string_with_uleb_prefix(descriptor);
     let mut out = Vec::new();
     for entry in &zip.entries {
-        if !entry.name.ends_with(".dex") {
+        if !entry.is_classes_dex() {
             continue;
         }
         if entry.compression_method != 0 {

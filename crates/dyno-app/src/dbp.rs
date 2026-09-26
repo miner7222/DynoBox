@@ -1453,7 +1453,7 @@ fn apply_ops_to_apk(
     let dex_entries: Vec<_> = zip
         .entries
         .iter()
-        .filter(|e| e.name.ends_with(".dex"))
+        .filter(|e| e.is_classes_dex())
         .filter(|e| !(e.compression_method != 0 || e.uses_data_descriptor || e.is_zip64))
         .filter(|e| e.data_start + e.compressed_size <= apk_bytes.len())
         .cloned()
