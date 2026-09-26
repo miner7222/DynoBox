@@ -930,10 +930,10 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(dc.ops.len(), 76);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
-    assert_eq!(uc.ops.len(), 58);
+    assert_eq!(uc.ops.len(), 59);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 15);
+    assert_eq!(fc.ops.len(), 16);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 4);
@@ -2175,11 +2175,19 @@ fn bundled_dbp_files_parse() {
                 if class.contains("SmartOptimizationActivity") {
                     // Smart Optimization virus-card click kill only (hiding
                     // needs new code that does not fit size-preserving ops).
+                    // Pool refs are symbol-resolved so index shifts between
+                    // builds do not break the site.
                     assert_eq!(method, "initView");
                     assert_eq!(proto, "()V");
                     assert_eq!(replacements.len(), 1);
-                    assert_eq!(replacements[0].from, "54 60 23 87 6e 20 a3 05 60 00");
-                    assert_eq!(replacements[0].to, "54 60 23 87 00 00 00 00 00 00");
+                    assert_eq!(
+                        replacements[0].from,
+                        "54 60 ${virus_row:u16} 6e 20 ${row_click:u16} 60 00"
+                    );
+                    assert_eq!(
+                        replacements[0].to,
+                        "54 60 ${virus_row:u16} 00 00 00 00 00 00"
+                    );
                     assert_eq!(replacements[0].expected, 1);
                     got_virus_click_kill = true;
                 } else if class.contains("AutoRunDataUtils") {
@@ -4078,20 +4086,20 @@ fn bundled_debloat_light_row_lists_op_shape() {
             "getPresetAppList",
             "(Landroid/content/Context;Lcom/lenovo/settings/light/data/config/LightScene;)Ljava/util/Map;",
             &[
-                ("60 02 a8 2c", "60 02 ad 2c"),
-                ("60 02 aa 2c", "60 02 af 2c"),
-                ("60 02 a9 2c", "60 02 ae 2c"),
+                ("60 02 ${prc_music:u16}", "60 02 ${row_music:u16}"),
+                ("60 02 ${prc_video:u16}", "60 02 ${row_video:u16}"),
+                ("60 02 ${prc_notif:u16}", "60 02 ${row_notif:u16}"),
             ],
         ),
         (
             "getGameAppList",
             "(Landroid/content/Context;)Ljava/util/Map;",
-            &[("60 02 d8 1b", "60 02 ac 2c")],
+            &[("60 02 ${prc_game:u16}", "60 02 ${row_game:u16}")],
         ),
         (
             "initGameSceneData",
             "(Landroid/content/Context;)Lcom/lenovo/settings/light/data/model/GameSceneData;",
-            &[("60 02 d8 1b", "60 02 ac 2c")],
+            &[("60 02 ${prc_game:u16}", "60 02 ${row_game:u16}")],
         ),
     ];
     for (method, proto, pairs) in expected {
@@ -5330,7 +5338,7 @@ fn bundled_debloat_network_accel_op_shape() {
             assert_eq!(replacements.len(), 1);
             assert_eq!(replacements[0].expected, 2);
             assert_eq!(
-                replacements[0].to, "6e 20 4c 30 20 00",
+                replacements[0].to, "6e 20 ${pref_set_enabled:u16} 20 00",
                 "both VPN rows must take the zero register"
             );
         }

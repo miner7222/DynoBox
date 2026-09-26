@@ -965,6 +965,24 @@ from = "13 02 f6 07"
 to = "13 02 d3 07"
 expected = 1
 
+# Same const, later-register variant: newer builds of initSideBarView also
+# initialize the touchSidebar flag before building the LayoutParams, so the
+# register allocator shifts the type const from v2 to v3. The literal itself
+# is identical, so only the register byte differs.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiFreeformBar/ZuiFreeformBar.apk"
+class = "Lcom/zui/freeform/sidebar/FloatService;"
+method = "initSideBarView"
+proto = "()V"
+
+[[op.replacement]]
+from = "13 03 f6 07"
+to = "13 03 d3 07"
+expected = 1
+
 # Retyping the bar to TYPE_SYSTEM_ALERT keeps it out of the "hide non-system
 # overlays" set, but the input side still treats the window as an overlay: its
 # input config carries no TRUSTED_OVERLAY and uses USE_OPACITY occlusion, so

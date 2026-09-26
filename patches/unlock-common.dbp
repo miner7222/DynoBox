@@ -584,9 +584,23 @@ class = "Lcom/android/launcher3/Utilities;"
 method = "queryGridOptions"
 proto = "(Landroid/content/Context;)Ljava/util/List;"
 
+[[op.symbol]]
+name = "cursor_get_string"
+kind = "method"
+class = "Landroid/database/Cursor;"
+method = "getString"
+proto = "(I)Ljava/lang/String;"
+
+[[op.symbol]]
+name = "string_equals_ignore_case"
+kind = "method"
+class = "Ljava/lang/String;"
+method = "equalsIgnoreCase"
+proto = "(Ljava/lang/String;)Z"
+
 [[op.replacement]]
-from = "72 20 a5 04 57 00 0c 08 6e 20 86 f6 80 00 0a 08"
-to = "72 20 a5 04 57 00 0c 08 6e 20 86 f6 80 00 12 18"
+from = "72 20 ${cursor_get_string:u16} 57 00 0c 08 6e 20 ${string_equals_ignore_case:u16} 80 00 0a 08"
+to = "72 20 ${cursor_get_string:u16} 57 00 0c 08 6e 20 ${string_equals_ignore_case:u16} 80 00 12 18"
 expected = 1
 
 # Keyboard display names: with isRowProduct false the parser takes the PRC
@@ -736,17 +750,31 @@ to = "00 00 00 00 70 20 ${enable_super_god:u16} 87 00"
 expected = 1
 
 # The item is also hidden until the panel's first-time flag flips: the game
-# panel builder (GameHelperViewController$getCurrentView$1$1.emit) drops the
-# super god item while MMKVUtil.getBoolean("is_first_time_mode_super_god")
+# panel builder (the GameHelperViewController$getCurrentView$1$N emit lambda)
+# drops the super god item while MMKVUtil.getBoolean("is_first_time_mode_super_god")
 # still returns its default of true, and only the cooling-fan attach dialog
 # ever clears that flag, so a fan-less device never sees the toggle. Force
-# this one getBoolean call site to false so the item stays in the panel.
+# this one getBoolean call site to false so the item stays in the panel. The
+# anonymous-class ordinal shifted on newer builds — older ones compile the
+# lambda as $1$1 while newer ones emit $1$2 — so both descriptors get an op
+# and each build lands exactly one of them.
 
 [[op]]
 kind = "invoke_const_bool"
 partition = "system"
 file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
 scan_class = "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$1;"
+scan_method = "emit"
+target_class = "Lcom/zui/game/service/util/MMKVUtil;"
+target_method = "getBoolean"
+proto = "(Ljava/lang/String;Z)Z"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+scan_class = "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$2;"
 scan_method = "emit"
 target_class = "Lcom/zui/game/service/util/MMKVUtil;"
 target_method = "getBoolean"

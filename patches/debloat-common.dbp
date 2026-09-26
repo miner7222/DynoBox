@@ -238,9 +238,23 @@ class = "Lcom/zui/safecenter/ui/SmartOptimizationActivity;"
 method = "initView"
 proto = "()V"
 
+[[op.symbol]]
+name = "virus_row"
+kind = "field"
+class = "Lcom/zui/safecenter/ui/SmartOptimizationActivity;"
+field = "layout_root_virus"
+ty = "Landroid/widget/LinearLayout;"
+
+[[op.symbol]]
+name = "row_click"
+kind = "method"
+class = "Landroid/widget/LinearLayout;"
+method = "setOnClickListener"
+proto = "(Landroid/view/View$OnClickListener;)V"
+
 [[op.replacement]]
-from = "54 60 23 87 6e 20 a3 05 60 00"
-to = "54 60 23 87 00 00 00 00 00 00"
+from = "54 60 ${virus_row:u16} 6e 20 ${row_click:u16} 60 00"
+to = "54 60 ${virus_row:u16} 00 00 00 00 00 00"
 expected = 1
 
 # Clicking any home card used to mark it "selected" (onClick ->
@@ -595,7 +609,10 @@ proto = "(Landroid/content/Context;Z)V"
 # so forcing it false removes both features at the source with no other
 # behavior change. The startAiMeeting/startLiveTranslate entry points are
 # reachable only through these buttons, and the manifest declares no AI call
-# receivers or services.
+# receivers or services. Builds that dropped the AI call feature entirely
+# (a ZuiDialer that carries no isSupportAI, AiMeeting, LiveTranslate, or
+# ai_button resources) correctly skip this op; builds that still ship the
+# feature keep landing it.
 
 [[op]]
 kind = "method_const_bool"
@@ -993,19 +1010,61 @@ class = "Lcom/lenovo/settings/light/data/config/LightConfig;"
 method = "getPresetAppList"
 proto = "(Landroid/content/Context;Lcom/lenovo/settings/light/data/config/LightScene;)Ljava/util/Map;"
 
+[[op.symbol]]
+name = "prc_music"
+kind = "field"
+class = "Lcom/lenovo/common/internel/Res$array;"
+field = "config_prc_effectAppsOfMusic"
+ty = "I"
+
+[[op.symbol]]
+name = "row_music"
+kind = "field"
+class = "Lcom/lenovo/common/internel/Res$array;"
+field = "config_row_effectAppsOfMusic"
+ty = "I"
+
+[[op.symbol]]
+name = "prc_video"
+kind = "field"
+class = "Lcom/lenovo/common/internel/Res$array;"
+field = "config_prc_effectAppsOfVideo"
+ty = "I"
+
+[[op.symbol]]
+name = "row_video"
+kind = "field"
+class = "Lcom/lenovo/common/internel/Res$array;"
+field = "config_row_effectAppsOfVideo"
+ty = "I"
+
+[[op.symbol]]
+name = "prc_notif"
+kind = "field"
+class = "Lcom/lenovo/common/internel/Res$array;"
+field = "config_prc_effectAppsOfNotification"
+ty = "I"
+
+[[op.symbol]]
+name = "row_notif"
+kind = "field"
+class = "Lcom/lenovo/common/internel/Res$array;"
+field = "config_row_effectAppsOfNotification"
+ty = "I"
+
 [[op.replacement]]
-from = "60 02 a8 2c"
-to = "60 02 ad 2c"
+from = "60 02 ${prc_music:u16}"
+to = "60 02 ${row_music:u16}"
 expected = 1
 
 [[op.replacement]]
-from = "60 02 aa 2c"
-to = "60 02 af 2c"
+from = "60 02 ${prc_video:u16}"
+to = "60 02 ${row_video:u16}"
 expected = 1
 
 [[op.replacement]]
-from = "60 02 a9 2c"
-to = "60 02 ae 2c"
+from = "60 02 ${prc_notif:u16}"
+to = "60 02 ${row_notif:u16}"
 expected = 1
 
 [[op]]
@@ -1016,9 +1075,23 @@ class = "Lcom/lenovo/settings/light/data/config/LightConfig;"
 method = "getGameAppList"
 proto = "(Landroid/content/Context;)Ljava/util/Map;"
 
+[[op.symbol]]
+name = "prc_game"
+kind = "field"
+class = "Lcom/lenovo/common/R$array;"
+field = "config_prc_effectAppsOfGame"
+ty = "I"
+
+[[op.symbol]]
+name = "row_game"
+kind = "field"
+class = "Lcom/lenovo/common/internel/Res$array;"
+field = "config_row_effectAppsOfGame"
+ty = "I"
+
 [[op.replacement]]
-from = "60 02 d8 1b"
-to = "60 02 ac 2c"
+from = "60 02 ${prc_game:u16}"
+to = "60 02 ${row_game:u16}"
 expected = 1
 
 [[op]]
@@ -1029,9 +1102,23 @@ class = "Lcom/lenovo/settings/light/data/manager/LightSceneDataInitializer;"
 method = "initGameSceneData"
 proto = "(Landroid/content/Context;)Lcom/lenovo/settings/light/data/model/GameSceneData;"
 
+[[op.symbol]]
+name = "prc_game"
+kind = "field"
+class = "Lcom/lenovo/common/R$array;"
+field = "config_prc_effectAppsOfGame"
+ty = "I"
+
+[[op.symbol]]
+name = "row_game"
+kind = "field"
+class = "Lcom/lenovo/common/internel/Res$array;"
+field = "config_row_effectAppsOfGame"
+ty = "I"
+
 [[op.replacement]]
-from = "60 02 d8 1b"
-to = "60 02 ac 2c"
+from = "60 02 ${prc_game:u16}"
+to = "60 02 ${row_game:u16}"
 expected = 1
 
 
@@ -1164,9 +1251,16 @@ class = "Lcom/android/networkaccelerate/SettingsFragment;"
 method = "updateState"
 proto = "()V"
 
+[[op.symbol]]
+name = "pref_set_enabled"
+kind = "method"
+class = "Landroidx/preference/Preference;"
+method = "setEnabled"
+proto = "(Z)V"
+
 [[op.replacement]]
-from = "6e 20 4c 30 10 00"
-to = "6e 20 4c 30 20 00"
+from = "6e 20 ${pref_set_enabled:u16} 10 00"
+to = "6e 20 ${pref_set_enabled:u16} 20 00"
 expected = 2
 
 # The disabled rows must not advertise a state either: updateState() still reads
@@ -1181,13 +1275,20 @@ class = "Lcom/android/networkaccelerate/SettingsFragment;"
 method = "updateState"
 proto = "()V"
 
+[[op.symbol]]
+name = "pref_set_summary"
+kind = "method"
+class = "Landroidx/preference/Preference;"
+method = "setSummary"
+proto = "(I)V"
+
 [[op.replacement]]
-from = "6e 20 5e 30 01 00"
+from = "6e 20 ${pref_set_summary:u16} 01 00"
 to = "00 00 00 00 00 00"
 expected = 1
 
 [[op.replacement]]
-from = "6e 20 5e 30 35 00"
+from = "6e 20 ${pref_set_summary:u16} 35 00"
 to = "00 00 00 00 00 00"
 expected = 1
 
