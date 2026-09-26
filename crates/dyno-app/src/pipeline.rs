@@ -2642,14 +2642,7 @@ where
             RollbackConfirmation::Accepted => {
                 effective_rollback = Some(new_ri);
                 images = filtered;
-                report.rollback = Some(ReportRollbackRecord {
-                    from_unix: representative_from,
-                    to_unix: new_ri,
-                    from_iso: format_unix_to_iso8601_utc(representative_from),
-                    to_iso: format_unix_to_iso8601_utc(new_ri),
-                    applied: true,
-                    reason: String::new(),
-                });
+                report.rollback = Some(rollback_record(representative_from, new_ri, true, ""));
             }
             RollbackConfirmation::DeclinedByUser => {
                 message(
@@ -2660,14 +2653,12 @@ where
                 );
                 effective_rollback = None;
                 images = all_images;
-                report.rollback = Some(ReportRollbackRecord {
-                    from_unix: representative_from,
-                    to_unix: new_ri,
-                    from_iso: format_unix_to_iso8601_utc(representative_from),
-                    to_iso: format_unix_to_iso8601_utc(new_ri),
-                    applied: false,
-                    reason: "declined by user".to_string(),
-                });
+                report.rollback = Some(rollback_record(
+                    representative_from,
+                    new_ri,
+                    false,
+                    "declined by user",
+                ));
             }
             RollbackConfirmation::SkippedNonInteractive => {
                 message(
@@ -2678,14 +2669,12 @@ where
                 );
                 effective_rollback = None;
                 images = all_images;
-                report.rollback = Some(ReportRollbackRecord {
-                    from_unix: representative_from,
-                    to_unix: new_ri,
-                    from_iso: format_unix_to_iso8601_utc(representative_from),
-                    to_iso: format_unix_to_iso8601_utc(new_ri),
-                    applied: false,
-                    reason: "no interactive prompt available".to_string(),
-                });
+                report.rollback = Some(rollback_record(
+                    representative_from,
+                    new_ri,
+                    false,
+                    "no interactive prompt available",
+                ));
             }
         }
     } else {
@@ -2701,165 +2690,43 @@ where
     // partition name (e.g. "system") to its image path in `out_dir`.
     let mut dirty_partitions: BTreeMap<String, PathBuf> = BTreeMap::new();
 
-    let mut vendor_spl_applied: Option<(String, String)> = None;
-    if let Some(new_spl) = config.vendor_spl.as_deref() {
-        require_images_exist("--vendor-spl", out_dir, &["vendor.img", "vbmeta.img"])?;
-        ensure_images_local(
-            &mut local_inode_cache,
-            out_dir,
-            &["vendor.img", "vbmeta.img"],
-        )?;
-        let vendor_path = out_dir.join("vendor.img");
-        let vbmeta_path = out_dir.join("vbmeta.img");
-        let vendor_spl_will_change = crate::vendor_spl::read_vendor_avb_property(&vendor_path)?
-            .is_some_and(|current| new_spl > current.as_str());
-        if vendor_spl_will_change {
-            prepare_vbmeta_mutation(
-                "vbmeta.img",
+    let vendor_spl_applied = match config.vendor_spl.as_deref() {
+        Some(new_spl) => run_ext_spl_step(
+            &VENDOR_SPL_STEP,
+            new_spl,
+            VbmetaPrep {
                 out_dir,
                 config,
                 effective_rollback,
-                &mut local_inode_cache,
-                &mut images,
-                &mut prepared_vbmeta,
-            )?;
-        }
-        // Data-only bump; dm-verity is regenerated later by the deferred pass.
-        match apply_vendor_spl_mutation(&vendor_path, &vbmeta_path, new_spl)? {
-            SplMutationOutcome::Patched { old, new } => {
-                message(
-                    events,
-                    MessageLevel::Info,
-                    format!(
-                        "resign vendor.img: {} {} -> {} (verity deferred)",
-                        VENDOR_SPL_PROPERTY, old, new
-                    ),
-                );
-                report.vendor_spl = Some(ReportSplRecord {
-                    property: VENDOR_SPL_PROPERTY.to_string(),
-                    from: Some(old.clone()),
-                    to: new.clone(),
-                    applied: true,
-                    reason: String::new(),
-                });
-                vendor_spl_applied = Some((old, new));
-                dirty_partitions.insert("vendor".to_string(), vendor_path);
-            }
-            SplMutationOutcome::SkippedNotNewer { old, requested } => {
-                message(
-                    events,
-                    MessageLevel::Warning,
-                    format!(
-                        "resign vendor.img: {} unchanged (requested {}, current {}); image re-signed",
-                        VENDOR_SPL_PROPERTY, requested, old
-                    ),
-                );
-                report.vendor_spl = Some(ReportSplRecord {
-                    property: VENDOR_SPL_PROPERTY.to_string(),
-                    from: Some(old.clone()),
-                    to: requested.clone(),
-                    applied: false,
-                    reason: format!("requested {requested} is not newer than current {old}"),
-                });
-            }
-            SplMutationOutcome::NotFound => {
-                return Err(anyhow::anyhow!(
-                    "vendor.img has no {} property descriptor; cannot apply --vendor-spl",
-                    VENDOR_SPL_PROPERTY
-                ));
-            }
-        }
-        // The vbmeta.img property patch leaves a stale signature behind; make
-        // sure the resign loop will pick it up below even if a future caller
-        // tries to combine --vendor-spl with another filter.
-        if vendor_spl_applied.is_some() {
-            ensure_image_in_resign_list(&mut images, out_dir, "vbmeta.img");
-        }
-    }
+                local_inode_cache: &mut local_inode_cache,
+                images: &mut images,
+                prepared_vbmeta: &mut prepared_vbmeta,
+            },
+            &mut dirty_partitions,
+            &mut report.vendor_spl,
+            events,
+        )?,
+        None => None,
+    };
 
-    // --system-spl mirrors --vendor-spl on system.img + vbmeta_system.img.
-    // It, --fuck-lgsi, and --debloat can all mutate system.img; each only
-    // patches data here and marks the partition dirty, so the deferred pass
-    // below regenerates system.img's dm-verity exactly once for the combined
-    // edits instead of re-walking the image per flag.
-    let mut system_spl_applied: Option<(String, String)> = None;
-    if let Some(new_spl) = config.system_spl.as_deref() {
-        require_images_exist(
-            "--system-spl",
-            out_dir,
-            &["system.img", "vbmeta_system.img"],
-        )?;
-        ensure_images_local(
-            &mut local_inode_cache,
-            out_dir,
-            &["system.img", "vbmeta_system.img"],
-        )?;
-        let system_path = out_dir.join("system.img");
-        let vbmeta_system_path = out_dir.join("vbmeta_system.img");
-        let system_spl_will_change = crate::system_spl::read_system_avb_property(&system_path)?
-            .is_some_and(|current| new_spl > current.as_str());
-        if system_spl_will_change {
-            prepare_vbmeta_mutation(
-                "vbmeta_system.img",
+    let system_spl_applied = match config.system_spl.as_deref() {
+        Some(new_spl) => run_ext_spl_step(
+            &SYSTEM_SPL_STEP,
+            new_spl,
+            VbmetaPrep {
                 out_dir,
                 config,
                 effective_rollback,
-                &mut local_inode_cache,
-                &mut images,
-                &mut prepared_vbmeta,
-            )?;
-        }
-        match apply_system_spl_mutation(&system_path, &vbmeta_system_path, new_spl)? {
-            SplMutationOutcome::Patched { old, new } => {
-                message(
-                    events,
-                    MessageLevel::Info,
-                    format!(
-                        "resign system.img: {} {} -> {} (verity deferred)",
-                        SYSTEM_SPL_PROPERTY, old, new
-                    ),
-                );
-                report.system_spl = Some(ReportSplRecord {
-                    property: SYSTEM_SPL_PROPERTY.to_string(),
-                    from: Some(old.clone()),
-                    to: new.clone(),
-                    applied: true,
-                    reason: String::new(),
-                });
-                system_spl_applied = Some((old, new));
-                dirty_partitions.insert("system".to_string(), system_path);
-            }
-            SplMutationOutcome::SkippedNotNewer { old, requested } => {
-                message(
-                    events,
-                    MessageLevel::Warning,
-                    format!(
-                        "resign system.img: {} unchanged (requested {}, current {}); image re-signed",
-                        SYSTEM_SPL_PROPERTY, requested, old
-                    ),
-                );
-                report.system_spl = Some(ReportSplRecord {
-                    property: SYSTEM_SPL_PROPERTY.to_string(),
-                    from: Some(old.clone()),
-                    to: requested.clone(),
-                    applied: false,
-                    reason: format!("requested {requested} is not newer than current {old}"),
-                });
-            }
-            SplMutationOutcome::NotFound => {
-                return Err(anyhow::anyhow!(
-                    "system.img has no {} property descriptor; cannot apply --system-spl",
-                    SYSTEM_SPL_PROPERTY
-                ));
-            }
-        }
-        // The vbmeta_system.img property patch leaves a stale signature behind;
-        // make sure the resign loop will pick it up below even if a future
-        // caller tries to combine --system-spl with another filter.
-        if system_spl_applied.is_some() {
-            ensure_image_in_resign_list(&mut images, out_dir, "vbmeta_system.img");
-        }
-    }
+                local_inode_cache: &mut local_inode_cache,
+                images: &mut images,
+                prepared_vbmeta: &mut prepared_vbmeta,
+            },
+            &mut dirty_partitions,
+            &mut report.system_spl,
+            events,
+        )?,
+        None => None,
+    };
 
     let mut fuck_lgsi_applied: Option<(String, String)> = None;
     if let Some(lgsi_mode) = config.fuck_lgsi.as_ref() {
@@ -3371,42 +3238,12 @@ where
             }
         }
 
-        if let Some((_, ref expected_spl)) = vendor_spl_applied {
-            if filename == "vbmeta.img" {
-                let actual = crate::vendor_spl::read_vendor_avb_property(&out_path)
-                    .with_context(|| format!("Failed to re-read vendor SPL from {}", filename))?;
-                match actual.as_deref() {
-                    Some(value) if value == expected_spl => {}
-                    other => {
-                        return Err(anyhow::anyhow!(
-                            "Post-resign verification failed for {}: {} is {:?} but expected {:?}",
-                            filename,
-                            VENDOR_SPL_PROPERTY,
-                            other,
-                            expected_spl
-                        ));
-                    }
-                }
-            }
+        if let Some((_, expected_spl)) = &vendor_spl_applied {
+            verify_ext_spl_after_resign(&VENDOR_SPL_STEP, &filename, &out_path, expected_spl)?;
         }
 
-        if let Some((_, ref expected_spl)) = system_spl_applied {
-            if filename == "vbmeta_system.img" {
-                let actual = crate::system_spl::read_system_avb_property(&out_path)
-                    .with_context(|| format!("Failed to re-read system SPL from {}", filename))?;
-                match actual.as_deref() {
-                    Some(value) if value == expected_spl => {}
-                    other => {
-                        return Err(anyhow::anyhow!(
-                            "Post-resign verification failed for {}: {} is {:?} but expected {:?}",
-                            filename,
-                            SYSTEM_SPL_PROPERTY,
-                            other,
-                            expected_spl
-                        ));
-                    }
-                }
-            }
+        if let Some((_, expected_spl)) = &system_spl_applied {
+            verify_ext_spl_after_resign(&SYSTEM_SPL_STEP, &filename, &out_path, expected_spl)?;
         }
     }
 
@@ -4047,6 +3884,180 @@ fn ensure_image_in_resign_list(images: &mut Vec<PathBuf>, out_dir: &Path, image_
     });
     if !already_listed {
         images.push(out_dir.join(image_name));
+    }
+}
+
+fn rollback_record(from: u64, to: u64, applied: bool, reason: &str) -> ReportRollbackRecord {
+    ReportRollbackRecord {
+        from_unix: from,
+        to_unix: to,
+        from_iso: format_unix_to_iso8601_utc(from),
+        to_iso: format_unix_to_iso8601_utc(to),
+        applied,
+        reason: reason.to_string(),
+    }
+}
+
+/// Static description of an ext4-backed SPL flag (`--vendor-spl`,
+/// `--system-spl`): the data image whose build.prop + AVB property get
+/// bumped, and the owning VBMeta whose copy of the property follows.
+struct ExtSplStep {
+    flag: &'static str,
+    partition: &'static str,
+    image: &'static str,
+    vbmeta: &'static str,
+    property: &'static str,
+    read_current: fn(&Path) -> anyhow::Result<Option<String>>,
+    apply: fn(&Path, &Path, &str) -> anyhow::Result<SplMutationOutcome>,
+}
+
+const VENDOR_SPL_STEP: ExtSplStep = ExtSplStep {
+    flag: "--vendor-spl",
+    partition: "vendor",
+    image: "vendor.img",
+    vbmeta: "vbmeta.img",
+    property: VENDOR_SPL_PROPERTY,
+    read_current: crate::vendor_spl::read_vendor_avb_property,
+    apply: apply_vendor_spl_mutation,
+};
+
+// --system-spl mirrors --vendor-spl on system.img + vbmeta_system.img. It,
+// --fuck-lgsi, and --debloat can all mutate system.img; each only patches
+// data and marks the partition dirty, so the deferred pass regenerates
+// system.img's dm-verity exactly once for the combined edits.
+const SYSTEM_SPL_STEP: ExtSplStep = ExtSplStep {
+    flag: "--system-spl",
+    partition: "system",
+    image: "system.img",
+    vbmeta: "vbmeta_system.img",
+    property: SYSTEM_SPL_PROPERTY,
+    read_current: crate::system_spl::read_system_avb_property,
+    apply: apply_system_spl_mutation,
+};
+
+/// Resign-stage state [`prepare_vbmeta_mutation`] needs, borrowed for one
+/// mutation step.
+struct VbmetaPrep<'a> {
+    out_dir: &'a Path,
+    config: &'a ResignConfig,
+    effective_rollback: Option<u64>,
+    local_inode_cache: &'a mut LocalInodeCache,
+    images: &'a mut Vec<PathBuf>,
+    prepared_vbmeta: &'a mut BTreeMap<String, PreparedVbmetaResign>,
+}
+
+/// Apply one ext4-backed SPL bump as a data-only mutation (dm-verity is
+/// regenerated later by the deferred pass). Records the outcome in
+/// `report_slot` and returns `(old, new)` when the SPL actually changed.
+fn run_ext_spl_step<S>(
+    step: &ExtSplStep,
+    new_spl: &str,
+    prep: VbmetaPrep<'_>,
+    dirty_partitions: &mut BTreeMap<String, PathBuf>,
+    report_slot: &mut Option<ReportSplRecord>,
+    events: &mut S,
+) -> anyhow::Result<Option<(String, String)>>
+where
+    S: EventSink + ?Sized,
+{
+    let VbmetaPrep {
+        out_dir,
+        config,
+        effective_rollback,
+        local_inode_cache,
+        images,
+        prepared_vbmeta,
+    } = prep;
+    require_images_exist(step.flag, out_dir, &[step.image, step.vbmeta])?;
+    ensure_images_local(local_inode_cache, out_dir, &[step.image, step.vbmeta])?;
+    let image_path = out_dir.join(step.image);
+    let vbmeta_path = out_dir.join(step.vbmeta);
+    let will_change =
+        (step.read_current)(&image_path)?.is_some_and(|current| new_spl > current.as_str());
+    if will_change {
+        prepare_vbmeta_mutation(
+            step.vbmeta,
+            out_dir,
+            config,
+            effective_rollback,
+            local_inode_cache,
+            images,
+            prepared_vbmeta,
+        )?;
+    }
+    match (step.apply)(&image_path, &vbmeta_path, new_spl)? {
+        SplMutationOutcome::Patched { old, new } => {
+            message(
+                events,
+                MessageLevel::Info,
+                format!(
+                    "resign {}: {} {} -> {} (verity deferred)",
+                    step.image, step.property, old, new
+                ),
+            );
+            *report_slot = Some(ReportSplRecord {
+                property: step.property.to_string(),
+                from: Some(old.clone()),
+                to: new.clone(),
+                applied: true,
+                reason: String::new(),
+            });
+            dirty_partitions.insert(step.partition.to_string(), image_path);
+            // The VBMeta property patch leaves a stale signature behind; make
+            // sure the resign loop picks it up even if another filter (e.g.
+            // --rollback) narrowed the image list.
+            ensure_image_in_resign_list(images, out_dir, step.vbmeta);
+            Ok(Some((old, new)))
+        }
+        SplMutationOutcome::SkippedNotNewer { old, requested } => {
+            message(
+                events,
+                MessageLevel::Warning,
+                format!(
+                    "resign {}: {} unchanged (requested {}, current {}); image re-signed",
+                    step.image, step.property, requested, old
+                ),
+            );
+            *report_slot = Some(ReportSplRecord {
+                property: step.property.to_string(),
+                from: Some(old.clone()),
+                to: requested.clone(),
+                applied: false,
+                reason: format!("requested {requested} is not newer than current {old}"),
+            });
+            Ok(None)
+        }
+        SplMutationOutcome::NotFound => Err(anyhow::anyhow!(
+            "{} has no {} property descriptor; cannot apply {}",
+            step.image,
+            step.property,
+            step.flag
+        )),
+    }
+}
+
+/// After the resign loop rewrote `step.vbmeta`, re-read its SPL property and
+/// fail if it no longer carries the value the mutation step wrote.
+fn verify_ext_spl_after_resign(
+    step: &ExtSplStep,
+    filename: &str,
+    out_path: &Path,
+    expected_spl: &str,
+) -> anyhow::Result<()> {
+    if filename != step.vbmeta {
+        return Ok(());
+    }
+    let actual = (step.read_current)(out_path)
+        .with_context(|| format!("Failed to re-read {} SPL from {}", step.partition, filename))?;
+    match actual.as_deref() {
+        Some(value) if value == expected_spl => Ok(()),
+        other => Err(anyhow::anyhow!(
+            "Post-resign verification failed for {}: {} is {:?} but expected {:?}",
+            filename,
+            step.property,
+            other,
+            expected_spl
+        )),
     }
 }
 
