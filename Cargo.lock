@@ -1013,10 +1013,15 @@ dependencies = [
  "avbtool-rs",
  "crc32fast",
  "dynobox-core",
+ "dynobox-payload",
  "flate2",
+ "liblzma",
+ "prost",
  "rand_core",
  "rsa",
  "sha2 0.11.0",
+ "tempfile",
+ "zip",
 ]
 
 [[package]]

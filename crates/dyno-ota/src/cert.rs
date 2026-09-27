@@ -264,6 +264,13 @@ impl Certificate {
             .is_ok_and(|public| public == key.public_key())
     }
 
+    /// Issuer `Name` and serial `INTEGER` DER, as a CMS
+    /// `IssuerAndSerialNumber` needs them.
+    pub(crate) fn issuer_and_serial(&self) -> Result<(Vec<u8>, Vec<u8>)> {
+        let parts = parse(&self.der)?;
+        Ok((parts.issuer.raw.to_vec(), parts.serial.raw.to_vec()))
+    }
+
     /// A copy with the selected fields emptied. The result is no longer a
     /// validly signed certificate, which Android's OTA verifiers never check.
     pub(crate) fn stripped(&self, strip: Strip) -> Result<Self> {

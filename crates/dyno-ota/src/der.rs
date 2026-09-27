@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow, bail};
 
 pub(crate) const TAG_INTEGER: u8 = 0x02;
 pub(crate) const TAG_BIT_STRING: u8 = 0x03;
+pub(crate) const TAG_OCTET_STRING: u8 = 0x04;
 pub(crate) const TAG_NULL: u8 = 0x05;
 pub(crate) const TAG_OID: u8 = 0x06;
 pub(crate) const TAG_UTF8_STRING: u8 = 0x0C;
