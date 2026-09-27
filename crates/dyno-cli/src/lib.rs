@@ -460,6 +460,46 @@ enum OtaCommand {
         #[arg(long, default_value = "DynoBox OTA")]
         subject: String,
     },
+    /// Build a full, signed A/B OTA of a DynoBox firmware or image directory.
+    /// It installs over any build of the device whose otacerts.zip trusts
+    /// `--cert` (see the `ota_cert` .dbp op)
+    Generate {
+        /// Firmware or image directory holding the build to install
+        #[arg(long, value_name = "DIR")]
+        target: PathBuf,
+
+        /// OEM OTA (full or incremental) that updates to the same build; it
+        /// supplies the partition list, sizes and package metadata
+        #[arg(long, value_name = "OTA_ZIP")]
+        reference: PathBuf,
+
+        /// OTA signing key (PKCS#8 or PKCS#1 PEM/DER)
+        #[arg(long, value_name = "KEY_PEM")]
+        key: PathBuf,
+
+        /// Certificate for `--key`, embedded in the package
+        #[arg(long, value_name = "CERT_PEM")]
+        cert: PathBuf,
+
+        /// Output OTA zip (must not already exist)
+        #[arg(short, long, value_name = "OTA_ZIP")]
+        output: PathBuf,
+
+        /// Package partitions even if they fail AVB hash/hashtree checks
+        #[arg(long)]
+        allow_avb_mismatch: bool,
+    },
+    /// Verify an OTA package: whole-file and payload signatures, metadata,
+    /// and property-files offsets
+    Verify {
+        /// OTA zip to check
+        #[arg(short, long, value_name = "OTA_ZIP")]
+        input: PathBuf,
+
+        /// Also require the package to be signed by this certificate's key
+        #[arg(long, value_name = "CERT_PEM")]
+        cert: Option<PathBuf>,
+    },
 }
 
 fn parse_ota_key_bits(value: &str) -> Result<usize, String> {
@@ -986,6 +1026,70 @@ where
             println!("Private key: {}", key.display());
             println!("Certificate: {}", cert.display());
             println!("Certificate SHA-256: {}", generated.cert_sha256);
+            Ok(())
+        }
+        Commands::Ota {
+            command:
+                OtaCommand::Generate {
+                    target,
+                    reference,
+                    key,
+                    cert,
+                    output,
+                    allow_avb_mismatch,
+                },
+        } => {
+            let request = dynobox_app::ota::FullOtaRequest {
+                target,
+                reference,
+                key,
+                cert,
+                output: output.clone(),
+                allow_avb_mismatch,
+            };
+            let generated = match cli.progress_format {
+                ProgressFormat::Text => {
+                    dynobox_app::ota::generate_full_ota(&request, &mut text_sink)
+                }
+                ProgressFormat::Jsonl => {
+                    dynobox_app::ota::generate_full_ota(&request, &mut jsonl_sink)
+                }
+            }?;
+            info!(
+                "ota: {} ({} partitions, {} bytes), verified",
+                output.display(),
+                generated.partitions,
+                generated.size
+            );
+            Ok(())
+        }
+        Commands::Ota {
+            command: OtaCommand::Verify { input, cert },
+        } => {
+            let trusted = cert
+                .as_deref()
+                .map(dynobox_ota::Certificate::load)
+                .transpose()?;
+            let verified = dynobox_ota::verify::verify_package(&input, trusted.as_ref())?;
+            let post = verified.metadata.postcondition.unwrap_or_default();
+            println!("OTA package OK: {}", input.display());
+            println!(
+                "Signer: {}{}",
+                verified.signer.subject_summary(),
+                if trusted.is_some() {
+                    " (trusted)"
+                } else {
+                    " (not checked against a certificate)"
+                }
+            );
+            println!(
+                "Payload: minor version {}, {} partitions",
+                verified.manifest.minor_version.unwrap_or(0),
+                verified.manifest.partitions.len()
+            );
+            if let Some(build) = post.build.first() {
+                println!("Target build: {build}");
+            }
             Ok(())
         }
     }

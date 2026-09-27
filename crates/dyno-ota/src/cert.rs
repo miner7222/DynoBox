@@ -258,6 +258,38 @@ impl Certificate {
         RsaPublicKey::from_pkcs1_der(rsa_der).map_err(|_| anyhow!("malformed RSA public key"))
     }
 
+    /// The subject's common name, when present.
+    pub fn subject_common_name(&self) -> Option<String> {
+        let parts = parse(&self.der).ok()?;
+        let cn = der::oid(OID_COMMON_NAME);
+        for rdn in der::read_children(parts.subject.content).ok()? {
+            for attribute in der::read_children(rdn.content).ok()? {
+                let fields = der::read_children(attribute.content).ok()?;
+                if let [oid, value] = fields[..] {
+                    if oid.raw == cn {
+                        return Some(String::from_utf8_lossy(value.content).into_owned());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Lowercase hex SHA-256 of the certificate DER.
+    pub fn sha256_fingerprint(&self) -> String {
+        dynobox_core::hex::hex_encode(&<sha2::Sha256 as sha2::Digest>::digest(&self.der))
+    }
+
+    /// `CN (SHA-256 fingerprint)` for display.
+    pub fn subject_summary(&self) -> String {
+        format!(
+            "{} (SHA-256 {})",
+            self.subject_common_name()
+                .unwrap_or_else(|| "(no common name)".to_string()),
+            self.sha256_fingerprint()
+        )
+    }
+
     /// Whether this certificate carries `key`'s public key.
     pub fn matches_key(&self, key: &OtaSigningKey) -> bool {
         self.public_key()
@@ -345,6 +377,8 @@ mod tests {
 
         let reparsed = Certificate::from_pem_or_der(cert.to_pem().as_bytes()).unwrap();
         assert_eq!(reparsed, cert);
+        assert_eq!(cert.subject_common_name().as_deref(), Some("DynoBox OTA"));
+        assert_eq!(cert.sha256_fingerprint().len(), 64);
     }
 
     #[test]

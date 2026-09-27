@@ -22,6 +22,7 @@ pub(crate) fn stage_name(stage: StageKind) -> &'static str {
         StageKind::PrepareRepack => "prepare_repack",
         StageKind::AutoUnpack => "auto_unpack",
         StageKind::Verify => "verify",
+        StageKind::Ota => "ota",
     }
 }
 

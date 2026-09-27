@@ -8,6 +8,7 @@ pub enum CommandKind {
     Apply,
     Resign,
     Repack,
+    Ota,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -20,6 +21,7 @@ pub enum StageKind {
     PrepareRepack,
     AutoUnpack,
     Verify,
+    Ota,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

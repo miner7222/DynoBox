@@ -965,6 +965,7 @@ dependencies = [
  "thiserror 2.0.21",
  "toml",
  "zerocopy",
+ "zip",
  "zopfli",
 ]
 
@@ -976,6 +977,7 @@ dependencies = [
  "avbtool-rs",
  "clap",
  "dynobox-app",
+ "dynobox-ota",
  "indicatif",
  "serde",
  "serde_json",

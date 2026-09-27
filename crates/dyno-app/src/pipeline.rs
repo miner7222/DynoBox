@@ -1194,7 +1194,7 @@ where
 /// integer percent change plus a final tick at completion, so the bar
 /// advances smoothly without spamming tracing output during the inner
 /// 4 MiB chunk loop.
-fn extract_partition_images_with_progress_events<S>(
+pub(crate) fn extract_partition_images_with_progress_events<S>(
     events: &mut S,
     stage: StageKind,
     layout: &dynobox_super::SuperLayout,
@@ -1664,7 +1664,7 @@ fn copy_rawprogram_xml_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<(
 /// its layout fails. Centralises the
 /// `group_for("super") -> records -> parse_super_layout` dance repeated
 /// across the unpack / apply / repack / verify stages.
-fn load_super_layout(
+pub(crate) fn load_super_layout(
     catalog: &dynobox_xml::XmlCatalog,
     dir: &Path,
 ) -> anyhow::Result<Option<dynobox_super::SuperLayout>> {
@@ -1692,7 +1692,7 @@ fn load_super_layout_for_repack(
     )?))
 }
 
-fn resolve_partition_source_candidates(
+pub(crate) fn resolve_partition_source_candidates(
     catalog: &dynobox_xml::XmlCatalog,
     partition_name: &str,
 ) -> Vec<String> {
@@ -1709,7 +1709,7 @@ fn resolve_partition_source_candidates(
         .collect()
 }
 
-fn find_existing_filename_in_dir(dir: &Path, candidates: &[String]) -> Option<String> {
+pub(crate) fn find_existing_filename_in_dir(dir: &Path, candidates: &[String]) -> Option<String> {
     candidates.iter().find_map(|name| {
         if dir.join(name).exists() {
             Some(name.clone())
@@ -1720,13 +1720,13 @@ fn find_existing_filename_in_dir(dir: &Path, candidates: &[String]) -> Option<St
 }
 
 #[derive(Debug, Clone)]
-struct SplitFragment {
-    filename: String,
+pub(crate) struct SplitFragment {
+    pub(crate) filename: String,
     offset: u64,
     size: u64,
 }
 
-fn find_split_source_fragments(
+pub(crate) fn find_split_source_fragments(
     catalog: &dynobox_xml::XmlCatalog,
     partition_name: &str,
 ) -> Vec<SplitFragment> {
@@ -1805,7 +1805,7 @@ fn find_split_source_fragments(
         .collect()
 }
 
-fn reconstruct_split_source(
+pub(crate) fn reconstruct_split_source(
     fragments: &[SplitFragment],
     input: &Path,
     partition_size: u64,
@@ -4955,7 +4955,7 @@ fn recreate_dir_safe(dir: &Path, protected: &[&Path]) -> anyhow::Result<PathBuf>
     recreate_dir(dir)
 }
 
-fn create_pipeline_temp_root(final_output_dir: &Path) -> anyhow::Result<TempDir> {
+pub(crate) fn create_pipeline_temp_root(final_output_dir: &Path) -> anyhow::Result<TempDir> {
     if let Some(parent) = final_output_dir.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
