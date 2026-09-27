@@ -6,9 +6,15 @@
 #   dynobox ota keygen --key ../ota.key --cert patches/ota.crt
 # Resign with this patch so recovery.img is signed again after its ramdisk
 # edit.
+#
+# Keep LenovoOTA and UDSEngine installed (do not debloat them): the System
+# update screen's local install copies /sdcard/ota.zip and UDSEngine applies
+# it. Both apps stop querying Lenovo's update server, and the screen's menu
+# always offers local install instead of only after tapping the version
+# six times.
 
 name = "custom-ota-cert"
-description = "Trust only the custom OTA signing certificate, in Android and in recovery"
+description = "Trust only the custom OTA signing certificate; local-only OTA updates"
 
 [[op]]
 kind = "ota_cert"
@@ -21,3 +27,45 @@ kind = "ota_cert"
 partition = "recovery"
 file = "system/etc/security/otacerts.zip"
 cert = "ota.crt"
+
+# Lenovo's own "update checking enabled" switch. Off, the System update
+# screen reports the build as current without asking the server.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/LenovoOTA/LenovoOTA.apk"
+class = "Lcom/lenovo/row/ota/core/c/policy/OtaPolicy;"
+method = "isCSDK_CHECKING_UPDATE_ENABLE"
+value = false
+
+# The same switch in the engine that talks to the server: scheduled,
+# boot-time and push-triggered checks all stop before any request.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/UDSEngine/UDSEngine.apk"
+class = "Lcom/lenovo/tbengine/core/policy/OtaPolicy;"
+method = "isCSDK_CHECKING_UPDATE_ENABLE"
+value = false
+
+# Show "Local install" in the System update menu without the six-tap
+# unlock: `if (mCount < 6) hide` becomes a jump to `setVisible(true)`.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/LenovoOTA/LenovoOTA.apk"
+class = "Lcom/lenovo/row/ota/core/d/ui/MainActivity;"
+method = "onPrepareOptionsMenu"
+proto = "(Landroid/view/Menu;)Z"
+
+[[op.symbol]]
+name = "count"
+kind = "field"
+class = "Lcom/lenovo/row/ota/core/d/ui/MainActivity;"
+field = "mCount"
+ty = "I"
+
+[[op.replacement]]
+from = "52 53 ${count:u16} 12 64 34 43 10 00"
+to = "52 53 ${count:u16} 12 64 28 0a 00 00"
+expected = 1

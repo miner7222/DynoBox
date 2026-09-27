@@ -13,11 +13,15 @@ dynobox apply   -i <in> resign  -k <key> --plus patches/unlock-common.dbp  ota.z
 Archive ops force a method, invocation result, or compiled resource value to a
 constant. Text ops replace one exact byte string in a regular file with another
 same-length string. Because the edits keep every target file byte length
-identical, DynoBox recomputes dex header sums and/or STORED zip-entry CRCs when
-needed, then writes the file back over its ext4 extents. Every partition an op
-touches has its dm-verity hash tree regenerated once and the new root digest
-propagated into the owning vbmeta, so the resign loop signs over the patched
-bytes. Patches that match nothing (different ROM build, refactored
+identical, DynoBox recomputes dex header sums and/or zip-entry CRCs when
+needed, then writes the file back over its ext4 extents. A deflated
+`classes*.dex` is patched inflated and recompressed into its old footprint
+(zlib, then zopfli); the slack goes into the entry's local extra field and,
+past its 64 KiB limit, into leading empty deflate blocks. If it no longer
+fits, that APK's deflated dexes stay untouched and their ops are skipped.
+Every partition an op touches has its dm-verity hash tree regenerated once and
+the new root digest propagated into the owning vbmeta, so the resign loop signs
+over the patched bytes. Patches that match nothing (different ROM build, refactored
 classes/resources/properties) are warned about and skipped — they never abort
 the resign.
 
@@ -501,7 +505,10 @@ while still advancing the setup wizard.
 ## Bundled patches
 
 * **`custom-ota-cert.dbp`** — needs your own `patches/ota.crt` (git-ignored);
-  see [`ota_cert`](#ota_cert)
+  see [`ota_cert`](#ota_cert). Also stops LenovoOTA/UDSEngine from querying
+  Lenovo's update server and always shows *Local install* in the System
+  update menu (installs `/sdcard/ota.zip`), so keep both apps out of your
+  debloat list
 * **`debloat-common.dbp`**
 * **`debloat-wuji.dbp`**
 * **`enable-adb-debug.dbp`**
