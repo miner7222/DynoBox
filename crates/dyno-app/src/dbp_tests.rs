@@ -997,10 +997,10 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(dc.ops.len(), 76);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
-    assert_eq!(uc.ops.len(), 62);
+    assert_eq!(uc.ops.len(), 58);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 16);
+    assert_eq!(fc.ops.len(), 17);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 4);
@@ -5856,134 +5856,31 @@ fn bundled_fix_common_qs_header_date_lands_on_real_apk() {
     }
 }
 
-/// Shape check for the super god mode op: the fan guard branch in
-/// `ItemSuperGodMode.onClick` is nop'd so the item toggles the mode
-/// without the HID cooling fan.
+/// Shape checks for the floating-view mode ladder unlock: both floating
+/// views always offer mode 16 in their mode cycle. Newer builds dropped
+/// `key_super_god_mode` from the WUJI keyList so the legacy
+/// ItemSuperGodMode unlock machinery (onClick guard, first-time
+/// visibility pin, Settings.getSupportSuperGogMode pin) was removed from
+/// unlock-common — the ladder is the only remaining path to the mode.
 #[test]
-fn bundled_unlock_common_super_god_mode_op_shape() {
+fn bundled_unlock_common_super_god_ladder_op_shape() {
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
-    let op = uc
-        .ops
-        .iter()
-        .find(|op| {
-            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
-                    if class == "Lcom/zui/game/service/sys/item/ItemSuperGodMode;"
-                        && method == "onClick")
-        })
-        .expect("unlock-common must carry the super god mode op");
-    match op {
-        DbpOp::MethodCodePatch {
-            partition,
-            file,
-            proto,
-            symbols,
-            replacements,
-            ..
-        } => {
-            assert_eq!(partition, "system");
-            assert_eq!(file, "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk");
-            assert_eq!(proto, "(Landroid/content/Context;)V");
-            assert!(
-                symbols
-                    .iter()
-                    .any(|symbol| symbol.name() == "enable_super_god"),
-                "the enableSuperGodMode symbol must be declared"
-            );
-            assert_eq!(replacements.len(), 1);
-            let replacement = &replacements[0];
-            assert_eq!(replacement.expected, 1);
-            assert!(replacement.from.starts_with("39 00 06 00"));
-            assert!(replacement.to.starts_with("00 00 00 00"));
-            assert!(replacement.from.contains("${enable_super_god:u16}"));
-            assert!(replacement.to.contains("${enable_super_god:u16}"));
-        }
-        _ => unreachable!(),
-    }
-}
 
-/// Shape check for the super god visibility ops: the panel builder's
-/// first-time `MMKVUtil.getBoolean` gate is pinned to false so the item
-/// is not removed from the panel without the cooling fan. The anonymous
-/// lambda ordinal shifted between builds (`$1$1` on older builds, `$1$2`
-/// on newer ones), so both descriptors carry an op and each build lands
-/// exactly one of them.
-#[test]
-fn bundled_unlock_common_super_god_visibility_op_shape() {
-    let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
-    for expected_scan_class in [
-        "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$1;",
-        "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$2;",
-    ] {
-        let op = uc
-            .ops
+    assert!(
+        !uc.ops.iter().any(|op| matches!(op,
+            DbpOp::MethodCodePatch { class, .. }
+                if class == "Lcom/zui/game/service/sys/item/ItemSuperGodMode;"
+                    || class == "Lcom/zui/game/service/di/Settings;")),
+        "the legacy ItemSuperGodMode/Settings pin ops must stay removed"
+    );
+    assert!(
+        !uc.ops
             .iter()
-            .find(|op| {
-                matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
-                    if scan_class == expected_scan_class)
-            })
-            .unwrap_or_else(|| panic!("unlock-common must carry the {expected_scan_class} op"));
-        match op {
-            DbpOp::InvokeConstBool {
-                partition,
-                file,
-                scan_class,
-                scan_method,
-                target_class,
-                target_method,
-                proto,
-                site_index,
-                value,
-            } => {
-                assert_eq!(partition, "system");
-                assert_eq!(file, "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk");
-                assert_eq!(scan_class, expected_scan_class);
-                assert_eq!(scan_method.as_deref(), Some("emit"));
-                assert_eq!(target_class, "Lcom/zui/game/service/util/MMKVUtil;");
-                assert_eq!(target_method, "getBoolean");
-                assert_eq!(proto, "(Ljava/lang/String;Z)Z");
-                assert_eq!(*site_index, None);
-                assert!(!*value, "the first-time gate must be pinned to false");
-            }
-            _ => unreachable!(),
-        }
-    }
-}
-
-/// Shape checks for the newer-build super god fixes: the
-/// Settings gate getter returns true again and both floating views always
-/// offer mode 16 in their mode cycle.
-#[test]
-fn bundled_unlock_common_super_god_newer_build_op_shape() {
-    let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
-
-    let settings = uc
-        .ops
-        .iter()
-        .find(|op| {
-            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
-                if class == "Lcom/zui/game/service/di/Settings;"
-                    && method == "getSupportSuperGogMode")
-        })
-        .expect("unlock-common must carry the Settings gate op");
-    match settings {
-        DbpOp::MethodCodePatch {
-            symbols,
-            replacements,
-            ..
-        } => {
-            assert!(
-                symbols.iter().any(
-                    |symbol| matches!(symbol, DbpCodeSymbol::Field { field, ty, .. }
-                    if field == "supportSuperGogMode" && ty == "Z")
-                ),
-                "the getter op must resolve the plain boolean field"
-            );
-            assert_eq!(replacements.len(), 1);
-            assert_eq!(replacements[0].expected, 1);
-            assert!(replacements[0].to.ends_with("12 10 00 00 0f 00"));
-        }
-        _ => unreachable!(),
-    }
+            .any(|op| matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
+            if scan_class.starts_with(
+                "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$"))),
+        "the first-time visibility pins must stay removed"
+    );
 
     for (expected_class, expected_hits) in [
         ("Lcom/zui/game/service/ui/view/FloatingMainViewNew;", 1usize),
@@ -6022,42 +5919,17 @@ fn bundled_unlock_common_super_god_newer_build_op_shape() {
     }
 }
 
-/// Land the super god ops on the real ZuiGameHelper APK: the toggle guard
-/// nop, the panel visibility gate variant that matches the build, the
-/// Settings gate getter (newer builds only) and both floating-view mode
-/// cycle fixes. Set `DYNOBOX_GAMEHELPER_APK`; optionally set
+/// Land the floating-view mode ladder ops on the real ZuiGameHelper APK:
+/// both `getNextMode` variants must nop their HID-connected skip branch so
+/// mode 16 stays reachable without a cooling fan. Set
+/// `DYNOBOX_GAMEHELPER_APK`; optionally set
 /// `DYNOBOX_GAMEHELPER_GODMODE_DEX_OUT` to write the patched dex file with
 /// every landing op applied.
 #[test]
 #[ignore = "fixture: set DYNOBOX_GAMEHELPER_APK"]
-fn bundled_unlock_common_super_god_mode_lands_on_real_apk() {
+fn bundled_unlock_common_super_god_ladder_lands_on_real_apk() {
     let path = crate::test_fixtures::env("DYNOBOX_GAMEHELPER_APK");
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
-    let toggle: Vec<&DbpOp> = uc
-        .ops
-        .iter()
-        .filter(|op| {
-            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
-                if class == "Lcom/zui/game/service/sys/item/ItemSuperGodMode;"
-                    && method == "onClick")
-        })
-        .collect();
-    assert_eq!(toggle.len(), 1, "the toggle guard nop");
-    let visibility: Vec<&DbpOp> = uc
-        .ops
-        .iter()
-        .filter(|op| {
-            matches!(op, DbpOp::InvokeConstBool { scan_class, .. }
-            if scan_class.starts_with(
-                "Lcom/zui/game/service/ui/GameHelperViewController$getCurrentView$1$"
-            ))
-        })
-        .collect();
-    assert_eq!(
-        visibility.len(),
-        2,
-        "one emit-lambda visibility op per compiler variant"
-    );
     let floating: Vec<&DbpOp> = uc
         .ops
         .iter()
@@ -6069,16 +5941,6 @@ fn bundled_unlock_common_super_god_mode_lands_on_real_apk() {
         })
         .collect();
     assert_eq!(floating.len(), 2, "portrait and landscape mode cycles");
-    let settings: Vec<&DbpOp> = uc
-        .ops
-        .iter()
-        .filter(|op| {
-            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
-                if class == "Lcom/zui/game/service/di/Settings;"
-                    && method == "getSupportSuperGogMode")
-        })
-        .collect();
-    assert_eq!(settings.len(), 1, "the Settings gate getter");
     let apk = std::fs::read(&path).expect("read apk");
     let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
     let entries: Vec<_> = zip
@@ -6100,7 +5962,7 @@ fn bundled_unlock_common_super_god_mode_lands_on_real_apk() {
     let original = &apk[classes4.data_start..classes4.data_start + classes4.compressed_size];
     let mut combined = original.to_vec();
 
-    let land = |op: &DbpOp| -> Vec<String> {
+    for op in &floating {
         let mut landed = Vec::new();
         for entry in &entries {
             let bytes = &apk[entry.data_start..entry.data_start + entry.compressed_size];
@@ -6110,43 +5972,11 @@ fn bundled_unlock_common_super_god_mode_lands_on_real_apk() {
                 landed.push(entry.name.clone());
             }
         }
-        landed
-    };
-
-    // Present on every build: the toggle guard and both mode cycles.
-    for op in toggle.iter().chain(floating.iter()) {
-        let landed = land(op);
         assert_eq!(landed.len(), 1, "each op must land in one dex");
         assert_eq!(landed[0], "classes4.dex", "ops land in classes4.dex");
         assert!(apply_one_op(&mut combined, op).unwrap(), "combined dex");
     }
 
-    // The emit lambda was recompiled under a different ordinal per build,
-    // so exactly one of the two visibility variants lands.
-    let mut visibility_landed = 0usize;
-    for op in &visibility {
-        let landed = land(op);
-        assert!(landed.len() <= 1, "a compiler variant lands at most once");
-        if landed.len() == 1 {
-            assert_eq!(landed[0], "classes4.dex", "ops land in classes4.dex");
-            assert!(apply_one_op(&mut combined, op).unwrap(), "combined dex");
-            visibility_landed += 1;
-        }
-    }
-    assert_eq!(
-        visibility_landed, 1,
-        "exactly one emit-lambda visibility op must land"
-    );
-
-    // Newer builds only: the plain Settings field the getter reads.
-    for op in &settings {
-        let landed = land(op);
-        assert!(landed.len() <= 1, "the Settings op lands at most once");
-        if landed.len() == 1 {
-            assert_eq!(landed[0], "classes4.dex", "ops land in classes4.dex");
-            assert!(apply_one_op(&mut combined, op).unwrap(), "combined dex");
-        }
-    }
     assert_eq!(
         combined.len(),
         original.len(),

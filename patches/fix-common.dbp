@@ -1014,3 +1014,73 @@ proto = "(Ljava/lang/Object;)I"
 from = "6e 20 ${get_int:u16} 40 00 0a 00"
 to = "14 00 48 00 00 20 00 00"
 expected = 1
+
+# On game exit, GameHelperService.onGameAppExit calls
+# GameHelperViewController.releaseSuperGodListener, which touches the lazy
+# mItemSuperGodMode and therefore constructs ItemSuperGodMode. Its <init>
+# reads getSwitchStatus("key_super_god_mode"), which iterates
+# RomFeatures.keyList and throws RuntimeException("unknown key: ...") when
+# the key is absent. Newer GameHelper builds dropped key_super_god_mode and
+# key_voice_ball_mode from the WUJI feature list while keeping the
+# unconditional release call, so every game exit dies mid-cleanup before
+# onGameModeExit/hideGameHelper/stopSelf run — the floating handle and panel
+# stay visible over non-game apps until the process is killed. Patch the
+# throw tail to `const/4 v4, #0; return v4` so a missing key simply reads as
+# off, matching the sibling setSwitchStatus, which already null-checks its
+# FeatureKey and returns quietly.
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/data/RepositoryImpl;"
+method = "getSwitchStatus"
+proto = "(Ljava/lang/String;)I"
+
+[[op.symbol]]
+name = "runtime_exception"
+kind = "type"
+descriptor = "Ljava/lang/RuntimeException;"
+
+[[op.symbol]]
+name = "string_builder"
+kind = "type"
+descriptor = "Ljava/lang/StringBuilder;"
+
+[[op.symbol]]
+name = "unknown_key"
+kind = "string"
+value = "unknown key: "
+
+[[op.symbol]]
+name = "sb_init"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "<init>"
+proto = "(Ljava/lang/String;)V"
+
+[[op.symbol]]
+name = "sb_append"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "append"
+proto = "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+
+[[op.symbol]]
+name = "sb_toString"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "toString"
+proto = "()Ljava/lang/String;"
+
+[[op.symbol]]
+name = "re_init"
+kind = "method"
+class = "Ljava/lang/RuntimeException;"
+method = "<init>"
+proto = "(Ljava/lang/String;)V"
+
+[[op.replacement]]
+from = "22 00 ${runtime_exception:u16} 22 01 ${string_builder:u16} 1a 02 ${unknown_key:u16} 70 20 ${sb_init:u16} 21 00 6e 20 ${sb_append:u16} 41 00 0c 04 6e 10 ${sb_toString:u16} 04 00 0c 04 70 20 ${re_init:u16} 40 00 27 00"
+to = "12 04 0f 04 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+expected = 1
