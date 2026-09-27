@@ -15,6 +15,7 @@ pub mod info;
 pub mod integrity;
 pub mod integrity_signature;
 pub mod ota;
+mod ota_delta;
 mod ota_rebase;
 pub mod pipeline;
 pub mod report;

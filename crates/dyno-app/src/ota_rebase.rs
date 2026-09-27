@@ -79,7 +79,7 @@ impl SizedImage {
         })
     }
 
-    fn read_range(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
+    pub(crate) fn read_range(&mut self, offset: u64, out: &mut [u8]) -> Result<()> {
         out.fill(0);
         if offset < self.file_len {
             let available = ((self.file_len - offset) as usize).min(out.len());
@@ -139,7 +139,7 @@ fn extents_blocks(extents: &[Extent]) -> u64 {
     extents.iter().map(|e| e.num_blocks()).sum()
 }
 
-fn expand(extents: &[Extent]) -> Vec<u64> {
+pub(crate) fn expand(extents: &[Extent]) -> Vec<u64> {
     extents
         .iter()
         .flat_map(|e| e.start_block()..e.start_block() + e.num_blocks())
@@ -147,7 +147,7 @@ fn expand(extents: &[Extent]) -> Vec<u64> {
 }
 
 /// Collapse sorted-or-not block numbers into extents, preserving order.
-fn to_extents(blocks: &[u64]) -> Vec<Extent> {
+pub(crate) fn to_extents(blocks: &[u64]) -> Vec<Extent> {
     let mut out: Vec<Extent> = Vec::new();
     for &block in blocks {
         match out.last_mut() {
@@ -192,12 +192,12 @@ impl ReferenceBlobs {
 }
 
 /// An operation plus the blob it carries.
-struct Emitted {
-    op: InstallOperation,
-    data: Vec<u8>,
+pub(crate) struct Emitted {
+    pub(crate) op: InstallOperation,
+    pub(crate) data: Vec<u8>,
 }
 
-fn with_data(mut op: InstallOperation, data: Vec<u8>) -> Emitted {
+pub(crate) fn with_data(mut op: InstallOperation, data: Vec<u8>) -> Emitted {
     if data.is_empty() {
         op.data_length = None;
         op.data_sha256_hash = None;
@@ -217,7 +217,7 @@ fn xz(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Operations that write `data` (block-aligned) to `dst` without a source.
-fn replace_ops(dst_blocks: &[u64], data: &[u8], block: u64) -> Result<Vec<Emitted>> {
+pub(crate) fn replace_ops(dst_blocks: &[u64], data: &[u8], block: u64) -> Result<Vec<Emitted>> {
     let per_op = (REPLACE_CHUNK / block) as usize;
     let mut out = Vec::new();
     for (index, blocks) in dst_blocks.chunks(per_op).enumerate() {
@@ -299,17 +299,40 @@ fn regenerate(
         return Ok(out);
     }
 
-    let replaced = replace_ops(&dst_blocks, &target_data, block)?;
+    diff_or_replace(
+        &op.src_extents,
+        (!op.src_extents.is_empty())
+            .then(|| source.read_extents(&op.src_extents))
+            .transpose()?
+            .as_deref(),
+        &op.dst_extents,
+        &target_data,
+        block,
+    )
+}
+
+/// Operations writing `target_data` to `dst_extents`: a brotli bsdiff from
+/// `source_data` (read from `src_extents`) when one is given, fits the bsdiff
+/// budget and comes out smaller, otherwise `REPLACE_XZ`/`REPLACE`/`ZERO`.
+pub(crate) fn diff_or_replace(
+    src_extents: &[Extent],
+    source_data: Option<&[u8]>,
+    dst_extents: &[Extent],
+    target_data: &[u8],
+    block: u64,
+) -> Result<Vec<Emitted>> {
+    let replaced = replace_ops(&expand(dst_extents), target_data, block)?;
     let replaced_len: usize = replaced.iter().map(|e| e.data.len()).sum();
-    let source_len = extents_blocks(&op.src_extents) * block;
-    if op.src_extents.is_empty() || source_len + target_data.len() as u64 > MAX_BSDIFF_BYTES {
+    let Some(source_data) = source_data else {
+        return Ok(replaced);
+    };
+    if replaced_len == 0 || (source_data.len() + target_data.len()) as u64 > MAX_BSDIFF_BYTES {
         return Ok(replaced);
     }
-    let source_data = source.read_extents(&op.src_extents)?;
     let mut patch = Vec::new();
     bsdiff_android::diff_bsdf2_uniform(
-        &source_data,
-        &target_data,
+        source_data,
+        target_data,
         &mut patch,
         bsdiff_android::CompressionAlgorithm::Brotli,
     )
@@ -318,7 +341,7 @@ fn regenerate(
         return Ok(replaced);
     }
     let mut check = Vec::new();
-    bsdiff_android::patch_bsdf2(&source_data, &patch, &mut check)
+    bsdiff_android::patch_bsdf2(source_data, &patch, &mut check)
         .context("re-applying the generated bsdiff patch")?;
     if check != target_data {
         bail!("generated bsdiff patch does not reproduce the target blocks");
@@ -326,11 +349,11 @@ fn regenerate(
     Ok(vec![with_data(
         InstallOperation {
             r#type: Type::BrotliBsdiff as i32,
-            src_extents: op.src_extents.clone(),
-            dst_extents: op.dst_extents.clone(),
-            src_length: Some(source_len),
+            src_extents: src_extents.to_vec(),
+            dst_extents: dst_extents.to_vec(),
+            src_length: Some(source_data.len() as u64),
             dst_length: Some(target_data.len() as u64),
-            src_sha256_hash: Some(Sha256::digest(&source_data).to_vec()),
+            src_sha256_hash: Some(Sha256::digest(source_data).to_vec()),
             ..Default::default()
         },
         patch,

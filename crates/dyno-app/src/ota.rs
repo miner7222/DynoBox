@@ -250,11 +250,18 @@ pub struct OtaRequest {
 pub struct GeneratedOta {
     pub partitions: usize,
     pub size: u64,
-    /// Operation totals for an incremental OTA.
+    /// Operation totals for an incremental OTA rebased on an OEM incremental.
     pub incremental: Option<RebaseStats>,
+    /// Block totals for an incremental OTA built as a native delta.
+    pub delta: Option<DeltaStats>,
 }
 
+pub use crate::ota_delta::DeltaStats;
 pub use crate::ota_rebase::RebaseStats;
+
+/// Minor version for native delta payloads: source hashes and brotli
+/// bsdiff, supported by every Virtual A/B device.
+const DELTA_MINOR_VERSION: u32 = 8;
 
 fn cow_free_dynamic_metadata(manifest: &DeltaArchiveManifest) -> Result<()> {
     if manifest
@@ -300,11 +307,14 @@ where
 
     let reference = read_reference(&request.reference)?;
     cow_free_dynamic_metadata(&reference.manifest)?;
-    if request.source.is_some() && reference.manifest.minor_version.unwrap_or(0) == 0 {
-        bail!(
-            "an incremental OTA needs an OEM incremental reference (from the source's stock \
-             build to the target's); {} is a full OTA",
-            request.reference.display()
+    // With an OEM incremental, reuse its operations; with a full reference,
+    // diff A' and B' block by block.
+    let rebase = request.source.is_some() && reference.manifest.minor_version.unwrap_or(0) > 0;
+    let delta = request.source.is_some() && !rebase;
+    if delta {
+        message(
+            events,
+            "ota: the reference is a full OTA, so building a block-level delta",
         );
     }
     check_target_avb(&request.target, request.allow_avb_mismatch, events)?;
@@ -321,13 +331,14 @@ where
         Some(dir) => Some(PartitionImages::new(dir, &source_scratch)?),
         None => None,
     };
-    let mut reference_blobs = match sources {
-        Some(_) => Some(crate::ota_rebase::ReferenceBlobs::open(
+    let mut reference_blobs = match rebase {
+        true => Some(crate::ota_rebase::ReferenceBlobs::open(
             &reference.path,
             reference.blob_start,
         )?),
-        None => None,
+        false => None,
     };
+    let mut delta_totals = DeltaStats::default();
 
     let blob_path = scratch.path().join("blobs.bin");
     let mut blobs = BufWriter::new(File::create(&blob_path)?);
@@ -396,6 +407,52 @@ where
                 totals.add(&stats);
                 update
             }
+            (Some(sources), None) => {
+                let source_path = sources.locate(name, size, events)?;
+                // Only whole blocks the flashed image actually covers are
+                // known on the device; past its end a physical partition
+                // holds leftovers, so never read those as source.
+                let old_size = fs::metadata(&source_path)?.len() / u64::from(block_size)
+                    * u64::from(block_size);
+                let target_path = targets.locate(name, size, events)?;
+                let delta = crate::ota_delta::delta_partition(
+                    Some(&source_path),
+                    old_size,
+                    &target_path,
+                    size,
+                    block_size,
+                    &mut blobs,
+                    |done, blocks| {
+                        events.emit(ProgressEvent::ItemProgress {
+                            stage: StageKind::Ota,
+                            item: name.clone(),
+                            done,
+                            total: blocks,
+                            unit: ProgressUnit::Blocks,
+                        })
+                    },
+                )
+                .with_context(|| format!("diffing partition `{name}`"))?;
+                delta_totals.add(&delta.stats);
+                PartitionUpdate {
+                    partition_name: name.clone(),
+                    run_postinstall: reference_partition.run_postinstall,
+                    postinstall_path: reference_partition.postinstall_path.clone(),
+                    filesystem_type: reference_partition.filesystem_type.clone(),
+                    postinstall_optional: reference_partition.postinstall_optional,
+                    version: reference_partition.version.clone(),
+                    old_partition_info: delta.old_hash.map(|hash| PartitionInfo {
+                        size: Some(old_size),
+                        hash: Some(hash.to_vec()),
+                    }),
+                    new_partition_info: Some(PartitionInfo {
+                        size: Some(size),
+                        hash: Some(delta.new_hash.to_vec()),
+                    }),
+                    operations: delta.operations,
+                    ..Default::default()
+                }
+            }
             _ => {
                 let mut source = targets.open(name, size, events)?;
                 let encoded = dynobox_ota::full::encode_partition(
@@ -434,7 +491,7 @@ where
     }
     drop(blobs);
 
-    let (manifest, metadata) = if request.source.is_some() {
+    let (manifest, metadata) = if rebase {
         // Same payload shape as the OEM incremental, and the OEM's
         // preconditions pin the source build.
         let mut manifest = reference.manifest.clone();
@@ -443,9 +500,12 @@ where
         manifest.signatures_size = None;
         (manifest, reference.metadata.clone())
     } else {
+        // Full and native-delta OTAs pin only the device: a delta run on the
+        // wrong build fails update_engine's source hash checks before the
+        // slot switch.
         let manifest = DeltaArchiveManifest {
             block_size: Some(block_size),
-            minor_version: Some(0),
+            minor_version: Some(if delta { DELTA_MINOR_VERSION } else { 0 }),
             partitions,
             max_timestamp: reference.manifest.max_timestamp,
             dynamic_partition_metadata: reference.manifest.dynamic_partition_metadata.clone(),
@@ -507,7 +567,8 @@ where
     Ok(GeneratedOta {
         partitions: total,
         size: fs::metadata(&request.output)?.len(),
-        incremental: request.source.as_ref().map(|_| totals),
+        incremental: rebase.then_some(totals),
+        delta: delta.then_some(delta_totals),
     })
 }
 

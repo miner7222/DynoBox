@@ -462,8 +462,9 @@ enum OtaCommand {
     },
     /// Build a signed A/B OTA of a DynoBox firmware or image directory for a
     /// device whose otacerts.zip trusts `--cert` (see the `ota_cert` .dbp
-    /// op). With `--source` the OTA is incremental and reuses the OEM
-    /// incremental's operations; without it the OTA is full
+    /// op). With `--source` the OTA is incremental: it reuses the operations
+    /// of an OEM incremental reference, or diffs the two builds block by
+    /// block when the reference is a full OTA. Without it the OTA is full
     Generate {
         /// Firmware or image directory holding the build now on the device
         /// (exactly as flashed). Omit for a full OTA
@@ -474,8 +475,9 @@ enum OtaCommand {
         #[arg(long, value_name = "DIR")]
         target: PathBuf,
 
-        /// OEM OTA that updates to the target's stock build. With `--source`
-        /// it must be the OEM incremental from the source's stock build
+        /// OEM OTA that updates to the target's stock build. With `--source`,
+        /// an OEM incremental from the source's stock build is reused; a full
+        /// OTA only supplies partition sizes and metadata
         #[arg(long, value_name = "OTA_ZIP")]
         reference: PathBuf,
 
@@ -1065,6 +1067,15 @@ where
                 generated.partitions,
                 generated.size
             );
+            if let Some(stats) = generated.delta {
+                info!(
+                    "ota: blocks copied in place {}, moved {}, zero {}, written {}",
+                    stats.unchanged_blocks,
+                    stats.moved_blocks,
+                    stats.zero_blocks,
+                    stats.written_blocks
+                );
+            }
             if let Some(stats) = generated.incremental {
                 info!(
                     "ota: {} OEM operations reused; regenerated {} (source changed), {} (target changed), {} (not replayable); {} added",
