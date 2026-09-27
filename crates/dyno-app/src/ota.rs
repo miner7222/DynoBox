@@ -232,17 +232,18 @@ pub struct OtaRequest {
     pub source: Option<PathBuf>,
     /// Firmware or image directory holding the build to install.
     pub target: PathBuf,
-    /// OEM OTA whose target is the same build as `target`. For an
-    /// incremental OTA it must be the OEM incremental from the source's stock
-    /// build; for a full OTA any OEM OTA to the target build works. It
-    /// supplies partition sizes and metadata, and, for incrementals, the
-    /// operations that are reused.
+    /// OEM OTA whose target is the same build as `target`. It supplies
+    /// partition sizes and metadata. An OEM incremental from the source's
+    /// stock build also supplies operations to reuse, unless `force_delta`.
     pub reference: PathBuf,
     pub key: PathBuf,
     pub cert: PathBuf,
     pub output: PathBuf,
     /// Package partitions even when they fail AVB verification.
     pub allow_avb_mismatch: bool,
+    /// Diff source and target block by block even when the reference is an
+    /// OEM incremental, e.g. when both builds share the same stock base.
+    pub force_delta: bool,
 }
 
 /// Summary of a generated OTA.
@@ -262,6 +263,10 @@ pub use crate::ota_rebase::RebaseStats;
 /// Minor version for native delta payloads: source hashes and brotli
 /// bsdiff, supported by every Virtual A/B device.
 const DELTA_MINOR_VERSION: u32 = 8;
+
+/// Partitions never put in a generated OTA, so the device keeps what it has
+/// in the slot being updated.
+const EXCLUDED_PARTITIONS: &[&str] = &["abl"];
 
 fn cow_free_dynamic_metadata(manifest: &DeltaArchiveManifest) -> Result<()> {
     if manifest
@@ -307,14 +312,39 @@ where
 
     let reference = read_reference(&request.reference)?;
     cow_free_dynamic_metadata(&reference.manifest)?;
-    // With an OEM incremental, reuse its operations; with a full reference,
-    // diff A' and B' block by block.
-    let rebase = request.source.is_some() && reference.manifest.minor_version.unwrap_or(0) > 0;
+    // With an OEM incremental, reuse its operations; with a full reference
+    // or when asked, diff A' and B' block by block.
+    let incremental_reference = reference.manifest.minor_version.unwrap_or(0) > 0;
+    let rebase = request.source.is_some() && incremental_reference && !request.force_delta;
     let delta = request.source.is_some() && !rebase;
     if delta {
         message(
             events,
-            "ota: the reference is a full OTA, so building a block-level delta",
+            if incremental_reference {
+                "ota: building a block-level delta; the reference's operations are not used"
+            } else {
+                "ota: the reference is a full OTA, so building a block-level delta"
+            },
+        );
+    }
+    let included: Vec<&PartitionUpdate> = reference
+        .manifest
+        .partitions
+        .iter()
+        .filter(|p| !EXCLUDED_PARTITIONS.contains(&p.partition_name.as_str()))
+        .collect();
+    for excluded in reference
+        .manifest
+        .partitions
+        .iter()
+        .filter(|p| EXCLUDED_PARTITIONS.contains(&p.partition_name.as_str()))
+    {
+        message(
+            events,
+            &format!(
+                "ota: leaving out {}; the updated slot keeps its current image",
+                excluded.partition_name
+            ),
         );
     }
     check_target_avb(&request.target, request.allow_avb_mismatch, events)?;
@@ -342,10 +372,10 @@ where
 
     let blob_path = scratch.path().join("blobs.bin");
     let mut blobs = BufWriter::new(File::create(&blob_path)?);
-    let total = reference.manifest.partitions.len();
+    let total = included.len();
     let mut partitions = Vec::with_capacity(total);
     let mut totals = RebaseStats::default();
-    for (index, reference_partition) in reference.manifest.partitions.iter().enumerate() {
+    for (index, reference_partition) in included.into_iter().enumerate() {
         let name = &reference_partition.partition_name;
         let size = reference_partition
             .new_partition_info

@@ -464,7 +464,8 @@ enum OtaCommand {
     /// device whose otacerts.zip trusts `--cert` (see the `ota_cert` .dbp
     /// op). With `--source` the OTA is incremental: it reuses the operations
     /// of an OEM incremental reference, or diffs the two builds block by
-    /// block when the reference is a full OTA. Without it the OTA is full
+    /// block when the reference is a full OTA or `--delta` is given. Without
+    /// it the OTA is full. `abl` is never included
     Generate {
         /// Firmware or image directory holding the build now on the device
         /// (exactly as flashed). Omit for a full OTA
@@ -477,7 +478,8 @@ enum OtaCommand {
 
         /// OEM OTA that updates to the target's stock build. With `--source`,
         /// an OEM incremental from the source's stock build is reused; a full
-        /// OTA only supplies partition sizes and metadata
+        /// OTA (or any OTA with `--delta`) only supplies partition sizes and
+        /// metadata
         #[arg(long, value_name = "OTA_ZIP")]
         reference: PathBuf,
 
@@ -496,6 +498,12 @@ enum OtaCommand {
         /// Package partitions even if they fail AVB hash/hashtree checks
         #[arg(long)]
         allow_avb_mismatch: bool,
+
+        /// Diff `--source` and `--target` block by block even when the
+        /// reference is an OEM incremental, e.g. when both share one stock
+        /// build
+        #[arg(long, requires = "source")]
+        delta: bool,
     },
     /// Verify an OTA package: whole-file and payload signatures, metadata,
     /// and property-files offsets
@@ -1046,6 +1054,7 @@ where
                     cert,
                     output,
                     allow_avb_mismatch,
+                    delta,
                 },
         } => {
             let request = dynobox_app::ota::OtaRequest {
@@ -1056,6 +1065,7 @@ where
                 cert,
                 output: output.clone(),
                 allow_avb_mismatch,
+                force_delta: delta,
             };
             let generated = match cli.progress_format {
                 ProgressFormat::Text => dynobox_app::ota::generate_ota(&request, &mut text_sink),
@@ -1180,6 +1190,7 @@ mod tests {
             "-o",
             "o.zip",
             "--allow-avb-mismatch",
+            "--delta",
         ])
         .unwrap();
         let Commands::Ota {
@@ -1187,6 +1198,7 @@ mod tests {
                 OtaCommand::Generate {
                     source,
                     allow_avb_mismatch,
+                    delta,
                     ..
                 },
         } = incremental.command
@@ -1194,8 +1206,28 @@ mod tests {
             panic!("expected ota generate");
         };
         assert_eq!(
-            (source, allow_avb_mismatch),
-            (Some(PathBuf::from("a")), true)
+            (source, allow_avb_mismatch, delta),
+            (Some(PathBuf::from("a")), true, true)
+        );
+        // A delta needs a source build to diff against.
+        assert!(
+            Cli::try_parse_from([
+                "dynobox",
+                "ota",
+                "generate",
+                "--target",
+                "b",
+                "--reference",
+                "ref.zip",
+                "--key",
+                "k",
+                "--cert",
+                "c",
+                "-o",
+                "o.zip",
+                "--delta",
+            ])
+            .is_err()
         );
 
         assert!(
