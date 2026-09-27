@@ -54,6 +54,7 @@ enum Mode {
     Unpack,
     Resign,
     Repack,
+    Ota,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +88,23 @@ struct FormSnapshot {
     plus_patches: Vec<PathBuf>,
     #[serde(default = "default_true")]
     plus_patches_enabled: bool,
+    #[serde(default)]
+    ota: OtaForm,
+}
+
+/// `ota generate` inputs, kept apart from the pipeline modes' fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+struct OtaForm {
+    /// Build now on the device; `None` makes a full OTA.
+    source: Option<PathBuf>,
+    target: Option<PathBuf>,
+    reference: Option<PathBuf>,
+    key: Option<PathBuf>,
+    cert: Option<PathBuf>,
+    output: Option<PathBuf>,
+    delta: bool,
+    allow_avb_mismatch: bool,
 }
 
 impl FormSnapshot {
@@ -117,6 +135,7 @@ impl FormSnapshot {
             info: gui.info,
             plus_patches: gui.plus_patches.clone(),
             plus_patches_enabled: gui.plus_patches_enabled,
+            ota: gui.ota.clone(),
         }
     }
 
@@ -148,6 +167,7 @@ impl FormSnapshot {
         gui.info = self.info;
         gui.plus_patches.clone_from(&self.plus_patches);
         gui.plus_patches_enabled = self.plus_patches_enabled;
+        gui.ota.clone_from(&self.ota);
     }
 
     fn command_line(&self) -> String {
@@ -208,7 +228,12 @@ impl MissingPaths {
             .chain(snapshot.fuck_lgsi_config.iter())
             .chain(snapshot.debloat_list.iter())
             .chain(snapshot.add_overlays.iter())
-            .chain(snapshot.plus_patches.iter());
+            .chain(snapshot.plus_patches.iter())
+            .chain(snapshot.ota.source.iter())
+            .chain(snapshot.ota.target.iter())
+            .chain(snapshot.ota.reference.iter())
+            .chain(snapshot.ota.key.iter())
+            .chain(snapshot.ota.cert.iter());
         paths.extend(candidates.filter(|path| !path.exists()).cloned());
         Self { paths }
     }
@@ -225,6 +250,7 @@ impl Mode {
             Mode::Unpack => "Unpack",
             Mode::Resign => "Resign",
             Mode::Repack => "Repack",
+            Mode::Ota => "OTA",
         }
     }
 }
@@ -262,6 +288,8 @@ struct DynoGui {
     info: bool,
     plus_patches: Vec<PathBuf>,
     plus_patches_enabled: bool,
+
+    ota: OtaForm,
 
     // Last spawn result, surfaced inline next to the Run button so
     // the user knows whether the terminal launched OK.
@@ -317,6 +345,7 @@ impl Default for DynoGui {
             info: false,
             plus_patches: Vec::new(),
             plus_patches_enabled: true,
+            ota: OtaForm::default(),
             last_status: None,
             last_command: None,
             command_open: false,
@@ -336,7 +365,7 @@ impl DynoGui {
         match self.mode {
             Mode::Resign => true,
             Mode::Apply | Mode::Unpack => self.do_resign,
-            Mode::Repack => false,
+            Mode::Repack | Mode::Ota => false,
         }
     }
 
@@ -399,8 +428,35 @@ impl DynoGui {
                 a.push("repack".into());
                 self.push_io_args(&mut a);
             }
+            Mode::Ota => self.push_ota_args(&mut a),
         }
         a
+    }
+
+    fn push_ota_args(&self, a: &mut Vec<String>) {
+        a.push("ota".into());
+        a.push("generate".into());
+        let ota = &self.ota;
+        for (flag, path) in [
+            ("--source", &ota.source),
+            ("--target", &ota.target),
+            ("--reference", &ota.reference),
+            ("--key", &ota.key),
+            ("--cert", &ota.cert),
+            ("--output", &ota.output),
+        ] {
+            if let Some(path) = path {
+                a.push(flag.into());
+                a.push(path.display().to_string());
+            }
+        }
+        // `--delta` needs a source build to diff against.
+        if ota.delta && ota.source.is_some() {
+            a.push("--delta".into());
+        }
+        if ota.allow_avb_mismatch {
+            a.push("--allow-avb-mismatch".into());
+        }
     }
 
     fn push_io_args(&self, a: &mut Vec<String>) {
@@ -516,6 +572,21 @@ impl DynoGui {
     /// guarantee a CLI parse / pipeline failure. `Ok(())` lets
     /// `run_in_terminal` proceed.
     fn validate_for_run(&self) -> Result<(), String> {
+        if matches!(self.mode, Mode::Ota) {
+            let ota = &self.ota;
+            for (unset, what) in [
+                (ota.target.is_none(), "target build directory"),
+                (ota.reference.is_none(), "reference OTA zip"),
+                (ota.key.is_none(), "OTA signing key"),
+                (ota.cert.is_none(), "OTA certificate"),
+                (ota.output.is_none(), "output OTA zip"),
+            ] {
+                if unset {
+                    return Err(format!("Missing {what}"));
+                }
+            }
+            return Ok(());
+        }
         if self.input.is_none() {
             return Err("Missing --input directory".into());
         }
@@ -566,13 +637,26 @@ impl eframe::App for DynoGui {
                         egui::ComboBox::from_id_salt("mode")
                             .selected_text(self.mode.label())
                             .show_ui(ui, |ui| {
-                                for m in [Mode::Apply, Mode::Unpack, Mode::Resign, Mode::Repack] {
+                                for m in [
+                                    Mode::Apply,
+                                    Mode::Unpack,
+                                    Mode::Resign,
+                                    Mode::Repack,
+                                    Mode::Ota,
+                                ] {
                                     ui.selectable_value(&mut self.mode, m, m.label());
                                 }
                             });
                     });
 
                     ui.separator();
+
+                    if matches!(self.mode, Mode::Ota) {
+                        self.ota_section(ui);
+                        ui.separator();
+                        self.run_button(ui);
+                        return;
+                    }
 
                     self.io_picker(ui, "Input", true);
                     self.io_picker(ui, "Output", false);
@@ -582,7 +666,7 @@ impl eframe::App for DynoGui {
 
                     match self.mode {
                         Mode::Apply => self.apply_section(ui),
-                        Mode::Unpack | Mode::Resign | Mode::Repack => {}
+                        Mode::Unpack | Mode::Resign | Mode::Repack | Mode::Ota => {}
                     }
 
                     if !matches!(self.mode, Mode::Repack) {
@@ -605,7 +689,7 @@ impl eframe::App for DynoGui {
                                 ui.checkbox(&mut self.do_repack, "repack");
                             });
                         }
-                        Mode::Repack => {}
+                        Mode::Repack | Mode::Ota => {}
                     }
 
                     // In Repack mode the section above is empty, so its
@@ -948,6 +1032,84 @@ impl DynoGui {
         ui.separator();
     }
 
+    fn ota_section(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Custom OTA (ota generate)").strong());
+        let missing = &self.missing_paths;
+        let ota = &mut self.ota;
+        path_row(
+            ui,
+            "Source build:",
+            &mut ota.source,
+            PathKind::Folder,
+            "ota-source",
+            missing,
+        )
+        .on_hover_text("Build now on the device, exactly as flashed. Leave empty for a full OTA");
+        path_row(
+            ui,
+            "Target build:",
+            &mut ota.target,
+            PathKind::Folder,
+            "ota-target",
+            missing,
+        )
+        .on_hover_text("Build to install");
+        path_row(
+            ui,
+            "Reference OTA:",
+            &mut ota.reference,
+            PathKind::Open("ZIP", &["zip"]),
+            "ota-reference",
+            missing,
+        )
+        .on_hover_text("Lenovo OTA that updates to the target's stock build");
+        path_row(
+            ui,
+            "Signing key:",
+            &mut ota.key,
+            PathKind::Open("PEM / DER key", &["key", "pem", "der", "pk8"]),
+            "ota-key",
+            missing,
+        );
+        path_row(
+            ui,
+            "Certificate:",
+            &mut ota.cert,
+            PathKind::Open("PEM / DER certificate", &["crt", "pem", "der", "x509"]),
+            "ota-cert",
+            missing,
+        );
+        path_row(
+            ui,
+            "Output zip:",
+            &mut ota.output,
+            PathKind::Save("ZIP", &["zip"]),
+            "ota-output",
+            missing,
+        )
+        .on_hover_text("Must not exist yet");
+
+        let has_source = ota.source.is_some();
+        ui.add_enabled_ui(has_source, |ui| {
+            ui.checkbox(&mut ota.delta, "--delta").on_hover_text(
+                "Diff source and target block by block even with a Lenovo incremental \
+                 reference, e.g. when both builds share one stock build",
+            );
+        });
+        ui.checkbox(&mut ota.allow_avb_mismatch, "--allow-avb-mismatch")
+            .on_hover_text("Package partitions even if they fail AVB checks");
+        let kind = match (has_source, ota.delta) {
+            (false, _) => "Full OTA: installs over any build of the device.",
+            (true, true) => "Incremental OTA as a block-level delta.",
+            (true, false) => {
+                "Incremental OTA: reuses a Lenovo incremental reference's operations, \
+                 or diffs block by block when the reference is a full OTA."
+            }
+        };
+        ui.label(egui::RichText::new(kind).weak().small());
+        ui.label(egui::RichText::new("abl is never included.").weak().small());
+    }
+
     fn info_section(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Unpack options").strong());
         ui.checkbox(&mut self.info, "--info")
@@ -1155,6 +1317,54 @@ impl DynoGui {
     }
 }
 
+/// What a [`path_row`] picker selects.
+enum PathKind {
+    Folder,
+    /// An existing file: filter name and extensions.
+    Open(&'static str, &'static [&'static str]),
+    /// A new file: filter name and extensions.
+    Save(&'static str, &'static [&'static str]),
+}
+
+/// A labelled path field: a picker button, a clear button once set, and
+/// the path itself (red when a restored history entry points nowhere).
+fn path_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Option<PathBuf>,
+    kind: PathKind,
+    id_salt: &str,
+    missing: &MissingPaths,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if ui.button("📁").clicked() {
+            let picked = match kind {
+                PathKind::Folder => rfd::FileDialog::new().pick_folder(),
+                PathKind::Open(name, extensions) => rfd::FileDialog::new()
+                    .add_filter(name, extensions)
+                    .pick_file(),
+                PathKind::Save(name, extensions) => rfd::FileDialog::new()
+                    .add_filter(name, extensions)
+                    .save_file(),
+            };
+            if picked.is_some() {
+                *value = picked;
+            }
+        }
+        if value.is_some() && ui.small_button("✖").clicked() {
+            *value = None;
+        }
+        let text = value
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let is_missing = value.as_deref().is_some_and(|p| missing.contains(p));
+        drag_scroll_path(ui, &text, id_salt, is_missing);
+    })
+    .response
+}
+
 /// Render a single-line monospace path that the user can scroll
 /// horizontally by dragging when the text overflows the available
 /// width. Replaces `Label::truncate()` for path display so a long
@@ -1318,8 +1528,64 @@ mod tests {
             debloat_list: Some(PathBuf::from("debloat.txt")),
             info: true,
             plus_patches: vec![PathBuf::from("one.dbp"), PathBuf::from("two.dbp")],
+            ota: OtaForm {
+                source: Some(PathBuf::from("a-dir")),
+                target: Some(PathBuf::from("b-dir")),
+                reference: Some(PathBuf::from("ref.zip")),
+                key: Some(PathBuf::from("ota.key")),
+                cert: Some(PathBuf::from("ota.crt")),
+                output: Some(PathBuf::from("a-to-b.zip")),
+                delta: true,
+                allow_avb_mismatch: true,
+            },
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn ota_mode_builds_ota_generate_args() {
+        let gui = populated_gui(Mode::Ota);
+        assert_eq!(
+            gui.build_args(),
+            vec![
+                "ota",
+                "generate",
+                "--source",
+                "a-dir",
+                "--target",
+                "b-dir",
+                "--reference",
+                "ref.zip",
+                "--key",
+                "ota.key",
+                "--cert",
+                "ota.crt",
+                "--output",
+                "a-to-b.zip",
+                "--delta",
+                "--allow-avb-mismatch",
+            ]
+        );
+        assert!(gui.validate_for_run().is_ok());
+
+        // Full OTA: no source, so `--delta` is dropped even when ticked.
+        let mut full = populated_gui(Mode::Ota);
+        full.ota.source = None;
+        full.ota.allow_avb_mismatch = false;
+        let args = full.build_args();
+        assert!(!args.iter().any(|a| a == "--source" || a == "--delta"));
+        assert!(!args.contains(&"--allow-avb-mismatch".to_string()));
+
+        let mut incomplete = populated_gui(Mode::Ota);
+        incomplete.ota.cert = None;
+        assert_eq!(
+            incomplete.validate_for_run(),
+            Err("Missing OTA certificate".to_string())
+        );
+        // OTA mode does not need the pipeline modes' --input.
+        let mut no_input = populated_gui(Mode::Ota);
+        no_input.input = None;
+        assert!(no_input.validate_for_run().is_ok());
     }
 
     #[test]
@@ -1348,7 +1614,13 @@ mod tests {
 
     #[test]
     fn snapshots_restore_every_field_in_all_modes_and_rebuild_spl_dates() {
-        for mode in [Mode::Apply, Mode::Unpack, Mode::Resign, Mode::Repack] {
+        for mode in [
+            Mode::Apply,
+            Mode::Unpack,
+            Mode::Resign,
+            Mode::Repack,
+            Mode::Ota,
+        ] {
             let original = populated_gui(mode);
             let snapshot = FormSnapshot::capture(&original);
             let mut restored = DynoGui::default();
@@ -1411,10 +1683,12 @@ mod tests {
         let object = value.as_object_mut().expect("snapshot object");
         object.remove("add_overlays_enabled");
         object.remove("plus_patches_enabled");
+        object.remove("ota");
 
         let legacy: FormSnapshot = serde_json::from_value(value).expect("legacy snapshot");
         assert!(legacy.add_overlays_enabled);
         assert!(legacy.plus_patches_enabled);
+        assert_eq!(legacy.ota, OtaForm::default());
     }
 
     #[test]
@@ -1465,6 +1739,9 @@ mod tests {
         gui.fuck_lgsi_config = Some(base.join("missing-lgsi.json"));
         gui.debloat_list = Some(base.join("missing-debloat.txt"));
         gui.plus_patches = vec![base.join("missing.dbp")];
+        gui.ota.reference = Some(base.join("missing-reference.zip"));
+        gui.ota.cert = Some(base.join("missing-ota.crt"));
+        gui.ota.output = Some(base.join("missing-ota-output.zip"));
         let snapshot = FormSnapshot::capture(&gui);
 
         let missing = MissingPaths::classify(&snapshot);
@@ -1477,11 +1754,15 @@ mod tests {
             snapshot.fuck_lgsi_config.as_deref(),
             snapshot.debloat_list.as_deref(),
             snapshot.plus_patches.first().map(PathBuf::as_path),
+            snapshot.ota.reference.as_deref(),
+            snapshot.ota.cert.as_deref(),
         ] {
             assert!(missing.contains(path.expect("test path should be set")));
         }
         assert!(!missing.contains(&existing));
         assert!(!missing.contains(snapshot.output.as_deref().expect("output should be set")));
+        // Like --output, the OTA zip to be written is expected not to exist.
+        assert!(!missing.contains(snapshot.ota.output.as_deref().expect("OTA output set")));
 
         std::fs::remove_dir_all(base).expect("remove test directory");
     }
