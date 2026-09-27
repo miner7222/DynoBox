@@ -248,10 +248,21 @@ The target must already be a certificate bundle. The stock TB323 system bundle
 is 1160 bytes: a 2048-bit certificate fits as-is, a 4096-bit one only after
 compression and stripping fields the verifiers ignore.
 
+Recovery keeps its own copy for sideloaded OTAs. With `partition = "recovery"`
+(or any v3/v4 boot image) the op edits the file inside the LZ4 or gzip
+ramdisk and updates the image's AVB hash descriptor; use it with `--resign`
+so the image is signed again. No other op kind can target a boot image.
+
 ```toml
 [[op]]
 kind = "ota_cert"
 partition = "system"
+file = "system/etc/security/otacerts.zip"
+cert = "ota.crt"
+
+[[op]]
+kind = "ota_cert"
+partition = "recovery"
 file = "system/etc/security/otacerts.zip"
 cert = "ota.crt"
 ```

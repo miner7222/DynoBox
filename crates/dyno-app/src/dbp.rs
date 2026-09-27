@@ -1378,10 +1378,14 @@ fn apply_ops_to_file(
     file: &str,
     ops: &[&DbpOp],
 ) -> Result<Option<DbpFileResult>> {
+    if crate::bootimg::is_boot_image(image_path)? {
+        return apply_boot_image_ops(image_path, file, ops);
+    }
     let has_raw_ops = ops.iter().any(|op| op.is_raw_file_op());
     if has_raw_ops && !ops.iter().all(|op| op.is_raw_file_op()) {
         return Err(anyhow!(
-            "{file} mixes raw-file ops (text_replace, ota_cert) with archive patch ops;              split them into separate files"
+            "{file} mixes raw-file ops (text_replace, ota_cert) with archive patch ops; \
+             split them into separate files"
         ));
     }
     if has_raw_ops {
@@ -1456,6 +1460,40 @@ fn apply_raw_file_ops(
         } else {
             Vec::new()
         },
+    }))
+}
+
+/// `ota_cert` on a boot image (e.g. `recovery`): rewrite the bundle inside
+/// its ramdisk, which recovery uses to verify sideloaded OTAs.
+fn apply_boot_image_ops(
+    image_path: &Path,
+    file: &str,
+    ops: &[&DbpOp],
+) -> Result<Option<DbpFileResult>> {
+    if ops.iter().any(|op| !matches!(op, DbpOp::OtaCert { .. })) {
+        return Err(anyhow!(
+            "{}: only ota_cert can patch a file inside a boot image ramdisk",
+            image_path.display()
+        ));
+    }
+    let found = crate::bootimg::edit_ramdisk_file(image_path, file, |bytes| {
+        for op in ops {
+            if let DbpOp::OtaCert { cert, .. } = op {
+                replace_otacerts(bytes, Path::new(cert))
+                    .with_context(|| format!("ota_cert on ramdisk {file}"))?;
+            }
+        }
+        Ok(())
+    })?;
+    if !found {
+        return Ok(None);
+    }
+    Ok(Some(DbpFileResult {
+        file: file.to_string(),
+        target_found: true,
+        ops_applied: ops.len(),
+        ops_skipped: 0,
+        patched_entries: vec!["ramdisk".to_string()],
     }))
 }
 

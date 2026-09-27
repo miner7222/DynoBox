@@ -957,6 +957,7 @@ dependencies = [
  "flate2",
  "getrandom 0.4.3",
  "liblzma",
+ "lz4_flex",
  "memchr",
  "pkcs8 0.11.0",
  "serde",

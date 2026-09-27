@@ -2894,6 +2894,20 @@ where
                 }
                 ensure_images_local(&mut local_inode_cache, out_dir, &[&img_name])?;
                 let img_path = out_dir.join(&img_name);
+                // A boot image ramdisk edit rewrites the image's own AVB
+                // hash descriptor, so verify and re-sign its still-valid
+                // VBMeta first; the resign loop re-authenticates it after.
+                if crate::bootimg::is_boot_image(&img_path)? {
+                    prepare_vbmeta_mutation(
+                        &img_name,
+                        out_dir,
+                        config,
+                        effective_rollback,
+                        &mut local_inode_cache,
+                        &mut images,
+                        &mut prepared_vbmeta,
+                    )?;
+                }
                 let results = crate::dbp::apply_partition_ops(
                     &img_path,
                     &partition,
@@ -2944,7 +2958,12 @@ where
                         patched_entries: r.patched_entries,
                     });
                 }
-                if partition_modified {
+                // Hash-footer images (a boot image ramdisk edit) already
+                // carry their new digest; only hashtree images need the
+                // deferred dm-verity pass.
+                if partition_modified
+                    && crate::avb_descriptor::read_hashtree_params(&img_path, &partition)?.is_some()
+                {
                     dirty_partitions.insert(partition.clone(), img_path);
                 }
             }

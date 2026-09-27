@@ -2,6 +2,7 @@ pub mod add_overlay;
 pub mod avb_descriptor;
 mod axml;
 pub mod boot_spl;
+mod bootimg;
 mod byte_io;
 pub mod dbp;
 pub mod debloat;
