@@ -842,7 +842,7 @@ impl DynoGui {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("➕ Add overlay").clicked()
-                        && let Some(paths) = rfd::FileDialog::new()
+                        && let Some(paths) = list_dialog(&self.add_overlays)
                             .add_filter("Android package", &["apk"])
                             .pick_files()
                     {
@@ -896,7 +896,7 @@ impl DynoGui {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("➕ Add .dbp").clicked()
-                        && let Some(paths) = rfd::FileDialog::new()
+                        && let Some(paths) = list_dialog(&self.plus_patches)
                             .add_filter("DynoBox patch", &["dbp"])
                             .pick_files()
                     {
@@ -920,8 +920,9 @@ impl DynoGui {
     fn io_picker(&mut self, ui: &mut egui::Ui, label: &str, is_input: bool) {
         ui.horizontal(|ui| {
             ui.label(format!("{label}:"));
+            let current = if is_input { &self.input } else { &self.output };
             if ui.button("📁").clicked()
-                && let Some(p) = rfd::FileDialog::new().pick_folder()
+                && let Some(p) = folder_dialog(current.as_deref()).pick_folder()
             {
                 if is_input {
                     self.input = Some(p);
@@ -951,7 +952,7 @@ impl DynoGui {
         ui.horizontal(|ui| {
             ui.label("Manifest signing key:");
             if ui.button("📁").clicked()
-                && let Some(path) = rfd::FileDialog::new()
+                && let Some(path) = file_dialog(self.integrity_key.as_deref())
                     .add_filter("PEM private key", &["pem"])
                     .pick_file()
             {
@@ -980,7 +981,7 @@ impl DynoGui {
     fn apply_section(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("OTA zips").strong());
         if ui.button("+ Add zip(s)").clicked()
-            && let Some(files) = rfd::FileDialog::new()
+            && let Some(files) = list_dialog(&self.ota_zips)
                 .add_filter("ZIP", &["zip"])
                 .pick_files()
         {
@@ -1138,7 +1139,7 @@ impl DynoGui {
                 ui.label("--key:");
                 ui.add(egui::TextEdit::singleline(&mut self.key).hint_text("testkey_rsa4096"));
                 if ui.button("📁").clicked()
-                    && let Some(p) = rfd::FileDialog::new().pick_file()
+                    && let Some(p) = file_dialog(self.key_path.as_deref()).pick_file()
                 {
                     self.key_path = Some(p);
                 }
@@ -1193,7 +1194,7 @@ impl DynoGui {
                 ui.horizontal(|ui| {
                     ui.label("Config JSON:");
                     if ui.button("📁").clicked()
-                        && let Some(p) = rfd::FileDialog::new()
+                        && let Some(p) = file_dialog(self.fuck_lgsi_config.as_deref())
                             .add_filter("JSON", &["json"])
                             .pick_file()
                     {
@@ -1217,7 +1218,7 @@ impl DynoGui {
                 ui.horizontal(|ui| {
                     ui.label("List file:");
                     if ui.button("📁").clicked()
-                        && let Some(p) = rfd::FileDialog::new()
+                        && let Some(p) = file_dialog(self.debloat_list.as_deref())
                             .add_filter("Text", &["txt"])
                             .pick_file()
                     {
@@ -1317,6 +1318,43 @@ impl DynoGui {
     }
 }
 
+/// The nearest existing directory at or above `path`, so a picker still
+/// opens close by after the path was moved or deleted.
+fn existing_dir(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|dir| !dir.as_os_str().is_empty() && dir.is_dir())
+        .map(Path::to_path_buf)
+}
+
+/// A dialog opening in `dir` (or its nearest existing ancestor); without
+/// one the OS falls back to the last folder any picker used.
+fn dialog_in(dir: Option<&Path>) -> rfd::FileDialog {
+    match dir.and_then(existing_dir) {
+        Some(dir) => rfd::FileDialog::new().set_directory(dir),
+        None => rfd::FileDialog::new(),
+    }
+}
+
+/// A folder picker opening inside the folder already picked.
+fn folder_dialog(current: Option<&Path>) -> rfd::FileDialog {
+    dialog_in(current)
+}
+
+/// A file picker opening beside the file already picked, with that file
+/// preselected.
+fn file_dialog(current: Option<&Path>) -> rfd::FileDialog {
+    let dialog = dialog_in(current.and_then(Path::parent));
+    match current.and_then(Path::file_name) {
+        Some(name) => dialog.set_file_name(name.to_string_lossy()),
+        None => dialog,
+    }
+}
+
+/// A picker adding to `list`, opening beside its last entry.
+fn list_dialog(list: &[PathBuf]) -> rfd::FileDialog {
+    dialog_in(list.last().and_then(|p| p.parent()))
+}
+
 /// What a [`path_row`] picker selects.
 enum PathKind {
     Folder,
@@ -1339,12 +1377,13 @@ fn path_row(
     ui.horizontal(|ui| {
         ui.label(label);
         if ui.button("📁").clicked() {
+            let current = value.as_deref();
             let picked = match kind {
-                PathKind::Folder => rfd::FileDialog::new().pick_folder(),
-                PathKind::Open(name, extensions) => rfd::FileDialog::new()
+                PathKind::Folder => folder_dialog(current).pick_folder(),
+                PathKind::Open(name, extensions) => file_dialog(current)
                     .add_filter(name, extensions)
                     .pick_file(),
-                PathKind::Save(name, extensions) => rfd::FileDialog::new()
+                PathKind::Save(name, extensions) => file_dialog(current)
                     .add_filter(name, extensions)
                     .save_file(),
             };
@@ -1763,6 +1802,22 @@ mod tests {
         assert!(!missing.contains(snapshot.output.as_deref().expect("output should be set")));
         // Like --output, the OTA zip to be written is expected not to exist.
         assert!(!missing.contains(snapshot.ota.output.as_deref().expect("OTA output set")));
+
+        std::fs::remove_dir_all(base).expect("remove test directory");
+    }
+
+    #[test]
+    fn pickers_start_from_the_nearest_existing_directory() {
+        let base = std::env::temp_dir().join(format!("dynobox-gui-picker-{}", std::process::id()));
+        std::fs::create_dir_all(base.join("kept")).expect("create test directory");
+
+        assert_eq!(existing_dir(&base.join("kept")), Some(base.join("kept")));
+        // A moved or deleted path falls back to what still exists above it.
+        assert_eq!(
+            existing_dir(&base.join("gone/deeper/file.zip")),
+            Some(base.clone())
+        );
+        assert_eq!(existing_dir(Path::new("")), None);
 
         std::fs::remove_dir_all(base).expect("remove test directory");
     }
