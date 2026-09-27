@@ -1,0 +1,24 @@
+[package]
+name = "dynobox-ota"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "OTA signing keys, certificates, otacerts.zip, and signed A/B OTA packages for DynoBox"
+
+[dependencies]
+anyhow.workspace = true
+crc32fast.workspace = true
+dynobox-core.workspace = true
+flate2.workspace = true
+rand_core = { version = "0.6", features = ["getrandom"] }
+rsa = "0.9"
+sha2.workspace = true
+
+[dev-dependencies]
+avbtool-rs.workspace = true
+dynobox-core = { workspace = true, features = ["testutil"] }
+
+[lints]
+workspace = true

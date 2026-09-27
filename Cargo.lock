@@ -1005,6 +1005,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynobox-ota"
+version = "0.3.4"
+dependencies = [
+ "anyhow",
+ "avbtool-rs",
+ "crc32fast",
+ "dynobox-core",
+ "flate2",
+ "rand_core",
+ "rsa",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "dynobox-payload"
 version = "0.3.4"
 dependencies = [
