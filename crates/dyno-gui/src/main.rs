@@ -204,6 +204,14 @@ impl RunHistory {
         self.entries.truncate(HISTORY_LIMIT);
     }
 
+    /// Entries run in `mode`, newest first, with their index in `entries`.
+    fn for_mode(&self, mode: Mode) -> impl Iterator<Item = (usize, &FormSnapshot)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(move |(_, entry)| entry.mode == mode)
+    }
+
     fn delete(&mut self, index: usize) {
         if index < self.entries.len() {
             self.entries.remove(index);
@@ -740,16 +748,22 @@ impl DynoGui {
         let mut open = self.history_open;
         let mut load = None;
         let mut delete = None;
-        egui::Window::new("Run history")
+        let mode = self.mode;
+        // Fixed id: the title changes with the mode, and the window should
+        // keep its place and size when the mode does.
+        egui::Window::new(format!("Run history: {}", mode.label()))
+            .id(egui::Id::new("run-history"))
             .open(&mut open)
             .default_size([480.0, 400.0])
             .show(ctx, |ui| {
-                if self.history.entries.is_empty() {
-                    ui.label(egui::RichText::new("No previous runs").weak());
+                if self.history.for_mode(mode).next().is_none() {
+                    ui.label(
+                        egui::RichText::new(format!("No previous {} runs", mode.label())).weak(),
+                    );
                     return;
                 }
                 ScrollArea::vertical().show(ui, |ui| {
-                    for (index, entry) in self.history.entries.iter().enumerate() {
+                    for (index, entry) in self.history.for_mode(mode) {
                         ui.horizontal_top(|ui| {
                             let command = entry.command_line();
                             let command_width = (ui.available_width() - 32.0).max(120.0);
@@ -1804,6 +1818,31 @@ mod tests {
         assert!(!missing.contains(snapshot.ota.output.as_deref().expect("OTA output set")));
 
         std::fs::remove_dir_all(base).expect("remove test directory");
+    }
+
+    #[test]
+    fn history_lists_only_the_current_mode_with_global_indices() {
+        let mut history = RunHistory::default();
+        for mode in [Mode::Apply, Mode::Ota, Mode::Apply, Mode::Resign] {
+            let mut gui = populated_gui(mode);
+            gui.key = format!("{mode:?}-{}", history.entries.len());
+            history.insert(FormSnapshot::capture(&gui));
+        }
+        // Newest first: Resign-3, Apply-2, Ota-1, Apply-0.
+        let apply: Vec<(usize, String)> = history
+            .for_mode(Mode::Apply)
+            .map(|(index, entry)| (index, entry.key.clone()))
+            .collect();
+        assert_eq!(
+            apply,
+            [(1, "Apply-2".to_string()), (3, "Apply-0".to_string())]
+        );
+        assert_eq!(history.for_mode(Mode::Unpack).count(), 0);
+
+        // Deleting through a filtered index removes that entry only.
+        history.delete(apply[1].0);
+        assert_eq!(history.for_mode(Mode::Apply).count(), 1);
+        assert_eq!(history.for_mode(Mode::Ota).count(), 1);
     }
 
     #[test]
