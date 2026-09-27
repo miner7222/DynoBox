@@ -946,6 +946,7 @@ version = "0.3.4"
 dependencies = [
  "anyhow",
  "avbtool-rs",
+ "bsdiff-android",
  "crc32fast",
  "dynobox-core",
  "dynobox-ota",
@@ -955,6 +956,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "getrandom 0.4.3",
+ "liblzma",
  "memchr",
  "pkcs8 0.11.0",
  "serde",

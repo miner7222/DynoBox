@@ -170,13 +170,16 @@ impl<'a> PartitionImages<'a> {
 }
 
 /// The parts of an OEM OTA that describe the target build.
-struct Reference {
-    manifest: DeltaArchiveManifest,
-    metadata: OtaMetadata,
-    extras: Vec<ExtraEntry>,
+pub(crate) struct Reference {
+    pub(crate) path: PathBuf,
+    pub(crate) manifest: DeltaArchiveManifest,
+    pub(crate) metadata: OtaMetadata,
+    pub(crate) extras: Vec<ExtraEntry>,
+    /// Absolute file offset of the reference payload's operation data.
+    pub(crate) blob_start: u64,
 }
 
-fn read_reference(path: &Path) -> Result<Reference> {
+pub(crate) fn read_reference(path: &Path) -> Result<Reference> {
     let open = || File::open(path).with_context(|| format!("opening {}", path.display()));
     let mut zip = zip::ZipArchive::new(open()?).context("reading the reference OTA zip")?;
     let mut read = |name: &str| -> Result<Option<Vec<u8>>> {
@@ -211,21 +214,29 @@ fn read_reference(path: &Path) -> Result<Reference> {
         .context("reference OTA has no payload.bin")?
         .data_start()
         .ok_or_else(|| anyhow!("reference payload.bin offset unknown"))?;
-    let manifest = dynobox_ota::payload::read_manifest(&mut open()?, payload_start)?;
+    let payload = dynobox_ota::payload::read_manifest(&mut open()?, payload_start)?;
     Ok(Reference {
-        manifest,
+        path: path.to_path_buf(),
+        manifest: payload.manifest,
         metadata,
         extras,
+        blob_start: payload_start + payload.blob_offset,
     })
 }
 
-/// Inputs for [`generate_full_ota`].
+/// Inputs for [`generate_ota`].
 #[derive(Debug, Clone)]
-pub struct FullOtaRequest {
-    /// DynoBox firmware or image directory holding the build to install.
+pub struct OtaRequest {
+    /// Firmware or image directory holding the build currently on the
+    /// device. `None` builds a full OTA that installs over any build.
+    pub source: Option<PathBuf>,
+    /// Firmware or image directory holding the build to install.
     pub target: PathBuf,
-    /// An OEM OTA (full or incremental) whose target is the same build; it
-    /// supplies the partition list, sizes and package metadata.
+    /// OEM OTA whose target is the same build as `target`. For an
+    /// incremental OTA it must be the OEM incremental from the source's stock
+    /// build; for a full OTA any OEM OTA to the target build works. It
+    /// supplies partition sizes and metadata, and, for incrementals, the
+    /// operations that are reused.
     pub reference: PathBuf,
     pub key: PathBuf,
     pub cert: PathBuf,
@@ -239,7 +250,11 @@ pub struct FullOtaRequest {
 pub struct GeneratedOta {
     pub partitions: usize,
     pub size: u64,
+    /// Operation totals for an incremental OTA.
+    pub incremental: Option<RebaseStats>,
 }
+
+pub use crate::ota_rebase::RebaseStats;
 
 fn cow_free_dynamic_metadata(manifest: &DeltaArchiveManifest) -> Result<()> {
     if manifest
@@ -256,9 +271,9 @@ fn cow_free_dynamic_metadata(manifest: &DeltaArchiveManifest) -> Result<()> {
     Ok(())
 }
 
-/// Build a full (source-independent) OTA of `request.target`, signed with
-/// `request.key`. The package installs on any build of the same device.
-pub fn generate_full_ota<S>(request: &FullOtaRequest, events: &mut S) -> Result<GeneratedOta>
+/// Build a signed A/B OTA of `request.target`: incremental from
+/// `request.source` when given, otherwise full.
+pub fn generate_ota<S>(request: &OtaRequest, events: &mut S) -> Result<GeneratedOta>
 where
     S: EventSink + ?Sized,
 {
@@ -285,15 +300,40 @@ where
 
     let reference = read_reference(&request.reference)?;
     cow_free_dynamic_metadata(&reference.manifest)?;
+    if request.source.is_some() && reference.manifest.minor_version.unwrap_or(0) == 0 {
+        bail!(
+            "an incremental OTA needs an OEM incremental reference (from the source's stock \
+             build to the target's); {} is a full OTA",
+            request.reference.display()
+        );
+    }
     check_target_avb(&request.target, request.allow_avb_mismatch, events)?;
     let block_size = reference.manifest.block_size.unwrap_or(4096);
-    let scratch = pipeline::create_pipeline_temp_root(&request.output)?;
-    let mut images = PartitionImages::new(&request.target, scratch.path())?;
+    // Scratch can reach several GB; keep it beside the output rather than in
+    // the system temp directory, even for a bare relative output name.
+    let scratch = pipeline::create_pipeline_temp_root(&std::path::absolute(&request.output)?)?;
+    let (source_scratch, target_scratch) =
+        (scratch.path().join("source"), scratch.path().join("target"));
+    fs::create_dir_all(&source_scratch)?;
+    fs::create_dir_all(&target_scratch)?;
+    let mut targets = PartitionImages::new(&request.target, &target_scratch)?;
+    let mut sources = match &request.source {
+        Some(dir) => Some(PartitionImages::new(dir, &source_scratch)?),
+        None => None,
+    };
+    let mut reference_blobs = match sources {
+        Some(_) => Some(crate::ota_rebase::ReferenceBlobs::open(
+            &reference.path,
+            reference.blob_start,
+        )?),
+        None => None,
+    };
 
     let blob_path = scratch.path().join("blobs.bin");
     let mut blobs = BufWriter::new(File::create(&blob_path)?);
     let total = reference.manifest.partitions.len();
     let mut partitions = Vec::with_capacity(total);
+    let mut totals = RebaseStats::default();
     for (index, reference_partition) in reference.manifest.partitions.iter().enumerate() {
         let name = &reference_partition.partition_name;
         let size = reference_partition
@@ -307,51 +347,131 @@ where
             total,
             item: name.clone(),
         });
-        let mut source = images.open(name, size, events)?;
-        let encoded = dynobox_ota::full::encode_partition(
-            &mut source,
-            size,
-            block_size,
-            &mut blobs,
-            |done| {
-                events.emit(ProgressEvent::ItemProgress {
-                    stage: StageKind::Ota,
-                    item: name.clone(),
-                    done,
-                    total: size,
-                    unit: ProgressUnit::Bytes,
-                })
-            },
-        )
-        .with_context(|| format!("encoding partition `{name}`"))?;
-        partitions.push(PartitionUpdate {
-            partition_name: name.clone(),
-            run_postinstall: reference_partition.run_postinstall,
-            postinstall_path: reference_partition.postinstall_path.clone(),
-            filesystem_type: reference_partition.filesystem_type.clone(),
-            postinstall_optional: reference_partition.postinstall_optional,
-            version: reference_partition.version.clone(),
-            new_partition_info: Some(PartitionInfo {
-                size: Some(size),
-                hash: Some(encoded.hash.to_vec()),
-            }),
-            operations: encoded.operations,
-            ..Default::default()
-        });
+        let partition = match (&mut sources, &mut reference_blobs) {
+            (Some(sources), Some(reference_blobs)) => {
+                let old_size = reference_partition
+                    .old_partition_info
+                    .as_ref()
+                    .and_then(|info| info.size)
+                    .unwrap_or(0);
+                let source_path = match old_size {
+                    0 => None,
+                    _ => Some(sources.locate(name, old_size, events)?),
+                };
+                let target_path = targets.locate(name, size, events)?;
+                let (update, stats) = crate::ota_rebase::rebase_partition(
+                    reference_partition,
+                    crate::ota_rebase::PartitionInputs {
+                        source: source_path.as_deref(),
+                        target: &target_path,
+                        probe: scratch.path().join(format!("{name}.probe")),
+                    },
+                    block_size,
+                    reference_blobs,
+                    &mut blobs,
+                    |done, ops| {
+                        events.emit(ProgressEvent::ItemProgress {
+                            stage: StageKind::Ota,
+                            item: name.clone(),
+                            done: done as u64,
+                            total: ops as u64,
+                            unit: ProgressUnit::Ops,
+                        })
+                    },
+                )
+                .with_context(|| format!("rebasing partition `{name}`"))?;
+                if stats.regenerated() + stats.filled > 0 {
+                    message(
+                        events,
+                        &format!(
+                            "ota {name}: {} reused; regenerated {} (source changed), {} (target changed), {} (not replayable); {} added",
+                            stats.kept,
+                            stats.source_changed,
+                            stats.target_changed,
+                            stats.unreplayable,
+                            stats.filled
+                        ),
+                    );
+                }
+                totals.add(&stats);
+                update
+            }
+            _ => {
+                let mut source = targets.open(name, size, events)?;
+                let encoded = dynobox_ota::full::encode_partition(
+                    &mut source,
+                    size,
+                    block_size,
+                    &mut blobs,
+                    |done| {
+                        events.emit(ProgressEvent::ItemProgress {
+                            stage: StageKind::Ota,
+                            item: name.clone(),
+                            done,
+                            total: size,
+                            unit: ProgressUnit::Bytes,
+                        })
+                    },
+                )
+                .with_context(|| format!("encoding partition `{name}`"))?;
+                PartitionUpdate {
+                    partition_name: name.clone(),
+                    run_postinstall: reference_partition.run_postinstall,
+                    postinstall_path: reference_partition.postinstall_path.clone(),
+                    filesystem_type: reference_partition.filesystem_type.clone(),
+                    postinstall_optional: reference_partition.postinstall_optional,
+                    version: reference_partition.version.clone(),
+                    new_partition_info: Some(PartitionInfo {
+                        size: Some(size),
+                        hash: Some(encoded.hash.to_vec()),
+                    }),
+                    operations: encoded.operations,
+                    ..Default::default()
+                }
+            }
+        };
+        partitions.push(partition);
     }
     drop(blobs);
 
-    let manifest = DeltaArchiveManifest {
-        block_size: Some(block_size),
-        minor_version: Some(0),
-        partitions,
-        max_timestamp: reference.manifest.max_timestamp,
-        dynamic_partition_metadata: reference.manifest.dynamic_partition_metadata.clone(),
-        partial_update: reference.manifest.partial_update,
-        apex_info: reference.manifest.apex_info.clone(),
-        security_patch_level: reference.manifest.security_patch_level.clone(),
-        ..Default::default()
+    let (manifest, metadata) = if request.source.is_some() {
+        // Same payload shape as the OEM incremental, and the OEM's
+        // preconditions pin the source build.
+        let mut manifest = reference.manifest.clone();
+        manifest.partitions = partitions;
+        manifest.signatures_offset = None;
+        manifest.signatures_size = None;
+        (manifest, reference.metadata.clone())
+    } else {
+        let manifest = DeltaArchiveManifest {
+            block_size: Some(block_size),
+            minor_version: Some(0),
+            partitions,
+            max_timestamp: reference.manifest.max_timestamp,
+            dynamic_partition_metadata: reference.manifest.dynamic_partition_metadata.clone(),
+            partial_update: reference.manifest.partial_update,
+            apex_info: reference.manifest.apex_info.clone(),
+            security_patch_level: reference.manifest.security_patch_level.clone(),
+            ..Default::default()
+        };
+        // A full OTA may be installed over any build of this device.
+        let metadata = OtaMetadata {
+            r#type: OtaType::Ab as i32,
+            precondition: Some(DeviceState {
+                device: reference
+                    .metadata
+                    .precondition
+                    .as_ref()
+                    .map(|p| p.device.clone())
+                    .unwrap_or_default(),
+                ..Default::default()
+            }),
+            postcondition: reference.metadata.postcondition.clone(),
+            ..Default::default()
+        };
+        (manifest, metadata)
     };
+
     let payload_path = scratch.path().join("payload.bin");
     message(events, "ota: signing payload.bin");
     let summary = {
@@ -364,22 +484,6 @@ where
         )?
     };
     fs::remove_file(&blob_path)?;
-
-    // A full OTA may be installed over any build of this device.
-    let metadata = OtaMetadata {
-        r#type: OtaType::Ab as i32,
-        precondition: Some(DeviceState {
-            device: reference
-                .metadata
-                .precondition
-                .as_ref()
-                .map(|p| p.device.clone())
-                .unwrap_or_default(),
-            ..Default::default()
-        }),
-        postcondition: reference.metadata.postcondition.clone(),
-        ..Default::default()
-    };
     message(events, "ota: writing and signing the package");
     dynobox_ota::package::write_package(
         &request.output,
@@ -403,6 +507,7 @@ where
     Ok(GeneratedOta {
         partitions: total,
         size: fs::metadata(&request.output)?.len(),
+        incremental: request.source.as_ref().map(|_| totals),
     })
 }
 

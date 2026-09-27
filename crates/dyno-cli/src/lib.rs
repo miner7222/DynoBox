@@ -460,16 +460,22 @@ enum OtaCommand {
         #[arg(long, default_value = "DynoBox OTA")]
         subject: String,
     },
-    /// Build a full, signed A/B OTA of a DynoBox firmware or image directory.
-    /// It installs over any build of the device whose otacerts.zip trusts
-    /// `--cert` (see the `ota_cert` .dbp op)
+    /// Build a signed A/B OTA of a DynoBox firmware or image directory for a
+    /// device whose otacerts.zip trusts `--cert` (see the `ota_cert` .dbp
+    /// op). With `--source` the OTA is incremental and reuses the OEM
+    /// incremental's operations; without it the OTA is full
     Generate {
+        /// Firmware or image directory holding the build now on the device
+        /// (exactly as flashed). Omit for a full OTA
+        #[arg(long, value_name = "DIR")]
+        source: Option<PathBuf>,
+
         /// Firmware or image directory holding the build to install
         #[arg(long, value_name = "DIR")]
         target: PathBuf,
 
-        /// OEM OTA (full or incremental) that updates to the same build; it
-        /// supplies the partition list, sizes and package metadata
+        /// OEM OTA that updates to the target's stock build. With `--source`
+        /// it must be the OEM incremental from the source's stock build
         #[arg(long, value_name = "OTA_ZIP")]
         reference: PathBuf,
 
@@ -1031,6 +1037,7 @@ where
         Commands::Ota {
             command:
                 OtaCommand::Generate {
+                    source,
                     target,
                     reference,
                     key,
@@ -1039,7 +1046,8 @@ where
                     allow_avb_mismatch,
                 },
         } => {
-            let request = dynobox_app::ota::FullOtaRequest {
+            let request = dynobox_app::ota::OtaRequest {
+                source,
                 target,
                 reference,
                 key,
@@ -1048,12 +1056,8 @@ where
                 allow_avb_mismatch,
             };
             let generated = match cli.progress_format {
-                ProgressFormat::Text => {
-                    dynobox_app::ota::generate_full_ota(&request, &mut text_sink)
-                }
-                ProgressFormat::Jsonl => {
-                    dynobox_app::ota::generate_full_ota(&request, &mut jsonl_sink)
-                }
+                ProgressFormat::Text => dynobox_app::ota::generate_ota(&request, &mut text_sink),
+                ProgressFormat::Jsonl => dynobox_app::ota::generate_ota(&request, &mut jsonl_sink),
             }?;
             info!(
                 "ota: {} ({} partitions, {} bytes), verified",
@@ -1061,6 +1065,16 @@ where
                 generated.partitions,
                 generated.size
             );
+            if let Some(stats) = generated.incremental {
+                info!(
+                    "ota: {} OEM operations reused; regenerated {} (source changed), {} (target changed), {} (not replayable); {} added",
+                    stats.kept,
+                    stats.source_changed,
+                    stats.target_changed,
+                    stats.unreplayable,
+                    stats.filled
+                );
+            }
             Ok(())
         }
         Commands::Ota {
@@ -1101,11 +1115,92 @@ mod tests {
 
     use super::render::TextPathShortener;
     use super::{
-        ApplyResignOptions, Cli, Commands, default_public_key_path, parse_apply_positional_args,
-        validate_apply_resign_options,
+        ApplyResignOptions, Cli, Commands, OtaCommand, default_public_key_path,
+        parse_apply_positional_args, validate_apply_resign_options,
     };
     use dynobox_app::{CommandKind, MessageLevel, ProgressEvent, StageKind};
     use std::path::PathBuf;
+
+    #[test]
+    fn cli_parses_ota_subcommands() {
+        let full = Cli::try_parse_from([
+            "dynobox",
+            "ota",
+            "generate",
+            "--target",
+            "b",
+            "--reference",
+            "ref.zip",
+            "--key",
+            "ota.key",
+            "--cert",
+            "ota.crt",
+            "-o",
+            "out.zip",
+        ])
+        .unwrap();
+        let Commands::Ota {
+            command:
+                OtaCommand::Generate {
+                    source,
+                    allow_avb_mismatch,
+                    ..
+                },
+        } = full.command
+        else {
+            panic!("expected ota generate");
+        };
+        assert_eq!((source, allow_avb_mismatch), (None, false));
+
+        let incremental = Cli::try_parse_from([
+            "dynobox",
+            "ota",
+            "generate",
+            "--source",
+            "a",
+            "--target",
+            "b",
+            "--reference",
+            "ref.zip",
+            "--key",
+            "k",
+            "--cert",
+            "c",
+            "-o",
+            "o.zip",
+            "--allow-avb-mismatch",
+        ])
+        .unwrap();
+        let Commands::Ota {
+            command:
+                OtaCommand::Generate {
+                    source,
+                    allow_avb_mismatch,
+                    ..
+                },
+        } = incremental.command
+        else {
+            panic!("expected ota generate");
+        };
+        assert_eq!(
+            (source, allow_avb_mismatch),
+            (Some(PathBuf::from("a")), true)
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "dynobox", "ota", "keygen", "--key", "k", "--cert", "c", "--bits", "1024"
+            ])
+            .is_err()
+        );
+        let verify = Cli::try_parse_from(["dynobox", "ota", "verify", "-i", "o.zip"]).unwrap();
+        assert!(matches!(
+            verify.command,
+            Commands::Ota {
+                command: OtaCommand::Verify { cert: None, .. }
+            }
+        ));
+    }
 
     #[test]
     fn cli_parses_manifest_signing_and_trusted_key_options() {

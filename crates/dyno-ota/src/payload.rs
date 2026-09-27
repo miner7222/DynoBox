@@ -139,10 +139,18 @@ pub fn write_signed_payload(
     })
 }
 
+/// An unverified payload manifest plus where its operation data begins.
+#[derive(Debug, Clone)]
+pub struct PayloadManifest {
+    pub manifest: DeltaArchiveManifest,
+    /// Offset of the blob section from the start of the payload.
+    pub blob_offset: u64,
+}
+
 /// Read the manifest of a payload at `start` without checking signatures,
 /// e.g. from an OEM reference OTA signed with a key the caller cannot
 /// trust.
-pub fn read_manifest(reader: &mut (impl Read + Seek), start: u64) -> Result<DeltaArchiveManifest> {
+pub fn read_manifest(reader: &mut (impl Read + Seek), start: u64) -> Result<PayloadManifest> {
     let mut header = [0u8; HEADER_LEN as usize];
     reader.seek(SeekFrom::Start(start))?;
     reader.read_exact(&mut header)?;
@@ -157,9 +165,16 @@ pub fn read_manifest(reader: &mut (impl Read + Seek), start: u64) -> Result<Delt
     if manifest_len > 64 << 20 {
         bail!("payload manifest of {manifest_len} bytes is implausibly large");
     }
+    let metadata_signature_len = u64::from(u32::from_be_bytes(
+        header[20..24].try_into().expect("4 bytes"),
+    ));
     let mut manifest = vec![0u8; manifest_len as usize];
     reader.read_exact(&mut manifest)?;
-    DeltaArchiveManifest::decode(&manifest[..]).context("decoding payload manifest")
+    Ok(PayloadManifest {
+        manifest: DeltaArchiveManifest::decode(&manifest[..])
+            .context("decoding payload manifest")?,
+        blob_offset: HEADER_LEN + manifest_len + metadata_signature_len,
+    })
 }
 
 /// A payload whose signatures and properties were checked.

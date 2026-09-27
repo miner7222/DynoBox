@@ -9,6 +9,7 @@ description = "Application-layer command API and progress events for DynoBox"
 
 [dependencies]
 anyhow.workspace = true
+bsdiff-android = "0.0.2"
 avbtool-rs.workspace = true
 dynobox-core.workspace = true
 dynobox-ota.workspace = true
@@ -17,6 +18,7 @@ dynobox-super.workspace = true
 dynobox-xml.workspace = true
 memchr.workspace = true
 flate2.workspace = true
+liblzma = "0.4"
 zopfli.workspace = true
 sha2.workspace = true
 sha1.workspace = true
