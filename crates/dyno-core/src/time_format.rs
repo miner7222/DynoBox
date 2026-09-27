@@ -1,6 +1,6 @@
 //! Shared Unix-timestamp formatting helpers.
 //!
-//! Both `pipeline::confirm_rollback_change` (renders `ctime`-style
+//! Both dyno-app's `pipeline::confirm_rollback_change` (renders `ctime`-style
 //! UTC dates for the rollback confirmation prompt) and
 //! `report::PipelineReport::now` (ISO-8601 timestamps for the
 //! HTML report) used to hand-roll Howard Hinnant's civil-from-days
