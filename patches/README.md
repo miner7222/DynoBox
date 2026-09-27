@@ -508,7 +508,9 @@ while still advancing the setup wizard.
   see [`ota_cert`](#ota_cert). Also stops LenovoOTA/UDSEngine from querying
   Lenovo's update server and always shows *Local install* in the System
   update menu (installs `/sdcard/ota.zip`), so keep both apps out of your
-  debloat list
+  debloat list. An update between two builds of one stock version reports
+  success too (Lenovo compares version strings; a slot rollback would also
+  read as success)
 * **`debloat-common.dbp`**
 * **`debloat-wuji.dbp`**
 * **`enable-adb-debug.dbp`**

@@ -48,6 +48,21 @@ class = "Lcom/lenovo/tbengine/core/policy/OtaPolicy;"
 method = "isCSDK_CHECKING_UPDATE_ENABLE"
 value = false
 
+# After the reboot, UDSEngine reports success only when
+# ro.build.version.incremental changed, so an update between two builds of
+# one stock version always reads as failed. Treat the recorded pre-update
+# version as never equal. Trade-off: a slot rollback also reads as success.
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/UDSEngine/UDSEngine.apk"
+scan_class = "Lcom/lenovo/tbengine/core/services/SwfABComplete;"
+scan_method = "showUpdateResultNotice"
+target_class = "Ljava/lang/String;"
+target_method = "equals"
+proto = "(Ljava/lang/Object;)Z"
+value = false
+
 # Show "Local install" in the System update menu without the six-tap
 # unlock: `if (mCount < 6) hide` becomes a jump to `setVisible(true)`.
 [[op]]
