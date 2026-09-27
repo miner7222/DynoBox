@@ -276,6 +276,16 @@ pub enum DbpOp {
         #[serde(default)]
         all: bool,
     },
+    /// Replace an `otacerts.zip` with one that trusts only `cert` (a PEM or DER
+    /// X.509 certificate; a relative path resolves against the `.dbp` file),
+    /// rebuilt at the original byte size. update_engine, recovery and the
+    /// framework's `RecoverySystem` then accept only OTAs signed with that
+    /// certificate's key.
+    OtaCert {
+        partition: String,
+        file: String,
+        cert: String,
+    },
     /// Replace the data of STORED zip entries with `payload` (whitespace-
     /// separated hex bytes), zero-padding to each entry's original data
     /// length, and fix the CRC32 in both headers. All `entries` must resolve
@@ -444,6 +454,7 @@ impl DbpOp {
             | DbpOp::ResourceBool { partition, .. }
             | DbpOp::ResourceDimen { partition, .. }
             | DbpOp::TextReplace { partition, .. }
+            | DbpOp::OtaCert { partition, .. }
             | DbpOp::ZipEntryReplace { partition, .. }
             | DbpOp::LayoutCollapse { partition, .. }
             | DbpOp::LayoutBackground { partition, .. }
@@ -471,6 +482,7 @@ impl DbpOp {
             | DbpOp::ResourceBool { file, .. }
             | DbpOp::ResourceDimen { file, .. }
             | DbpOp::TextReplace { file, .. }
+            | DbpOp::OtaCert { file, .. }
             | DbpOp::ZipEntryReplace { file, .. }
             | DbpOp::LayoutCollapse { file, .. }
             | DbpOp::LayoutBackground { file, .. }
@@ -486,8 +498,9 @@ impl DbpOp {
         }
     }
 
-    fn is_text_replace(&self) -> bool {
-        matches!(self, DbpOp::TextReplace { .. })
+    /// Ops that rewrite a regular file's bytes rather than an archive entry.
+    fn is_raw_file_op(&self) -> bool {
+        matches!(self, DbpOp::TextReplace { .. } | DbpOp::OtaCert { .. })
     }
 }
 
@@ -526,7 +539,7 @@ fn resource_name_is_safe(resource: &str) -> bool {
 pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading .dbp file {}", path.display()))?;
-    let doc: DbpDocument =
+    let mut doc: DbpDocument =
         toml::from_str(&text).with_context(|| format!("parsing .dbp file {}", path.display()))?;
     if doc.ops.is_empty() {
         return Err(anyhow!("{}: .dbp has no [[op]] entries", path.display()));
@@ -813,6 +826,13 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
                     return Err(bail(format!(
                         "resource dimension `{resource}` value {dp}dp out of range (0..=16777215)"
                     )));
+                }
+            }
+            DbpOp::OtaCert { cert, .. } => {
+                if cert.trim().is_empty() {
+                    return Err(bail(
+                        "ota_cert `cert` must name a certificate file".to_string(),
+                    ));
                 }
             }
             DbpOp::TextReplace { from, to, .. } => {
@@ -1106,7 +1126,29 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
             }
         }
     }
+    resolve_ota_certs(path, &mut doc)?;
     Ok(doc)
+}
+
+/// Resolve each `ota_cert` path against the `.dbp` file's directory and check
+/// it parses, so a bad certificate fails before any image is touched.
+fn resolve_ota_certs(dbp_path: &Path, doc: &mut DbpDocument) -> Result<()> {
+    let base = dbp_path.parent().unwrap_or(Path::new(""));
+    for op in &mut doc.ops {
+        let DbpOp::OtaCert { cert, .. } = op else {
+            continue;
+        };
+        let resolved = base.join(&*cert);
+        dynobox_ota::Certificate::load(&resolved).with_context(|| {
+            format!(
+                "{}: patch `{}`: ota_cert `cert`",
+                dbp_path.display(),
+                doc.name
+            )
+        })?;
+        *cert = resolved.to_string_lossy().into_owned();
+    }
+    Ok(())
 }
 
 fn validate_method_proto(
@@ -1336,14 +1378,14 @@ fn apply_ops_to_file(
     file: &str,
     ops: &[&DbpOp],
 ) -> Result<Option<DbpFileResult>> {
-    let has_text_ops = ops.iter().any(|op| op.is_text_replace());
-    if has_text_ops && !ops.iter().all(|op| op.is_text_replace()) {
+    let has_raw_ops = ops.iter().any(|op| op.is_raw_file_op());
+    if has_raw_ops && !ops.iter().all(|op| op.is_raw_file_op()) {
         return Err(anyhow!(
-            "{file} mixes text_replace with archive patch ops; split them into separate files"
+            "{file} mixes raw-file ops (text_replace, ota_cert) with archive patch ops;              split them into separate files"
         ));
     }
-    if has_text_ops {
-        apply_text_ops_to_file(image_path, file, ops)
+    if has_raw_ops {
+        apply_raw_file_ops(image_path, file, ops)
     } else {
         apply_ops_to_apk(image_path, file, ops)
     }
@@ -1372,7 +1414,7 @@ fn read_file_from_ext4(image_path: &Path, file: &str) -> Result<Option<Ext4FileC
     Ok(Some((bytes, extents, block_size)))
 }
 
-fn apply_text_ops_to_file(
+fn apply_raw_file_ops(
     image_path: &Path,
     file: &str,
     ops: &[&DbpOp],
@@ -1384,18 +1426,24 @@ fn apply_text_ops_to_file(
         return Ok(None);
     }
 
+    let original = bytes.clone();
     let mut op_landed = vec![false; ops.len()];
     for (i, op) in ops.iter().enumerate() {
-        let DbpOp::TextReplace { from, to, all, .. } = op else {
-            unreachable!("caller filtered non-text ops");
+        op_landed[i] = match op {
+            DbpOp::TextReplace { from, to, all, .. } => {
+                patch_text_replacement(&mut bytes, from.as_bytes(), to.as_bytes(), *all) > 0
+            }
+            DbpOp::OtaCert { cert, .. } => {
+                replace_otacerts(&mut bytes, Path::new(cert))
+                    .with_context(|| format!("ota_cert on {file}"))?;
+                true
+            }
+            _ => unreachable!("caller filtered archive ops"),
         };
-        if patch_text_replacement(&mut bytes, from.as_bytes(), to.as_bytes(), *all) > 0 {
-            op_landed[i] = true;
-        }
     }
 
     let ops_applied = op_landed.iter().filter(|&&b| b).count();
-    if ops_applied > 0 {
+    if bytes != original {
         write_via_extents(image_path, &bytes, &extents, block_size)?;
     }
     Ok(Some(DbpFileResult {
@@ -1409,6 +1457,17 @@ fn apply_text_ops_to_file(
             Vec::new()
         },
     }))
+}
+
+/// Rebuild `bytes` (an existing `otacerts.zip`) as a same-size bundle that
+/// trusts only the certificate at `cert_path`. Refuses a file that is not a
+/// certificate bundle, so a mistyped `file` cannot clobber unrelated data.
+fn replace_otacerts(bytes: &mut Vec<u8>, cert_path: &Path) -> Result<()> {
+    dynobox_ota::otacerts::read_certificates(bytes)
+        .context("target is not an otacerts.zip certificate bundle")?;
+    let cert = dynobox_ota::Certificate::load(cert_path)?;
+    *bytes = dynobox_ota::otacerts::build_with_size(&cert, bytes.len())?;
+    Ok(())
 }
 
 /// Overwrite `from` with `to` in place (identical byte length, size-preserving)
@@ -1893,7 +1952,7 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
             Ok(hit > 0)
         }
         DbpOp::ResourceBool { .. } | DbpOp::ResourceDimen { .. } => Ok(false),
-        DbpOp::TextReplace { .. } => Ok(false),
+        DbpOp::TextReplace { .. } | DbpOp::OtaCert { .. } => Ok(false),
         // File-level ops: handled against whole-archive bytes in
         // `apply_ops_to_apk`, never against a dex slice.
         DbpOp::ZipEntryReplace { .. } => Ok(false),

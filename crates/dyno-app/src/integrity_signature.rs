@@ -402,7 +402,7 @@ fn write_atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn write_atomic_noclobber(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
+pub(crate) fn write_atomic_noclobber(path: &Path, bytes: &[u8], private: bool) -> Result<()> {
     let parent = parent_dir(path)?;
     fs::create_dir_all(parent)?;
     let file_name = utf8_file_name(path)?;

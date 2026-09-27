@@ -430,6 +430,45 @@ enum Commands {
         #[arg(long, value_name = "PUBLIC_KEY_PEM")]
         public_key: Option<PathBuf>,
     },
+    /// Custom OTA signing and generation
+    Ota {
+        #[command(subcommand)]
+        command: OtaCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum OtaCommand {
+    /// Generate an RSA OTA signing key and a self-signed certificate. Put the
+    /// certificate in an `ota_cert` .dbp op so the patched firmware trusts
+    /// only OTAs signed with this key
+    Keygen {
+        /// Destination for the PKCS#8 private key PEM (must not already exist)
+        #[arg(long, value_name = "KEY_PEM")]
+        key: PathBuf,
+
+        /// Destination for the X.509 certificate PEM (must not already exist)
+        #[arg(long, value_name = "CERT_PEM")]
+        cert: PathBuf,
+
+        /// RSA key size. 2048 fits the stock otacerts.zip without compression,
+        /// which keeps patched images byte-reproducible across releases
+        #[arg(long, default_value_t = 2048, value_parser = parse_ota_key_bits)]
+        bits: usize,
+
+        /// Certificate subject common name
+        #[arg(long, default_value = "DynoBox OTA")]
+        subject: String,
+    },
+}
+
+fn parse_ota_key_bits(value: &str) -> Result<usize, String> {
+    match value.parse::<usize>() {
+        Ok(bits @ (2048 | 4096)) => Ok(bits),
+        _ => Err(format!(
+            "`{value}` is not a supported OTA key size (2048 or 4096)"
+        )),
+    }
 }
 
 fn setup_logging() {
@@ -931,6 +970,22 @@ where
             println!("Generated Ed25519 integrity key: {key_id}");
             println!("Private key: {}", private_key.display());
             println!("Public key:  {}", public_key.display());
+            Ok(())
+        }
+        Commands::Ota {
+            command:
+                OtaCommand::Keygen {
+                    key,
+                    cert,
+                    bits,
+                    subject,
+                },
+        } => {
+            let generated = dynobox_app::ota::generate_ota_keypair(&key, &cert, bits, &subject)?;
+            println!("Generated {}-bit OTA signing key", generated.bits);
+            println!("Private key: {}", key.display());
+            println!("Certificate: {}", cert.display());
+            println!("Certificate SHA-256: {}", generated.cert_sha256);
             Ok(())
         }
     }

@@ -916,6 +916,73 @@ value = false
     assert!(parts.contains("system"));
 }
 
+/// A self-signed OTA certificate written to `dir/name`, plus its key.
+fn write_test_ota_cert(dir: &Path, name: &str) -> dynobox_ota::OtaSigningKey {
+    let pem = avbtool_rs::crypto::get_embedded_key("testkey_rsa2048").unwrap();
+    let key = dynobox_ota::OtaSigningKey::from_bytes(pem.as_bytes()).unwrap();
+    let cert = dynobox_ota::Certificate::self_signed(&key, "DynoBox OTA", 1_790_467_200).unwrap();
+    std::fs::write(dir.join(name), cert.to_pem()).unwrap();
+    key
+}
+
+#[test]
+fn ota_cert_op_resolves_cert_relative_to_the_dbp() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("keys")).unwrap();
+    write_test_ota_cert(&dir.path().join("keys"), "ota.crt");
+    let dbp = dir.path().join("ota.dbp");
+    std::fs::write(
+        &dbp,
+        r#"name = "ota"
+[[op]]
+kind = "ota_cert"
+partition = "system"
+file = "system/etc/security/otacerts.zip"
+cert = "keys/ota.crt"
+"#,
+    )
+    .unwrap();
+    let doc = load_dbp(&dbp).unwrap();
+    let DbpOp::OtaCert { cert, .. } = &doc.ops[0] else {
+        panic!("expected ota_cert, got {:?}", doc.ops[0]);
+    };
+    assert_eq!(Path::new(cert), dir.path().join("keys").join("ota.crt"));
+
+    // A missing or unparsable certificate fails at load time.
+    std::fs::write(dir.path().join("keys/ota.crt"), b"not a certificate").unwrap();
+    let err = format!("{:#}", load_dbp(&dbp).unwrap_err());
+    assert!(err.contains("ota_cert `cert`"), "{err}");
+    std::fs::remove_file(dir.path().join("keys/ota.crt")).unwrap();
+    assert!(load_dbp(&dbp).is_err());
+}
+
+#[test]
+fn ota_cert_replaces_the_stock_bundle_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = write_test_ota_cert(dir.path(), "ota.crt");
+    let stock = include_bytes!("../../dyno-ota/testdata/tb323-otacerts.zip");
+
+    let mut bytes = stock.to_vec();
+    replace_otacerts(&mut bytes, &dir.path().join("ota.crt")).unwrap();
+    assert_eq!(bytes.len(), stock.len());
+    let certs = dynobox_ota::otacerts::read_certificates(&bytes).unwrap();
+    assert_eq!(certs.len(), 1);
+    assert!(certs[0].matches_key(&key));
+
+    // Re-running is idempotent.
+    let again = bytes.clone();
+    replace_otacerts(&mut bytes, &dir.path().join("ota.crt")).unwrap();
+    assert_eq!(bytes, again);
+
+    // Anything that is not a certificate bundle is left alone.
+    let mut not_a_bundle = b"ro.build.version.security_patch=2026-08-05
+"
+    .to_vec();
+    let before = not_a_bundle.clone();
+    assert!(replace_otacerts(&mut not_a_bundle, &dir.path().join("ota.crt")).is_err());
+    assert_eq!(not_a_bundle, before);
+}
+
 fn patches_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches")
 }
@@ -7635,6 +7702,7 @@ fn audit_op_kind(op: &DbpOp) -> &'static str {
         DbpOp::ResourceBool { .. } => "resource_bool",
         DbpOp::ResourceDimen { .. } => "resource_dimen",
         DbpOp::TextReplace { .. } => "text_replace",
+        DbpOp::OtaCert { .. } => "ota_cert",
         DbpOp::ZipEntryReplace { .. } => "zip_entry_replace",
         DbpOp::LayoutCollapse { .. } => "layout_collapse",
         DbpOp::LayoutBackground { .. } => "layout_background",
@@ -7704,6 +7772,7 @@ fn audit_op_label(op: &DbpOp) -> String {
         DbpOp::ResourceDimen { resource, dp, .. } => {
             format!("arsc dimen {resource} -> {dp}dp")
         }
+        DbpOp::OtaCert { cert, .. } => format!("trust only {cert}"),
         DbpOp::TextReplace { from, to, all, .. } => {
             let truncate = |s: &str| {
                 let s = s.replace('\n', "\\n");

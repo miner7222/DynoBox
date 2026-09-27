@@ -14,6 +14,7 @@ pub mod fuck_lgsi;
 pub mod info;
 pub mod integrity;
 pub mod integrity_signature;
+pub mod ota;
 pub mod pipeline;
 pub mod report;
 mod spl;

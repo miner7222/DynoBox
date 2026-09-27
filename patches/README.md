@@ -231,6 +231,31 @@ property-file edits where growing the ext4 file would be unnecessary risk.
 | `to`   | yes      | replacement text/bytes; same byte length as `from` |
 | `all`  | no       | replace every match instead of just the first (default `false`) |
 
+### `ota_cert`
+
+Replace an `otacerts.zip` with a same-size bundle that trusts only your OTA
+signing certificate. update_engine, recovery and the framework's
+`RecoverySystem` then accept only OTAs signed with that key, so stock OTAs are
+refused and DynoBox-generated ones install. Create the key and certificate
+with `dynobox ota keygen --key ota.key --cert ota.crt`; keep `ota.key` private
+and outside the firmware tree.
+
+| field  | required | meaning                                  |
+|--------|----------|------------------------------------------|
+| `cert` | yes      | PEM or DER certificate; a relative path resolves against the `.dbp` file |
+
+The target must already be a certificate bundle. The stock TB323 system bundle
+is 1160 bytes: a 2048-bit certificate fits as-is, a 4096-bit one only after
+compression and stripping fields the verifiers ignore.
+
+```toml
+[[op]]
+kind = "ota_cert"
+partition = "system"
+file = "system/etc/security/otacerts.zip"
+cert = "ota.crt"
+```
+
 ### `layout_collapse`
 
 Collapse layout nodes with `android:id == node_id` inside `.xml` entries of

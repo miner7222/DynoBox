@@ -948,6 +948,7 @@ dependencies = [
  "avbtool-rs",
  "crc32fast",
  "dynobox-core",
+ "dynobox-ota",
  "dynobox-payload",
  "dynobox-super",
  "dynobox-xml",
