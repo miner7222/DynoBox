@@ -58,13 +58,11 @@ system:/system/priv-app/DongDe/
 system:/system/priv-app/HyperEngine/
 system:/system/priv-app/LFHTianjiaoTablet/
 system:/system/priv-app/LeVoiceAgent/
-system:/system/priv-app/LenovoOTA/
 system:/system/priv-app/LenovoStore/
 system:/system/priv-app/LenovoWhatsNew/
 system:/system/priv-app/TabletPushOut/
 system:/system/priv-app/TabletUE/
 system:/system/priv-app/TdxIdentifyUnknownNumbers/
-system:/system/priv-app/UDSEngine/
 system:/system/priv-app/VantateResources/
 system:/system/priv-app/XiaotianTrigger/
 system:/system/priv-app/XuiEasySync/
