@@ -37,9 +37,11 @@
 //! ```
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use flate2::read::DeflateDecoder;
 use memchr::memmem;
 use serde::Deserialize;
 
@@ -1556,6 +1558,16 @@ fn apply_ops_to_apk(
         .filter(|e| e.data_start + e.compressed_size <= apk_bytes.len())
         .cloned()
         .collect();
+    // Deflated dexes are patched inflated and recompressed into the same
+    // footprint; stored ones above are patched in place.
+    let deflated_dex: Vec<usize> = zip
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.is_classes_dex() && e.compression_method == 8 && !e.is_zip64)
+        .filter(|(_, e)| e.data_start + e.compressed_size <= apk_bytes.len())
+        .map(|(i, _)| i)
+        .collect();
     let resources_arsc = zip.entries.iter().find(|e| {
         e.name == "resources.arsc"
             && e.compression_method == 0
@@ -1594,6 +1606,50 @@ fn apply_ops_to_apk(
             write_u32_le(&mut apk_bytes, entry.cd_crc_offset, new_crc);
             patched_entries.push(entry.name.clone());
         }
+    }
+
+    let mut rewrites = Vec::new();
+    let mut deflated_landed = vec![false; ops.len()];
+    let mut deflated_names = Vec::new();
+    for &entry_idx in &deflated_dex {
+        let entry = &zip.entries[entry_idx];
+        let data_end = entry.data_start + entry.compressed_size;
+        let Ok(descriptor) = crate::dex_patch::data_descriptor_offsets(&apk_bytes, entry, data_end)
+        else {
+            continue;
+        };
+        let mut dex = Vec::with_capacity(entry.compressed_size * 3);
+        let mut decoder = DeflateDecoder::new(&apk_bytes[entry.data_start..data_end]);
+        if decoder.read_to_end(&mut dex).is_err() || dex.len() < 0x70 {
+            continue;
+        }
+        let mut dex_modified = false;
+        for (i, op) in ops.iter().enumerate() {
+            if apply_one_op(&mut dex, op)? {
+                deflated_landed[i] = true;
+                dex_modified = true;
+            }
+        }
+        if dex_modified {
+            recompute_dex_header_sums(&mut dex);
+            deflated_names.push(entry.name.clone());
+            rewrites.push(crate::dex_patch::EntryRewrite {
+                entry_idx,
+                inflated: dex,
+                was_deflated: true,
+                descriptor,
+            });
+        }
+    }
+    // A patched dex that no longer compresses into its entry leaves every
+    // deflated dex of the APK untouched, and those ops count as skipped.
+    if !rewrites.is_empty()
+        && crate::dex_patch::commit_entry_rewrites(&mut apk_bytes, &zip, rewrites)?
+    {
+        for (landed, deflated) in op_landed.iter_mut().zip(deflated_landed) {
+            *landed |= deflated;
+        }
+        patched_entries.extend(deflated_names);
     }
 
     if let Some(entry) = resources_arsc {

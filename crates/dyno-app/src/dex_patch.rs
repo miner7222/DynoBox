@@ -3800,7 +3800,7 @@ fn collect_axml_works(
             let Some(data_end) = data_end else {
                 continue;
             };
-            let descriptor = match axml_descriptor_offsets(zip_bytes, entry, data_end) {
+            let descriptor = match data_descriptor_offsets(zip_bytes, entry, data_end) {
                 Ok(descriptor) => descriptor,
                 Err(_) => return Ok(Vec::new()),
             };
@@ -3829,7 +3829,13 @@ fn axml_apply_edits(inflated: &mut [u8], edits: &[AxmlEdit]) -> Result<()> {
     Ok(())
 }
 
-fn axml_deflate_fit(data: &[u8], budget: usize) -> Option<Vec<u8>> {
+/// Inputs above this size use a single zopfli iteration: already a few
+/// percent smaller than zlib's best, and seconds instead of minutes on a
+/// multi-megabyte dex.
+const ZOPFLI_FAST_ABOVE: usize = 1 << 20;
+
+/// Deflate `data` into at most `budget` bytes, trying cheap levels first.
+fn deflate_fit(data: &[u8], budget: usize) -> Option<Vec<u8>> {
     for level in [
         Compression::default(),
         Compression::best(),
@@ -3846,21 +3852,42 @@ fn axml_deflate_fit(data: &[u8], budget: usize) -> Option<Vec<u8>> {
             return Some(out);
         }
     }
-    // Last resort: zopfli squeezes a few percent more out of small files at
-    // a steep CPU cost; only reached when flate2 cannot fit the budget.
+    // Last resort: zopfli squeezes a few percent more at a steep CPU cost;
+    // only reached when flate2 cannot fit the budget.
+    let mut options = zopfli::Options::default();
+    if data.len() > ZOPFLI_FAST_ABOVE {
+        options.iteration_count = std::num::NonZeroU64::MIN;
+    }
     let mut out = Vec::new();
-    if zopfli::compress(
-        zopfli::Options::default(),
-        zopfli::Format::Deflate,
-        data,
-        &mut out,
-    )
-    .is_ok()
+    if zopfli::compress(options, zopfli::Format::Deflate, data, &mut out).is_ok()
         && out.len() <= budget
     {
         return Some(out);
     }
     None
+}
+
+/// An empty, non-final stored deflate block: header bits `000` padded to
+/// the byte, then LEN 0 and NLEN 0xFFFF. It decodes to nothing.
+const EMPTY_STORED_BLOCK: [u8; 5] = [0x00, 0x00, 0x00, 0xff, 0xff];
+
+/// Split the slack a smaller recompressed payload leaves into local extra
+/// field padding (at most `extra_room` bytes) and leading empty stored
+/// blocks for the rest. Returns the payload to write and the extra padding.
+fn absorb_slack(payload: Vec<u8>, budget: usize, extra_room: usize) -> Option<(Vec<u8>, usize)> {
+    let slack = budget.checked_sub(payload.len())?;
+    if slack <= extra_room {
+        return Some((payload, slack));
+    }
+    let blocks = (slack - extra_room).div_ceil(EMPTY_STORED_BLOCK.len());
+    let padded_len = blocks * EMPTY_STORED_BLOCK.len();
+    let extra_pad = slack.checked_sub(padded_len)?;
+    let mut out = Vec::with_capacity(budget - extra_pad);
+    for _ in 0..blocks {
+        out.extend_from_slice(&EMPTY_STORED_BLOCK);
+    }
+    out.extend_from_slice(&payload);
+    Some((out, extra_pad))
 }
 
 fn read_u16_at(bytes: &[u8], off: usize) -> Result<u16> {
@@ -3885,7 +3912,7 @@ const ZIP_EOCD_SIG: u32 = 0x06054b50;
 /// Locate a data descriptor's CRC field for an entry whose data ends at
 /// `data_end`. Returns `None` when the entry uses no descriptor. Refuses
 /// anything unexpected rather than writing a half-updated archive.
-fn axml_descriptor_offsets(
+pub(crate) fn data_descriptor_offsets(
     zip_bytes: &[u8],
     entry: &crate::zip_util::ZipEntry,
     data_end: usize,
@@ -3901,9 +3928,9 @@ fn axml_descriptor_offsets(
     };
     let after = crc_off
         .checked_add(12)
-        .ok_or_else(|| anyhow!("axml descriptor overruns file"))?;
+        .ok_or_else(|| anyhow!("data descriptor overruns file"))?;
     if after > zip_bytes.len() {
-        return Err(anyhow!("axml descriptor overruns file"));
+        return Err(anyhow!("data descriptor overruns file"));
     }
     match read_u32_at(zip_bytes, after)? {
         ZIP_LOCAL_SIG | ZIP_CENTRAL_SIG | ZIP_EOCD_SIG => {
@@ -3911,21 +3938,52 @@ fn axml_descriptor_offsets(
             Ok(Some((crc_off, crc_off + 4)))
         }
         other => Err(anyhow!(
-            "axml descriptor of {} not followed by a zip header ({other:#010x})",
+            "data descriptor of {} not followed by a zip header ({other:#010x})",
             entry.name
         )),
     }
 }
 
-/// Commit validated entry works: rewrite entry bytes in place (growing the
-/// local extra field with zero padding when recompression shrank the data,
-/// so the file length never changes), then fix CRCs and compressed sizes.
+/// New inflated content for one zip entry, not yet written.
+pub(crate) struct EntryRewrite {
+    pub(crate) entry_idx: usize,
+    pub(crate) inflated: Vec<u8>,
+    pub(crate) was_deflated: bool,
+    /// Data-descriptor (CRC, compressed-size) field offsets, if any.
+    pub(crate) descriptor: Option<(usize, usize)>,
+}
+
+/// Commit validated entry works: apply the edits, then rewrite the entries.
 fn commit_axml_works(
     zip_bytes: &mut [u8],
     layout: &crate::zip_util::ZipLayout,
     works: Vec<AxmlEntryWork>,
 ) -> Result<bool> {
-    // Phase 1: apply edits to copies and fit recompression; nothing written.
+    let mut rewrites = Vec::with_capacity(works.len());
+    for mut work in works {
+        axml_apply_edits(&mut work.inflated, &work.edits)?;
+        rewrites.push(EntryRewrite {
+            entry_idx: work.entry_idx,
+            inflated: work.inflated,
+            was_deflated: work.was_deflated,
+            descriptor: work.descriptor,
+        });
+    }
+    commit_entry_rewrites(zip_bytes, layout, rewrites)
+}
+
+/// Rewrite entries in place with new inflated content, keeping the file
+/// length: a deflated entry is recompressed into its old footprint, the
+/// slack absorbed by growing the local extra field (and, past its u16
+/// limit, by leading empty stored blocks). CRCs and compressed sizes are
+/// fixed. Returns `false` without writing anything when any entry cannot
+/// be recompressed small enough.
+pub(crate) fn commit_entry_rewrites(
+    zip_bytes: &mut [u8],
+    layout: &crate::zip_util::ZipLayout,
+    rewrites: Vec<EntryRewrite>,
+) -> Result<bool> {
+    // Phase 1: fit every recompression; nothing written.
     struct Staged {
         entry_idx: usize,
         payload: Vec<u8>,
@@ -3936,18 +3994,17 @@ fn commit_axml_works(
         /// always cover, regardless of the storage method.
         uncomp_crc: u32,
     }
-    let mut staged = Vec::with_capacity(works.len());
-    for mut work in works {
-        axml_apply_edits(&mut work.inflated, &work.edits)?;
-        let uncomp_crc = crc32_ieee(&work.inflated);
-        let entry = &layout.entries[work.entry_idx];
-        if !work.was_deflated {
+    let mut staged = Vec::with_capacity(rewrites.len());
+    for rewrite in rewrites {
+        let uncomp_crc = crc32_ieee(&rewrite.inflated);
+        let entry = &layout.entries[rewrite.entry_idx];
+        if !rewrite.was_deflated {
             staged.push(Staged {
-                entry_idx: work.entry_idx,
-                payload: work.inflated,
+                entry_idx: rewrite.entry_idx,
+                payload: rewrite.inflated,
                 extra_pad: 0,
                 was_deflated: false,
-                descriptor: work.descriptor,
+                descriptor: rewrite.descriptor,
                 uncomp_crc,
             });
             continue;
@@ -3958,21 +4015,19 @@ fn commit_axml_works(
         // the local extra field, which pushes the data start forward while the
         // whole entry footprint (extra + data) stays the same.
         let budget = entry.compressed_size;
-        let Some(payload) = axml_deflate_fit(&work.inflated, budget) else {
+        let Some(payload) = deflate_fit(&rewrite.inflated, budget) else {
             return Ok(false);
         };
-        let extra_pad = budget - payload.len();
-        // Refuse (skip, never half-write) when the grown extra field cannot be
-        // represented by the u16 length in the local header.
-        if old_extra_len + extra_pad > u16::MAX as usize {
+        let extra_room = (u16::MAX as usize).saturating_sub(old_extra_len);
+        let Some((payload, extra_pad)) = absorb_slack(payload, budget, extra_room) else {
             return Ok(false);
-        }
+        };
         staged.push(Staged {
-            entry_idx: work.entry_idx,
+            entry_idx: rewrite.entry_idx,
             payload,
             extra_pad,
             was_deflated: true,
-            descriptor: work.descriptor,
+            descriptor: rewrite.descriptor,
             uncomp_crc,
         });
     }
@@ -3984,9 +4039,9 @@ fn commit_axml_works(
         if !item.was_deflated {
             let region = zip_bytes
                 .get_mut(entry.data_start..data_end)
-                .ok_or_else(|| anyhow!("axml entry range out of bounds"))?;
+                .ok_or_else(|| anyhow!("zip entry range out of bounds"))?;
             if region.len() != item.payload.len() {
-                return Err(anyhow!("axml stored entry length changed"));
+                return Err(anyhow!("zip stored entry length changed"));
             }
             region.copy_from_slice(&item.payload);
         } else {
@@ -3995,26 +4050,26 @@ fn commit_axml_works(
             let extra_start = entry
                 .local_header_offset
                 .checked_add(30 + name_len)
-                .ok_or_else(|| anyhow!("axml header offset overflow"))?;
+                .ok_or_else(|| anyhow!("zip header offset overflow"))?;
             let extra_end = extra_start
                 .checked_add(old_extra_len + item.extra_pad)
-                .ok_or_else(|| anyhow!("axml header offset overflow"))?;
+                .ok_or_else(|| anyhow!("zip header offset overflow"))?;
             zip_bytes
                 .get_mut(extra_start + old_extra_len..extra_end)
-                .ok_or_else(|| anyhow!("axml extra range out of bounds"))?
+                .ok_or_else(|| anyhow!("zip extra range out of bounds"))?
                 .fill(0);
             let new_data_start = extra_end;
             let new_data_end = new_data_start
                 .checked_add(item.payload.len())
-                .ok_or_else(|| anyhow!("axml data offset overflow"))?;
+                .ok_or_else(|| anyhow!("zip data offset overflow"))?;
             if new_data_end != data_end {
-                return Err(anyhow!("axml entry footprint changed"));
+                return Err(anyhow!("zip entry footprint changed"));
             }
             zip_bytes[new_data_start..new_data_end].copy_from_slice(&item.payload);
             let new_extra_len = u16::try_from(old_extra_len + item.extra_pad)
-                .map_err(|_| anyhow!("axml extra length overflow"))?;
+                .map_err(|_| anyhow!("zip extra length overflow"))?;
             let new_comp_len = u32::try_from(item.payload.len())
-                .map_err(|_| anyhow!("axml data length overflow"))?;
+                .map_err(|_| anyhow!("zip data length overflow"))?;
             write_u16_le(zip_bytes, entry.local_header_offset + 28, new_extra_len);
             write_u32_le(zip_bytes, entry.local_header_comp_size_offset, new_comp_len);
             write_u32_le(zip_bytes, entry.cd_comp_size_offset, new_comp_len);
@@ -4031,7 +4086,7 @@ fn commit_axml_works(
                 entry.compressed_size
             };
             let comp_len =
-                u32::try_from(comp_len).map_err(|_| anyhow!("axml data length overflow"))?;
+                u32::try_from(comp_len).map_err(|_| anyhow!("zip data length overflow"))?;
             write_u32_le(zip_bytes, dd_crc_off, new_crc);
             write_u32_le(zip_bytes, dd_comp_off, comp_len);
         }

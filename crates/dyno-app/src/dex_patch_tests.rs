@@ -1450,3 +1450,115 @@ fn method_nop_lands_on_real_zuisecurity_antivirus() {
         "all 3 AntiVirusInterface hub methods neutralized once"
     );
 }
+
+/// A one-entry zip whose entry is deflated with no compression, so a
+/// compressible rewrite leaves plenty of slack to absorb.
+fn zip_with_uncompressed_deflate(name: &str, data: &[u8]) -> Vec<u8> {
+    let mut enc = DeflateEncoder::new(Vec::new(), Compression::none());
+    enc.write_all(data).unwrap();
+    let packed = enc.finish().unwrap();
+    let crc = crc32_ieee(data);
+    let header = |sig: u32, central: bool| {
+        let mut h = sig.to_le_bytes().to_vec();
+        if central {
+            h.extend_from_slice(&20u16.to_le_bytes());
+        }
+        for v in [20u16, 0, 8, 0, 0] {
+            h.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [crc, packed.len() as u32, data.len() as u32] {
+            h.extend_from_slice(&v.to_le_bytes());
+        }
+        h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        h.extend_from_slice(&0u16.to_le_bytes());
+        if central {
+            // Comment, disk, internal/external attributes, local offset.
+            h.extend_from_slice(&[0; 10]);
+            h.extend_from_slice(&0u32.to_le_bytes());
+        }
+        h.extend_from_slice(name.as_bytes());
+        h
+    };
+    let mut zip = header(0x04034b50, false);
+    zip.extend_from_slice(&packed);
+    let cd_offset = zip.len() as u32;
+    let central = header(0x02014b50, true);
+    zip.extend_from_slice(&central);
+    zip.extend_from_slice(&0x06054b50u32.to_le_bytes());
+    for v in [0u16, 0, 1, 1] {
+        zip.extend_from_slice(&v.to_le_bytes());
+    }
+    zip.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&cd_offset.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip
+}
+
+fn read_entry(zip_bytes: &[u8], name: &str) -> Vec<u8> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).unwrap();
+    let mut entry = archive.by_name(name).unwrap();
+    let mut out = Vec::new();
+    entry.read_to_end(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn absorb_slack_spills_past_the_extra_field_into_empty_blocks() {
+    let (payload, pad) = absorb_slack(vec![1, 2, 3], 10, 100).unwrap();
+    assert_eq!((payload, pad), (vec![1, 2, 3], 7));
+
+    let (payload, pad) = absorb_slack(vec![1, 2, 3], 20, 4).unwrap();
+    assert_eq!(payload.len() + pad, 20);
+    assert!(pad <= 4);
+    assert!(payload.ends_with(&[1, 2, 3]));
+    assert!(
+        payload[..payload.len() - 3]
+            .chunks(5)
+            .all(|b| b == EMPTY_STORED_BLOCK)
+    );
+}
+
+#[test]
+fn rewrite_recompresses_a_deflated_entry_in_place() {
+    let original: Vec<u8> = (0..4096u32).flat_map(|i| (i % 251).to_le_bytes()).collect();
+    let mut zip_bytes = zip_with_uncompressed_deflate("classes.dex", &original);
+    let len = zip_bytes.len();
+    let mut patched = original.clone();
+    patched[100] ^= 0xff;
+
+    let layout = parse_zip_central_directory(&zip_bytes).unwrap();
+    let rewrite = EntryRewrite {
+        entry_idx: 0,
+        inflated: patched.clone(),
+        was_deflated: true,
+        descriptor: None,
+    };
+    assert!(commit_entry_rewrites(&mut zip_bytes, &layout, vec![rewrite]).unwrap());
+    assert_eq!(zip_bytes.len(), len);
+    assert_eq!(read_entry(&zip_bytes, "classes.dex"), patched);
+}
+
+#[test]
+fn rewrite_uses_empty_blocks_when_slack_exceeds_the_extra_field() {
+    // 256 KiB of zeros stored uncompressed recompresses to a few hundred
+    // bytes: far more slack than a u16 extra field can hold.
+    let original = vec![0u8; 256 << 10];
+    let mut zip_bytes = zip_with_uncompressed_deflate("classes.dex", &original);
+    let len = zip_bytes.len();
+    let mut patched = original.clone();
+    patched[7] = 1;
+
+    let layout = parse_zip_central_directory(&zip_bytes).unwrap();
+    let rewrite = EntryRewrite {
+        entry_idx: 0,
+        inflated: patched.clone(),
+        was_deflated: true,
+        descriptor: None,
+    };
+    assert!(commit_entry_rewrites(&mut zip_bytes, &layout, vec![rewrite]).unwrap());
+    assert_eq!(zip_bytes.len(), len);
+    assert_eq!(read_entry(&zip_bytes, "classes.dex"), patched);
+    let entry = &layout.entries[0];
+    let extra_len = read_u16_at(&zip_bytes, entry.local_header_offset + 28).unwrap();
+    assert!(extra_len > 60_000);
+}
