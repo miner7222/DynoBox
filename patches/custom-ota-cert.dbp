@@ -1,0 +1,23 @@
+# Trust only your own OTA signing certificate, so stock OTAs are refused and
+# OTAs from `dynobox ota generate` signed with the matching key install.
+#
+# Needs patches/ota.crt (git-ignored). Create the pair once and keep the key
+# outside the firmware tree:
+#   dynobox ota keygen --key ../ota.key --cert patches/ota.crt
+# Resign with this patch so recovery.img is signed again after its ramdisk
+# edit.
+
+name = "custom-ota-cert"
+description = "Trust only the custom OTA signing certificate, in Android and in recovery"
+
+[[op]]
+kind = "ota_cert"
+partition = "system"
+file = "system/etc/security/otacerts.zip"
+cert = "ota.crt"
+
+[[op]]
+kind = "ota_cert"
+partition = "recovery"
+file = "system/etc/security/otacerts.zip"
+cert = "ota.crt"

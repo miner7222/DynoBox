@@ -500,6 +500,8 @@ while still advancing the setup wizard.
 
 ## Bundled patches
 
+* **`custom-ota-cert.dbp`** — needs your own `patches/ota.crt` (git-ignored);
+  see [`ota_cert`](#ota_cert)
 * **`debloat-common.dbp`**
 * **`debloat-wuji.dbp`**
 * **`enable-adb-debug.dbp`**

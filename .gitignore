@@ -15,3 +15,6 @@ Thumbs.db
 /scratch/
 /artifacts/
 /fixtures/tmp/
+
+# Per-user OTA signing certificate for patches/custom-ota-cert.dbp.
+/patches/ota.crt

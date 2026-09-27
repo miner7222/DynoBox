@@ -2897,7 +2897,8 @@ where
                 // A boot image ramdisk edit rewrites the image's own AVB
                 // hash descriptor, so verify and re-sign its still-valid
                 // VBMeta first; the resign loop re-authenticates it after.
-                if crate::bootimg::is_boot_image(&img_path)? {
+                let boot_image = crate::bootimg::is_boot_image(&img_path)?;
+                if boot_image {
                     prepare_vbmeta_mutation(
                         &img_name,
                         out_dir,
@@ -2940,11 +2941,16 @@ where
                             ),
                         );
                     } else {
+                        let avb = if boot_image {
+                            "hash descriptor updated"
+                        } else {
+                            "verity deferred"
+                        };
                         message(
                             events,
                             MessageLevel::Info,
                             format!(
-                                "patch {source} -> {partition}:{}: {} applied, {} skipped (verity deferred)",
+                                "patch {source} -> {partition}:{}: {} applied, {} skipped ({avb})",
                                 r.file, r.ops_applied, r.ops_skipped
                             ),
                         );
