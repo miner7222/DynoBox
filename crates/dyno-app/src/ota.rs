@@ -244,6 +244,9 @@ pub struct OtaRequest {
     /// Diff source and target block by block even when the reference is an
     /// OEM incremental, e.g. when both builds share the same stock base.
     pub force_delta: bool,
+    /// Physical partitions left out of the OTA; the updated slot keeps
+    /// whatever image it already holds for them.
+    pub exclude: Vec<String>,
 }
 
 /// Summary of a generated OTA.
@@ -264,9 +267,41 @@ pub use crate::ota_rebase::RebaseStats;
 /// bsdiff, supported by every Virtual A/B device.
 const DELTA_MINOR_VERSION: u32 = 8;
 
-/// Partitions never put in a generated OTA, so the device keeps what it has
-/// in the slot being updated.
-const EXCLUDED_PARTITIONS: &[&str] = &["abl"];
+/// The reference's partitions minus `exclude`. Each excluded name must be
+/// one of them, and a dynamic partition cannot be excluded: its dynamic
+/// partition metadata would still create it, empty, in the updated slot.
+fn select_partitions<'a>(
+    manifest: &'a DeltaArchiveManifest,
+    exclude: &[String],
+) -> Result<Vec<&'a PartitionUpdate>> {
+    let dynamic: std::collections::BTreeSet<&str> = manifest
+        .dynamic_partition_metadata
+        .iter()
+        .flat_map(|d| &d.groups)
+        .flat_map(|g| &g.partition_names)
+        .map(String::as_str)
+        .collect();
+    for name in exclude {
+        if !manifest
+            .partitions
+            .iter()
+            .any(|p| &p.partition_name == name)
+        {
+            bail!("cannot exclude `{name}`: the reference OTA has no such partition");
+        }
+        if dynamic.contains(name.as_str()) {
+            bail!(
+                "cannot exclude `{name}`: it is a dynamic partition, which the updated \
+                 slot would get empty"
+            );
+        }
+    }
+    Ok(manifest
+        .partitions
+        .iter()
+        .filter(|p| !exclude.contains(&p.partition_name))
+        .collect())
+}
 
 fn cow_free_dynamic_metadata(manifest: &DeltaArchiveManifest) -> Result<()> {
     if manifest
@@ -327,23 +362,13 @@ where
             },
         );
     }
-    let included: Vec<&PartitionUpdate> = reference
-        .manifest
-        .partitions
-        .iter()
-        .filter(|p| !EXCLUDED_PARTITIONS.contains(&p.partition_name.as_str()))
-        .collect();
-    for excluded in reference
-        .manifest
-        .partitions
-        .iter()
-        .filter(|p| EXCLUDED_PARTITIONS.contains(&p.partition_name.as_str()))
-    {
+    let included = select_partitions(&reference.manifest, &request.exclude)?;
+    if !request.exclude.is_empty() {
         message(
             events,
             &format!(
-                "ota: leaving out {}; the updated slot keeps its current image",
-                excluded.partition_name
+                "ota: leaving out {}; the updated slot keeps its current images",
+                request.exclude.join(", ")
             ),
         );
     }
@@ -649,6 +674,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excludes_named_physical_partitions_only() {
+        use dynobox_payload::payload::proto::{DynamicPartitionGroup, DynamicPartitionMetadata};
+        let partition = |name: &str| PartitionUpdate {
+            partition_name: name.into(),
+            ..Default::default()
+        };
+        let manifest = DeltaArchiveManifest {
+            partitions: vec![partition("system"), partition("abl"), partition("xbl")],
+            dynamic_partition_metadata: Some(DynamicPartitionMetadata {
+                groups: vec![DynamicPartitionGroup {
+                    name: "main".into(),
+                    partition_names: vec!["system".into()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let names = |exclude: &[&str]| -> Result<Vec<String>> {
+            let exclude: Vec<String> = exclude.iter().map(|s| s.to_string()).collect();
+            Ok(select_partitions(&manifest, &exclude)?
+                .into_iter()
+                .map(|p| p.partition_name.clone())
+                .collect())
+        };
+
+        assert_eq!(names(&[]).unwrap(), ["system", "abl", "xbl"]);
+        assert_eq!(names(&["abl", "xbl"]).unwrap(), ["system"]);
+        let typo = names(&["alb"]).unwrap_err().to_string();
+        assert!(typo.contains("no such partition"), "{typo}");
+        let dynamic = names(&["system"]).unwrap_err().to_string();
+        assert!(dynamic.contains("dynamic partition"), "{dynamic}");
+    }
 
     #[test]
     fn writes_a_matching_key_and_certificate_without_clobbering() {

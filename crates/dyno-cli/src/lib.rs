@@ -465,7 +465,7 @@ enum OtaCommand {
     /// op). With `--source` the OTA is incremental: it reuses the operations
     /// of an OEM incremental reference, or diffs the two builds block by
     /// block when the reference is a full OTA or `--delta` is given. Without
-    /// it the OTA is full. `abl` is never included
+    /// it the OTA is full
     Generate {
         /// Firmware or image directory holding the build now on the device
         /// (exactly as flashed). Omit for a full OTA
@@ -504,6 +504,11 @@ enum OtaCommand {
         /// build
         #[arg(long, requires = "source")]
         delta: bool,
+
+        /// Leave these physical partitions out (e.g. `abl`); the updated
+        /// slot keeps its current images. Repeat or comma-separate
+        #[arg(long, value_name = "PARTITION", value_delimiter = ',')]
+        exclude: Vec<String>,
     },
     /// Verify an OTA package: whole-file and payload signatures, metadata,
     /// and property-files offsets
@@ -1055,6 +1060,7 @@ where
                     output,
                     allow_avb_mismatch,
                     delta,
+                    exclude,
                 },
         } => {
             let request = dynobox_app::ota::OtaRequest {
@@ -1066,6 +1072,7 @@ where
                 output: output.clone(),
                 allow_avb_mismatch,
                 force_delta: delta,
+                exclude,
             };
             let generated = match cli.progress_format {
                 ProgressFormat::Text => dynobox_app::ota::generate_ota(&request, &mut text_sink),
@@ -1191,6 +1198,9 @@ mod tests {
             "o.zip",
             "--allow-avb-mismatch",
             "--delta",
+            "--exclude",
+            "abl,xbl",
+            "--exclude=tz",
         ])
         .unwrap();
         let Commands::Ota {
@@ -1199,6 +1209,7 @@ mod tests {
                     source,
                     allow_avb_mismatch,
                     delta,
+                    exclude,
                     ..
                 },
         } = incremental.command
@@ -1209,6 +1220,7 @@ mod tests {
             (source, allow_avb_mismatch, delta),
             (Some(PathBuf::from("a")), true, true)
         );
+        assert_eq!(exclude, ["abl", "xbl", "tz"]);
         // A delta needs a source build to diff against.
         assert!(
             Cli::try_parse_from([

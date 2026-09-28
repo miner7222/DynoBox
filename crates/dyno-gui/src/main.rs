@@ -105,6 +105,8 @@ struct OtaForm {
     output: Option<PathBuf>,
     delta: bool,
     allow_avb_mismatch: bool,
+    /// Partitions to leave out, comma or space separated.
+    exclude: String,
 }
 
 impl FormSnapshot {
@@ -464,6 +466,13 @@ impl DynoGui {
         }
         if ota.allow_avb_mismatch {
             a.push("--allow-avb-mismatch".into());
+        }
+        for name in ota
+            .exclude
+            .split([',', ' ', '\t'])
+            .filter(|n| !n.is_empty())
+        {
+            a.push(format!("--exclude={name}"));
         }
     }
 
@@ -1121,8 +1130,15 @@ impl DynoGui {
                  or diffs block by block when the reference is a full OTA."
             }
         };
+        ui.horizontal(|ui| {
+            ui.label("Exclude:");
+            ui.add(egui::TextEdit::singleline(&mut ota.exclude).hint_text("abl, xbl"))
+                .on_hover_text(
+                    "Physical partitions to leave out (comma or space separated); \
+                     the updated slot keeps its current images",
+                );
+        });
         ui.label(egui::RichText::new(kind).weak().small());
-        ui.label(egui::RichText::new("abl is never included.").weak().small());
     }
 
     fn info_section(&mut self, ui: &mut egui::Ui) {
@@ -1590,6 +1606,7 @@ mod tests {
                 output: Some(PathBuf::from("a-to-b.zip")),
                 delta: true,
                 allow_avb_mismatch: true,
+                exclude: " abl, xbl  tz,".into(),
             },
             ..Default::default()
         }
@@ -1617,6 +1634,9 @@ mod tests {
                 "a-to-b.zip",
                 "--delta",
                 "--allow-avb-mismatch",
+                "--exclude=abl",
+                "--exclude=xbl",
+                "--exclude=tz",
             ]
         );
         assert!(gui.validate_for_run().is_ok());
