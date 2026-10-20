@@ -997,7 +997,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(dc.ops.len(), 76);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
-    assert_eq!(uc.ops.len(), 58);
+    assert_eq!(uc.ops.len(), 61);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
     assert_eq!(fc.ops.len(), 17);
@@ -7515,6 +7515,11 @@ fn audit_apply_op(buf: &mut [u8], op: &DbpOp) -> Result<bool> {
             expected,
             ..
         } => force_axml_background(buf, *node_id as u32, *drawable as u32, *expected)?,
+        DbpOp::PermissionProtection {
+            permission,
+            protection_level,
+            ..
+        } => force_axml_permission_protection(buf, permission, *protection_level)?,
         _ => false,
     };
     Ok(landed || hit)
@@ -7536,6 +7541,7 @@ fn audit_op_kind(op: &DbpOp) -> &'static str {
         DbpOp::ZipEntryReplace { .. } => "zip_entry_replace",
         DbpOp::LayoutCollapse { .. } => "layout_collapse",
         DbpOp::LayoutBackground { .. } => "layout_background",
+        DbpOp::PermissionProtection { .. } => "permission_protection",
         DbpOp::InvokeConstBool { .. } => "invoke_const_bool",
         DbpOp::InvokeConstInt { .. } => "invoke_const_int",
         DbpOp::FieldConstBool { .. } => "field_const_bool",
@@ -7633,6 +7639,11 @@ fn audit_op_label(op: &DbpOp) -> String {
             expected,
             ..
         } => format!("background id={node_id:#x} -> {drawable:#x} x{expected}"),
+        DbpOp::PermissionProtection {
+            permission,
+            protection_level,
+            ..
+        } => format!("permission {permission} -> {protection_level:#x}"),
         DbpOp::InvokeConstBool {
             scan_class,
             scan_method,
@@ -7827,4 +7838,90 @@ fn dump_bundled_dbp_targets() {
             }
         }
     }
+}
+
+/// Real `framework-res.apk` fixture: patch `zui.permission.READ_THEMES` to
+/// protection level 0 and verify the AXML manifest still parses with the new
+/// value. Set `DYNOBOX_FRAMEWORK_RES_APK` to the APK extracted from the
+/// target `system.img`.
+#[test]
+#[ignore = "fixture: set DYNOBOX_FRAMEWORK_RES_APK"]
+fn permission_protection_lands_on_real_framework_res() {
+    use std::io::{Cursor, Read};
+
+    let path = crate::test_fixtures::env("DYNOBOX_FRAMEWORK_RES_APK");
+    let original = std::fs::read(&path).expect("read framework-res.apk");
+    let original_len = original.len();
+    let mut patched = original;
+    for permission in ["zui.permission.READ_THEMES", "zui.permission.WRITE_THEMES"] {
+        crate::dex_patch::force_axml_permission_protection(&mut patched, permission, 0)
+            .expect("patch permission");
+    }
+    assert_eq!(
+        patched.len(),
+        original_len,
+        "archive length must not change"
+    );
+    if let Ok(out) = std::env::var("DYNOBOX_AXML_OUT") {
+        std::fs::write(&out, &patched).expect("write patched APK");
+    }
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(patched)).expect("zip");
+    let mut manifest = Vec::new();
+    archive
+        .by_name("AndroidManifest.xml")
+        .expect("manifest entry")
+        .read_to_end(&mut manifest)
+        .expect("read manifest");
+    let elements = crate::axml::parse_axml_elements(&manifest).expect("parse patched AXML");
+    for permission_name in ["zui.permission.READ_THEMES", "zui.permission.WRITE_THEMES"] {
+        let permission = elements
+            .iter()
+            .find(|el| {
+                el.name.as_deref() == Some("permission")
+                    && el.attrs.iter().any(|attr| {
+                        attr.name.as_deref() == Some("name")
+                            && attr.string_value.as_deref() == Some(permission_name)
+                    })
+            })
+            .expect("permission element");
+        let level = permission
+            .attrs
+            .iter()
+            .find(|attr| attr.name.as_deref() == Some("protectionLevel"))
+            .expect("protectionLevel attribute");
+        assert_eq!(
+            level.data, 0,
+            "{permission_name} protection level must be normal"
+        );
+    }
+}
+
+#[test]
+fn bundled_unlock_common_zui_font_permission_op_shape() {
+    let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("load unlock-common.dbp");
+    let mut permissions = Vec::new();
+    for op in &doc.ops {
+        if let DbpOp::PermissionProtection {
+            partition,
+            file,
+            permission,
+            protection_level,
+        } = op
+        {
+            assert_eq!(partition, "system");
+            assert_eq!(file, "system/framework/framework-res.apk");
+            assert_eq!(*protection_level, 0);
+            permissions.push(permission.as_str());
+        }
+    }
+    permissions.sort_unstable();
+    assert_eq!(
+        permissions,
+        [
+            "zui.permission.ACCESS_THEME_MANAGER",
+            "zui.permission.READ_THEMES",
+            "zui.permission.WRITE_THEMES",
+        ]
+    );
 }

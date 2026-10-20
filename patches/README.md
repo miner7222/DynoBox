@@ -300,6 +300,29 @@ Swap the `android:background` reference of layout nodes with
 | `drawable` | yes      | replacement drawable id, e.g. `0x7f0804ab`                  |
 | `expected` | no       | total nodes that must be patched; defaults to `1`           |
 
+### `permission_protection`
+
+Rewrite the `android:protectionLevel` integer of one
+`<permission android:name="...">` element in `AndroidManifest.xml` inside an
+APK/JAR. The manifest entry may be STORED or deflated; the archive length never
+changes. This is intended for downgrading a vendor permission that was
+tightened from `normal` (`0`) to `signature`/`internal` in a later firmware, so
+an ordinary app can hold it again.
+
+| field              | required | meaning                                              |
+|--------------------|----------|------------------------------------------------------|
+| `permission`       | yes      | exact permission name, e.g. `zui.permission.READ_THEMES` |
+| `protection_level` | yes      | new integer protection level; `0` = `normal`         |
+
+The op matches the permission element by its `android:name` string, so it is
+independent of resource-id ordering. If the permission already has the
+requested value, the op is skipped (not an error).
+
+Because the permission grade is evaluated when an app is installed or
+updated, reinstall/update the target app after flashing so PackageManager
+re-evaluates the now-normal permission. A reboot alone may not grant it to an
+already-installed app.
+
 ### `zip_entry_replace`
 
 Overwrite the data of STORED zip entries with `payload` (whitespace-separated

@@ -777,3 +777,28 @@ proto = "()Z"
 from = "70 10 ${is_hid_connected:u16} 05 00 0a 01 38 01 05 00"
 to = "70 10 ${is_hid_connected:u16} 05 00 0a 01 00 00 00 00"
 expected = 2
+
+# ZUI theme permissions in framework-res.apk: downgrade the protection
+# levels so ordinary apps can change the system font without signature
+# privileges. 0x404 = internal | verifier; 0 = normal, which
+# PackageManager grants to any app that declares the permission.
+[[op]]
+kind = "permission_protection"
+partition = "system"
+file = "system/framework/framework-res.apk"
+permission = "zui.permission.ACCESS_THEME_MANAGER"
+protection_level = 0
+
+[[op]]
+kind = "permission_protection"
+partition = "system"
+file = "system/framework/framework-res.apk"
+permission = "zui.permission.READ_THEMES"
+protection_level = 0
+
+[[op]]
+kind = "permission_protection"
+partition = "system"
+file = "system/framework/framework-res.apk"
+permission = "zui.permission.WRITE_THEMES"
+protection_level = 0

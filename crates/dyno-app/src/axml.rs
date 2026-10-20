@@ -16,6 +16,9 @@ const AXML_STRING_POOL_UTF8_FLAG: u32 = 1 << 8;
 pub(crate) struct AxmlAttr {
     pub(crate) ns: Option<String>,
     pub(crate) name: Option<String>,
+    /// Resolved string payload for `TYPE_STRING` values; `None` for other
+    /// typed values.
+    pub(crate) string_value: Option<String>,
     /// Offset of the 8-byte typed value (`u16 size`, `u8 res0`, `u8 type`,
     /// `u32 data`); the type byte lives at `type_off + 3`, data at `+4`.
     pub(crate) type_off: usize,
@@ -26,6 +29,7 @@ pub(crate) struct AxmlAttr {
 /// One binary-XML start-element and its attributes in document order.
 #[derive(Debug, Clone)]
 pub(crate) struct AxmlElement {
+    pub(crate) name: Option<String>,
     pub(crate) attrs: Vec<AxmlAttr>,
 }
 
@@ -184,6 +188,11 @@ pub(crate) fn parse_axml_elements(bytes: &[u8]) -> Result<Vec<AxmlElement>> {
                     .as_ref()
                     .ok_or_else(|| anyhow!("axml element before string pool"))?;
                 // Chunk header(8) + lineNumber(4) + comment(4), then ns/name.
+                let element_name_raw = axml_u32(bytes, cursor + 20, "axml element name")?;
+                let element_name = pool
+                    .strings
+                    .get(element_name_raw as usize)
+                    .and_then(|o| o.clone());
                 let attr_start = axml_u16(bytes, cursor + 24, "axml attr start")? as usize;
                 let attr_size = axml_u16(bytes, cursor + 26, "axml attr size")? as usize;
                 let attr_count = axml_u16(bytes, cursor + 28, "axml attr count")? as usize;
@@ -217,15 +226,24 @@ pub(crate) fn parse_axml_elements(bytes: &[u8]) -> Result<Vec<AxmlElement>> {
                     }
                     let data_type = axml_slice(bytes, base + 15, 1, "axml value type")?[0];
                     let data = axml_u32(bytes, base + 16, "axml value data")?;
+                    let string_value = if data_type == 0x03 {
+                        pool.strings.get(data as usize).and_then(|o| o.clone())
+                    } else {
+                        None
+                    };
                     attrs.push(AxmlAttr {
                         ns,
                         name,
+                        string_value,
                         type_off: base + 12,
                         data_type,
                         data,
                     });
                 }
-                elements.push(AxmlElement { attrs });
+                elements.push(AxmlElement {
+                    name: element_name,
+                    attrs,
+                });
             }
             _ => {}
         }

@@ -3577,6 +3577,7 @@ const AXML_TYPE_REFERENCE: u8 = 0x01;
 const AXML_TYPE_FLOAT: u8 = 0x04;
 const AXML_TYPE_DIMENSION: u8 = 0x05;
 const AXML_TYPE_INT_DEC: u8 = 0x10;
+const AXML_TYPE_INT_HEX: u8 = 0x11;
 
 /// One in-place typed-value rewrite inside inflated entry bytes.
 struct AxmlEdit {
@@ -4135,6 +4136,100 @@ pub fn force_axml_background(
     )?;
     let patched: usize = works.iter().map(|w| w.patched_nodes).sum();
     if patched != expected {
+        return Ok(false);
+    }
+    commit_axml_works(zip_bytes, &layout, works)
+}
+
+/// Rewrite the `android:protectionLevel` integer of one
+/// `<permission android:name="...">` element inside `AndroidManifest.xml` of
+/// a zip archive. The manifest entry may be STORED or deflated; the archive
+/// length never changes. Returns `false` when the permission is absent or
+/// already has the requested level.
+pub(crate) fn force_axml_permission_protection(
+    zip_bytes: &mut [u8],
+    permission: &str,
+    protection_level: u32,
+) -> Result<bool> {
+    if permission.is_empty() {
+        return Ok(false);
+    }
+    let layout = parse_zip_central_directory(zip_bytes)?;
+    let mut works = Vec::new();
+    for (entry_idx, entry) in layout.entries.iter().enumerate() {
+        if entry.name != "AndroidManifest.xml" {
+            continue;
+        }
+        if entry.compression_method != 0 && entry.compression_method != 8 {
+            continue;
+        }
+        if entry.is_zip64 {
+            continue;
+        }
+        let data_end = entry
+            .data_start
+            .checked_add(entry.compressed_size)
+            .filter(|&end| end <= zip_bytes.len());
+        let Some(data_end) = data_end else {
+            continue;
+        };
+        let raw = &zip_bytes[entry.data_start..data_end];
+        let inflated: Vec<u8> = if entry.compression_method == 8 {
+            let mut out = Vec::with_capacity(raw.len() * 2);
+            let mut decoder = DeflateDecoder::new(raw);
+            match decoder.read_to_end(&mut out) {
+                Ok(_) => out,
+                Err(_) => continue,
+            }
+        } else {
+            raw.to_vec()
+        };
+        let elements = match parse_axml_elements(&inflated) {
+            Ok(elements) => elements,
+            Err(_) => continue,
+        };
+        let mut edits = Vec::new();
+        for el in &elements {
+            if el.name.as_deref() != Some("permission") {
+                continue;
+            }
+            let Some(name_attr) = axml_attr(&el.attrs, "name") else {
+                continue;
+            };
+            if name_attr.string_value.as_deref() != Some(permission) {
+                continue;
+            }
+            let Some(level_attr) = axml_attr(&el.attrs, "protectionLevel") else {
+                continue;
+            };
+            if level_attr.data_type != AXML_TYPE_INT_DEC
+                && level_attr.data_type != AXML_TYPE_INT_HEX
+            {
+                continue;
+            }
+            if level_attr.data == protection_level {
+                continue;
+            }
+            edits.push(AxmlEdit {
+                type_off: level_attr.type_off,
+                new_type: level_attr.data_type,
+                new_data: protection_level,
+            });
+        }
+        if edits.is_empty() {
+            continue;
+        }
+        let descriptor = data_descriptor_offsets(zip_bytes, entry, data_end)?;
+        works.push(AxmlEntryWork {
+            entry_idx,
+            inflated,
+            edits,
+            was_deflated: entry.compression_method == 8,
+            patched_nodes: 1,
+            descriptor,
+        });
+    }
+    if works.is_empty() {
         return Ok(false);
     }
     commit_axml_works(zip_bytes, &layout, works)
