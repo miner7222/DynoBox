@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use dynobox_core::error::{DynoError, Result};
@@ -70,6 +70,24 @@ impl PayloadMetadata {
     }
 }
 
+/// Buffered reader for the compressed-entry fallback this module still keeps.
+///
+/// 4 MiB chunks keep the compressed-entry fallback close to a plain file copy.
+fn copy_entry_buffered(mut src: impl Read, dst: &mut File) -> Result<u64> {
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    let mut total = 0u64;
+    loop {
+        let read = src.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        dst.write_all(&buf[..read])?;
+        total += read as u64;
+    }
+    dst.flush()?;
+    Ok(total)
+}
+
 pub fn extract_payload(ota_zip_path: &Path, output_dir: &Path) -> Result<PathBuf> {
     let file = File::open(ota_zip_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| {
@@ -93,29 +111,171 @@ pub fn extract_payload(ota_zip_path: &Path, output_dir: &Path) -> Result<PathBuf
 
     let output_path = output_dir.join("payload.bin");
     let mut out = File::create(&output_path)?;
-    std::io::copy(&mut payload_file, &mut out)?;
+    copy_entry_buffered(&mut payload_file, &mut out)?;
 
     Ok(output_path)
 }
 
-pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
-    let mut file = File::open(path)?;
+/// Positioned read used by every payload accessor.
+///
+/// `File::read_at` keeps the shared file cursor untouched, so several worker
+/// threads can read payload blobs concurrently.
+#[cfg(unix)]
+fn read_at_impl(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.read_at(buf, offset)
+}
 
+#[cfg(windows)]
+fn read_at_impl(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    file.seek_read(buf, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_at_impl(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    use std::io::{Seek, SeekFrom};
+    let mut clone = file.try_clone()?;
+    clone.seek(SeekFrom::Start(offset))?;
+    clone.read(buf)
+}
+
+/// A `payload.bin` view that reads in place when the OTA stores the entry.
+///
+/// OTA zips are required to store `payload.bin` uncompressed, so the payload
+/// bytes are contiguous inside the zip file. Read at `data_start() + offset`
+/// instead of copying it to scratch; compressed entries fall back to the
+/// extract-to-scratch path.
+pub struct Payload {
+    file: File,
+    offset: u64,
+    len: u64,
+}
+
+impl Payload {
+    pub fn open_file(path: &Path) -> Result<Self> {
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
+        Ok(Self {
+            file,
+            offset: 0,
+            len,
+        })
+    }
+
+    /// Open `payload.bin` from an OTA zip without copying it.
+    ///
+    /// `scratch_dir` is only used when the entry is compressed and the
+    /// buffered fallback has to extract it.
+    pub fn open_ota(zip_path: &Path, scratch_dir: &Path) -> Result<Self> {
+        let mut archive = zip::ZipArchive::new(File::open(zip_path)?).map_err(|e| {
+            DynoError::Tool(format!(
+                "Failed to open OTA zip {}: {}",
+                zip_path.display(),
+                e
+            ))
+        })?;
+        let (stored_start, size, is_stored) = {
+            let entry = archive.by_name("payload.bin").map_err(|_| {
+                DynoError::MissingFile(format!(
+                    "payload.bin not found in OTA zip {}",
+                    zip_path.display()
+                ))
+            })?;
+            (
+                entry.data_start(),
+                entry.size(),
+                entry.compression() == zip::CompressionMethod::Stored,
+            )
+        };
+        drop(archive);
+
+        if is_stored {
+            if let Some(start) = stored_start {
+                let file = File::open(zip_path)?;
+                let available = file.metadata()?.len().saturating_sub(start);
+                return Ok(Self {
+                    file,
+                    offset: start,
+                    len: std::cmp::min(size, available),
+                });
+            }
+        }
+
+        let extracted = extract_payload(zip_path, scratch_dir)?;
+        Self::open_file(&extracted)
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Fill `buf` from `offset` (payload-relative) exactly or fail.
+    pub fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let end = offset
+            .checked_add(buf.len() as u64)
+            .ok_or_else(|| DynoError::Tool("Payload read range overflow".into()))?;
+        if end > self.len {
+            return Err(DynoError::Tool(format!(
+                "Payload read {offset}..{end} exceeds payload length {}",
+                self.len
+            )));
+        }
+        let mut pos = self.offset + offset;
+        let mut remaining = buf;
+        while !remaining.is_empty() {
+            match read_at_impl(&self.file, remaining, pos) {
+                Ok(0) => {
+                    return Err(DynoError::Tool(
+                        "Payload file ended before the requested range".into(),
+                    ));
+                }
+                Ok(read) => {
+                    pos += read as u64;
+                    remaining = &mut remaining[read..];
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
+    /// Read exactly `len` bytes at `offset` into a fresh buffer.
+    pub fn read_vec(&self, offset: u64, len: u64) -> Result<Vec<u8>> {
+        let len = usize::try_from(len).map_err(|_| {
+            DynoError::Tool("Payload read length exceeds addressable memory".into())
+        })?;
+        let mut buf = vec![0u8; len];
+        self.read_exact_at(offset, &mut buf)?;
+        Ok(buf)
+    }
+}
+
+pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
+    parse_payload_metadata_from(&Payload::open_file(path)?)
+}
+
+pub fn parse_payload_metadata_from(payload: &Payload) -> Result<PayloadMetadata> {
     // 1. Magic (4 bytes)
     let mut magic = [0u8; 4];
-    file.read_exact(&mut magic)?;
+    payload.read_exact_at(0, &mut magic)?;
     if &magic != PAYLOAD_MAGIC {
         return Err(DynoError::Tool("Invalid payload magic".into()));
     }
 
     // 2. Version (8 bytes, Big Endian)
     let mut version_bytes = [0u8; 8];
-    file.read_exact(&mut version_bytes)?;
+    payload.read_exact_at(4, &mut version_bytes)?;
     let version = u64::from_be_bytes(version_bytes);
 
     // 3. Manifest Size (8 bytes, Big Endian)
     let mut manifest_size_bytes = [0u8; 8];
-    file.read_exact(&mut manifest_size_bytes)?;
+    payload.read_exact_at(12, &mut manifest_size_bytes)?;
     let manifest_size = u64::from_be_bytes(manifest_size_bytes);
 
     // ChromeOS/Android Version 2+ logic
@@ -123,7 +283,7 @@ pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
     let mut metadata_signature_size = 0;
     let manifest_offset: u64 = if version >= 2 {
         let mut sig_size_bytes = [0u8; 4];
-        file.read_exact(&mut sig_size_bytes)?;
+        payload.read_exact_at(20, &mut sig_size_bytes)?;
         metadata_signature_size = u32::from_be_bytes(sig_size_bytes);
         24 // 4 + 8 + 8 + 4
     } else {
@@ -133,14 +293,14 @@ pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
     // 5. Read Manifest
     // `manifest_size` is an attacker/corruption-controlled u64 from the
     // header. Validate it against an explicit allocation ceiling *and* the
-    // actual file length before allocating so a malformed payload cannot
+    // actual payload length before allocating so a malformed payload cannot
     // trigger a multi-GB allocation or truncate on a 32-bit `usize`.
     if manifest_size > MAX_MANIFEST_BYTES {
         return Err(DynoError::Tool(format!(
             "Payload manifest size {manifest_size} exceeds maximum allowed {MAX_MANIFEST_BYTES} bytes"
         )));
     }
-    let file_len = file.metadata()?.len();
+    let file_len = payload.len();
     let manifest_end = manifest_offset
         .checked_add(manifest_size)
         .ok_or_else(|| DynoError::Tool("Payload manifest offset/size overflow".into()))?;
@@ -149,10 +309,7 @@ pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
             "Payload manifest size {manifest_size} exceeds file length {file_len}"
         )));
     }
-    let manifest_size_usize = usize::try_from(manifest_size)
-        .map_err(|_| DynoError::Tool("Payload manifest size exceeds addressable memory".into()))?;
-    let mut manifest_buf = vec![0u8; manifest_size_usize];
-    file.read_exact(&mut manifest_buf)?;
+    let manifest_buf = payload.read_vec(manifest_offset, manifest_size)?;
 
     use prost::Message;
     let manifest = proto::DeltaArchiveManifest::decode(&manifest_buf[..])
@@ -206,27 +363,29 @@ pub fn parse_payload_metadata(path: &Path) -> Result<PayloadMetadata> {
     })
 }
 
-pub fn inspect_payload(payload_path: &Path) -> Result<PayloadPreflightReport> {
+/// Decode the manifest once so callers can reuse it per partition.
+pub fn read_manifest(
+    payload: &Payload,
+    metadata: &PayloadMetadata,
+) -> Result<proto::DeltaArchiveManifest> {
     use prost::Message;
+    let manifest_buf = payload.read_vec(metadata.manifest_offset, metadata.manifest_size)?;
+    proto::DeltaArchiveManifest::decode(&manifest_buf[..])
+        .map_err(|e| DynoError::Tool(format!("Failed to decode payload manifest: {}", e)))
+}
 
-    let metadata = parse_payload_metadata(payload_path)?;
-    let mut payload_file = File::open(payload_path)?;
-    // `parse_payload_metadata` already enforced the allocation ceiling and
-    // file-range checks; re-check the usize conversion so the second
-    // allocation path cannot silently truncate on 32-bit targets.
-    let manifest_size_usize = usize::try_from(metadata.manifest_size)
-        .map_err(|_| DynoError::Tool("Payload manifest size exceeds addressable memory".into()))?;
-    let mut manifest_buf = vec![0u8; manifest_size_usize];
-    payload_file.seek(SeekFrom::Start(metadata.manifest_offset))?;
-    payload_file.read_exact(&mut manifest_buf)?;
+pub fn inspect_payload(payload_path: &Path) -> Result<PayloadPreflightReport> {
+    inspect_payload_from(&Payload::open_file(payload_path)?)
+}
 
-    let manifest = proto::DeltaArchiveManifest::decode(&manifest_buf[..])
-        .map_err(|e| DynoError::Tool(format!("Failed to decode payload manifest: {}", e)))?;
+pub fn inspect_payload_from(payload: &Payload) -> Result<PayloadPreflightReport> {
+    let metadata = parse_payload_metadata_from(payload)?;
+    let manifest = read_manifest(payload, &metadata)?;
 
     let mut operation_counts = BTreeMap::new();
     let mut unsupported_operations = Vec::new();
     let data_offset = metadata.data_offset();
-    let payload_len = payload_file.metadata()?.len();
+    let payload_len = payload.len();
 
     for partition in &manifest.partitions {
         for (operation_index, operation) in partition.operations.iter().enumerate() {
@@ -253,14 +412,7 @@ pub fn inspect_payload(payload_path: &Path) -> Result<PayloadPreflightReport> {
                         "Operation data range {blob_start}..{blob_end} exceeds payload length {payload_len}"
                     )));
                 }
-                let data_len = usize::try_from(data_length).map_err(|_| {
-                    DynoError::Tool("Operation data length exceeds addressable memory".into())
-                })?;
-                blob.resize(data_len, 0);
-                if !blob.is_empty() {
-                    payload_file.seek(SeekFrom::Start(blob_start))?;
-                    payload_file.read_exact(&mut blob)?;
-                }
+                blob = payload.read_vec(blob_start, data_length)?;
             }
 
             let support = inspect_operation_support(operation, &blob)?;
@@ -403,6 +555,62 @@ mod tests {
             "expected cap/overflow error, got: {err}"
         );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn opens_a_stored_payload_zip_in_place() {
+        use super::{Payload, parse_payload_metadata_from};
+        use prost::Message;
+
+        let dir = std::env::temp_dir().join(format!("dynobox-payload-zip-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("ota.zip");
+
+        let manifest = super::proto::DeltaArchiveManifest {
+            block_size: Some(4096),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(PAYLOAD_MAGIC);
+        bytes.extend_from_slice(&2u64.to_be_bytes());
+        bytes.extend_from_slice(&(manifest.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&manifest);
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer
+                .start_file(
+                    "payload.bin",
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )
+                .unwrap();
+            writer.write_all(&bytes).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let scratch = dir.join("scratch");
+        let payload = Payload::open_ota(&zip_path, &scratch).unwrap();
+        assert_eq!(payload.len(), bytes.len() as u64);
+        assert!(
+            !scratch.exists(),
+            "a stored payload must be read in place, not extracted"
+        );
+        let metadata = parse_payload_metadata_from(&payload).unwrap();
+        assert_eq!(metadata.version, 2);
+        assert_eq!(metadata.block_size, 4096);
+
+        let mut magic = [0u8; 4];
+        payload.read_exact_at(0, &mut magic).unwrap();
+        assert_eq!(&magic, PAYLOAD_MAGIC);
+        assert!(
+            payload.read_exact_at(payload.len(), &mut [0u8; 1]).is_err(),
+            "reads past the payload must fail"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Per-partition OTA size breakdown for a real OTA zip.

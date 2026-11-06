@@ -4,11 +4,12 @@ pub mod puffin;
 
 pub use patcher::{
     ApplyProgressCallback, OperationSupportInfo, apply_partition_payload,
-    apply_partition_payload_with_progress, inspect_operation_support,
+    apply_partition_payload_from, apply_partition_payload_with_progress, inspect_operation_support,
 };
 pub use payload::{
-    PayloadMetadata, PayloadPartitionInfo, PayloadPreflightReport, UnsupportedOperation,
-    extract_payload, inspect_payload, parse_payload_metadata,
+    Payload, PayloadMetadata, PayloadPartitionInfo, PayloadPreflightReport, UnsupportedOperation,
+    extract_payload, inspect_payload, inspect_payload_from, parse_payload_metadata,
+    parse_payload_metadata_from, read_manifest,
 };
 pub use puffin::apply_puffpatch;
 

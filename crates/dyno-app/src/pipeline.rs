@@ -1059,9 +1059,11 @@ where
     let mut unsupported_messages = Vec::new();
 
     for (index, zip_path) in ota_zips.iter().enumerate() {
+        // `payload.bin` is STORED in every real OTA zip, so the manifest can be
+        // read straight out of the archive without extracting the payload.
         let preflight_dir = scratch_dir.join(format!("preflight_ota_{index}"));
-        let payload_path = dynobox_payload::extract_payload(zip_path, &preflight_dir)?;
-        let report = dynobox_payload::inspect_payload(&payload_path)?;
+        let payload = dynobox_payload::Payload::open_ota(zip_path, &preflight_dir)?;
+        let report = dynobox_payload::inspect_payload_from(&payload)?;
 
         total_partitions += report.partition_count;
         total_operations += report.total_operations;
@@ -1256,7 +1258,9 @@ fn apply_payload_with_event_progress<S>(
     events: &mut S,
     stage: StageKind,
     item: &str,
-    payload_path: &Path,
+    payload: &dynobox_payload::Payload,
+    metadata: &dynobox_payload::PayloadMetadata,
+    manifest: &dynobox_payload::payload::proto::DeltaArchiveManifest,
     old_image: &Path,
     new_image: &Path,
     block_size: u32,
@@ -1286,8 +1290,10 @@ where
             unit: ProgressUnit::Bytes,
         });
     };
-    dynobox_payload::apply_partition_payload_with_progress(
-        payload_path,
+    dynobox_payload::apply_partition_payload_from(
+        payload,
+        metadata,
+        manifest,
         item,
         old_image,
         new_image,
@@ -1398,8 +1404,10 @@ where
         );
 
         let working_dir = scratch_dir.join(format!("working_ota_{}", zip_index));
-        let payload_path = dynobox_payload::extract_payload(zip_path, &working_dir)?;
-        let metadata = dynobox_payload::parse_payload_metadata(&payload_path)?;
+        std::fs::create_dir_all(&working_dir)?;
+        let payload = dynobox_payload::Payload::open_ota(zip_path, &working_dir)?;
+        let metadata = dynobox_payload::parse_payload_metadata_from(&payload)?;
+        let manifest = dynobox_payload::read_manifest(&payload, &metadata)?;
 
         message(
             events,
@@ -1459,7 +1467,9 @@ where
                         events,
                         StageKind::Apply,
                         &p_info.name,
-                        &payload_path,
+                        &payload,
+                        &metadata,
+                        &manifest,
                         &recon_src,
                         &temp_new,
                         metadata.block_size,
@@ -1590,7 +1600,9 @@ where
                 events,
                 StageKind::Apply,
                 &p_info.name,
-                &payload_path,
+                &payload,
+                &metadata,
+                &manifest,
                 &src_path,
                 &temp_new,
                 metadata.block_size,

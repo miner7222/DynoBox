@@ -1,10 +1,15 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sha2::{Digest, Sha256};
 
-use crate::payload::proto::{Extent, InstallOperation, install_operation::Type};
+use crate::payload::proto::{
+    DeltaArchiveManifest, Extent, InstallOperation, install_operation::Type,
+};
+use crate::payload::{Payload, PayloadMetadata, parse_payload_metadata_from, read_manifest};
 use crate::puffin::{PuffPatchKind, apply_puffpatch_bytes, inspect_puff_patch_type};
 use dynobox_core::error::{DynoError, Result};
 use dynobox_core::hex::hex_encode;
@@ -745,11 +750,40 @@ pub fn apply_partition_payload_with_progress(
     old_image: &Path,
     new_image: &Path,
     block_size: u32,
+    progress: Option<ApplyProgressCallback>,
+) -> Result<()> {
+    let payload = Payload::open_file(payload_path)?;
+    let metadata = parse_payload_metadata_from(&payload)?;
+    let manifest = read_manifest(&payload, &metadata)?;
+    apply_partition_payload_from(
+        &payload,
+        &metadata,
+        &manifest,
+        partition_name,
+        old_image,
+        new_image,
+        block_size,
+        progress,
+    )
+}
+
+/// Apply one partition from an already-open payload and decoded manifest.
+///
+/// Apply pipelines open the OTA payload once and decode the manifest once, then
+/// call this per partition. The path-based
+/// [`apply_partition_payload_with_progress`] wrapper re-opens both for callers
+/// that only have a payload file.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_partition_payload_from(
+    payload: &Payload,
+    metadata: &PayloadMetadata,
+    manifest: &DeltaArchiveManifest,
+    partition_name: &str,
+    old_image: &Path,
+    new_image: &Path,
+    block_size: u32,
     mut progress: Option<ApplyProgressCallback>,
 ) -> Result<()> {
-    use crate::payload::parse_payload_metadata;
-    use prost::Message;
-
     // Caller-supplied `block_size` is also used as a divisor inside
     // `regenerate_verity_hash_tree` (and as a multiplier feeding all
     // extent arithmetic). A zero value triggers a div-by-zero panic
@@ -760,19 +794,7 @@ pub fn apply_partition_payload_with_progress(
         ));
     }
 
-    let metadata = parse_payload_metadata(payload_path)?;
-    let mut payload_file = File::open(payload_path)?;
-
     let data_offset = metadata.data_offset();
-
-    let manifest_size_usize = usize::try_from(metadata.manifest_size)
-        .map_err(|_| DynoError::Tool("Payload manifest size exceeds addressable memory".into()))?;
-    let mut manifest_buf = vec![0u8; manifest_size_usize];
-    payload_file.seek(SeekFrom::Start(metadata.manifest_offset))?;
-    payload_file.read_exact(&mut manifest_buf)?;
-
-    let manifest = crate::payload::proto::DeltaArchiveManifest::decode(&manifest_buf[..])
-        .map_err(|e| DynoError::Tool(format!("Failed to re-decode manifest: {}", e)))?;
 
     let p_manifest = manifest
         .partitions
@@ -782,7 +804,13 @@ pub fn apply_partition_payload_with_progress(
             DynoError::Tool(format!("Partition {} manifest not found", partition_name))
         })?;
 
-    let mut src_file = if old_image.exists() {
+    // A full-OTA partition has no source extents; open (and pre-copy) the
+    // source only when an operation actually reads it.
+    let needs_source = p_manifest
+        .operations
+        .iter()
+        .any(|op| !op.src_extents.is_empty());
+    let mut src_file = if needs_source && old_image.exists() {
         Some(File::open(old_image)?)
     } else {
         None
@@ -893,10 +921,8 @@ pub fn apply_partition_payload_with_progress(
             .expect("pre_copy_len > 0 implies a source");
         src.seek(SeekFrom::Start(0))?;
         dst_file.seek(SeekFrom::Start(0))?;
-        // 1 MiB scratch buffer matches the pre-refactor copy loop;
-        // chunking smaller would double the syscall count without
-        // helping the bar (we already throttle the callback below).
-        let mut buf = vec![0u8; 1024 * 1024];
+        // 8 MiB chunks keep a large seed copy close to a plain file copy.
+        let mut buf = vec![0u8; 8 * 1024 * 1024];
         let mut remaining = pre_copy_len;
         // Throttle the callback so a 12 GiB pre-copy doesn't emit 12 000
         // events at 1 MiB granularity. 16 MiB ≈ 0.5–1 update per second
@@ -929,39 +955,107 @@ pub fn apply_partition_payload_with_progress(
     // small SOURCE_COPY / ZERO ops where `data_length` is 0. Hoisting
     // the buffer keeps the capacity high water mark and lets
     // `resize` reuse the existing allocation.
-    let payload_len = payload_file.metadata()?.len();
-    let mut blob: Vec<u8> = Vec::new();
-    for op in p_manifest.operations.iter() {
-        let data_length = op.data_length.unwrap_or(0);
-        // `data_length` / `data_offset` are manifest-controlled. Validate the
-        // requested byte range against the payload file before allocating so
-        // a malformed manifest cannot drive an OOM allocation or seek past
-        // EOF.
-        let blob_start = data_offset
-            .checked_add(op.data_offset.unwrap_or(0))
-            .ok_or_else(|| DynoError::Tool("Operation data offset overflow".into()))?;
-        let blob_end = blob_start
-            .checked_add(data_length)
-            .ok_or_else(|| DynoError::Tool("Operation data range overflow".into()))?;
-        if blob_end > payload_len {
-            return Err(DynoError::Tool(format!(
-                "Operation data range {blob_start}..{blob_end} exceeds payload length {payload_len}"
-            )));
-        }
-        let data_len = usize::try_from(data_length).map_err(|_| {
-            DynoError::Tool("Operation data length exceeds addressable memory".into())
+    // Reuse one blob buffer per worker; the parallel path needs one per thread.
+    let payload_len = payload.len();
+    let parallel_workers = parallel_replace_workers();
+    let parallel = parallel_workers > 1
+        && p_manifest.operations.len() >= parallel_workers * 2
+        && replace_only_ops(&p_manifest.operations)
+        && dst_extents_do_not_overlap(&p_manifest.operations, patcher.block_size);
+
+    if parallel {
+        // Full OTAs are almost entirely REPLACE/REPLACE_XZ with disjoint
+        // destination extents; fan them out and keep progress on this thread.
+        let ops = &p_manifest.operations;
+        let next = AtomicUsize::new(0);
+        let failure: Mutex<Option<DynoError>> = Mutex::new(None);
+        let (sender, receiver) = std::sync::mpsc::channel::<u64>();
+        std::thread::scope(|scope| -> Result<()> {
+            for _ in 0..parallel_workers {
+                let sender = sender.clone();
+                let next = &next;
+                let failure = &failure;
+                let dst = &dst_file;
+                let patcher = &patcher;
+                scope.spawn(move || {
+                    let mut blob: Vec<u8> = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        if index >= ops.len() {
+                            break;
+                        }
+                        if failure.lock().map(|slot| slot.is_some()).unwrap_or(true) {
+                            break;
+                        }
+                        match apply_replace_op_at(
+                            patcher,
+                            payload,
+                            data_offset,
+                            &ops[index],
+                            dst,
+                            new_size,
+                            &mut blob,
+                        ) {
+                            Ok(()) => {
+                                let _ =
+                                    sender.send(operation_progress_weight(&ops[index], block_size));
+                            }
+                            Err(error) => {
+                                if let Ok(mut slot) = failure.lock() {
+                                    *slot = Some(error);
+                                }
+                                let _ = sender.send(0);
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+            drop(sender);
+            for weight in receiver {
+                done_weight = done_weight.saturating_add(weight);
+                if let Some(cb) = progress.as_deref_mut() {
+                    cb(done_weight, total_weight);
+                }
+            }
+            Ok(())
         })?;
-        blob.resize(data_len, 0);
-        if !blob.is_empty() {
-            payload_file.seek(SeekFrom::Start(blob_start))?;
-            payload_file.read_exact(&mut blob)?;
+        if let Some(error) = failure.into_inner().unwrap_or(None) {
+            return Err(error);
         }
+    } else {
+        let mut blob: Vec<u8> = Vec::new();
+        for op in p_manifest.operations.iter() {
+            let data_length = op.data_length.unwrap_or(0);
+            // `data_length` / `data_offset` are manifest-controlled. Validate
+            // the requested byte range against the payload before allocating
+            // so a malformed manifest cannot drive an OOM allocation or read
+            // past EOF.
+            let blob_start = data_offset
+                .checked_add(op.data_offset.unwrap_or(0))
+                .ok_or_else(|| DynoError::Tool("Operation data offset overflow".into()))?;
+            let blob_end = blob_start
+                .checked_add(data_length)
+                .ok_or_else(|| DynoError::Tool("Operation data range overflow".into()))?;
+            if blob_end > payload_len {
+                return Err(DynoError::Tool(format!(
+                    "Operation data range {blob_start}..{blob_end} exceeds payload length {payload_len}"
+                )));
+            }
+            let data_len = usize::try_from(data_length).map_err(|_| {
+                DynoError::Tool("Operation data length exceeds addressable memory".into())
+            })?;
+            blob.resize(data_len, 0);
+            if !blob.is_empty() {
+                payload.read_exact_at(blob_start, &mut blob)?;
+            }
 
-        patcher.apply_operation(op, &blob, src_file.as_mut(), &mut dst_file)?;
+            patcher.apply_operation(op, &blob, src_file.as_mut(), &mut dst_file)?;
 
-        done_weight = done_weight.saturating_add(operation_progress_weight(op, block_size));
-        if let Some(cb) = progress.as_deref_mut() {
-            cb(done_weight, total_weight);
+            done_weight = done_weight.saturating_add(operation_progress_weight(op, block_size));
+            if let Some(cb) = progress.as_deref_mut() {
+                cb(done_weight, total_weight);
+            }
         }
     }
 
@@ -1014,6 +1108,227 @@ pub fn apply_partition_payload_with_progress(
     }
 
     Ok(())
+}
+
+/// Worker count for the parallel REPLACE path: decompression is CPU-bound and
+/// each worker holds one op blob, so use every logical CPU.
+fn parallel_replace_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 32)
+}
+
+/// Whether every operation is a self-contained write (no source partition
+/// read), which is what a full OTA payload contains.
+fn replace_only_ops(ops: &[InstallOperation]) -> bool {
+    ops.iter().all(|op| {
+        matches!(
+            Type::try_from(op.r#type),
+            Ok(Type::Replace) | Ok(Type::ReplaceBz) | Ok(Type::ReplaceXz) | Ok(Type::Zero)
+        )
+    })
+}
+
+/// Parallel apply is only safe when no two operations write the same block.
+/// update_engine guarantees this for real payloads; a malformed manifest falls
+/// back to the sequential path instead of racing writes.
+fn dst_extents_do_not_overlap(ops: &[InstallOperation], block_size: u64) -> bool {
+    let mut ranges: Vec<(u64, u64)> = Vec::new();
+    for op in ops {
+        for extent in &op.dst_extents {
+            let start = extent.start_block.unwrap_or(0).saturating_mul(block_size);
+            let length = extent.num_blocks.unwrap_or(0).saturating_mul(block_size);
+            let end = start.saturating_add(length);
+            if end < start {
+                return false;
+            }
+            ranges.push((start, end));
+        }
+    }
+    ranges.sort_unstable();
+    ranges.windows(2).all(|pair| pair[0].1 <= pair[1].0)
+}
+
+/// Apply one REPLACE / REPLACE_BZ / REPLACE_XZ / ZERO operation with positioned
+/// writes, so several workers can share the destination file.
+fn apply_replace_op_at(
+    patcher: &Patcher,
+    payload: &Payload,
+    data_offset: u64,
+    op: &InstallOperation,
+    dst_file: &File,
+    file_len: u64,
+    blob: &mut Vec<u8>,
+) -> Result<()> {
+    let op_type = Type::try_from(op.r#type)
+        .map_err(|_| DynoError::Tool(format!("Unknown operation type: {}", op.r#type)))?;
+    let data_length = op.data_length.unwrap_or(0);
+    let blob_start = data_offset
+        .checked_add(op.data_offset.unwrap_or(0))
+        .ok_or_else(|| DynoError::Tool("Operation data offset overflow".into()))?;
+    let blob_end = blob_start
+        .checked_add(data_length)
+        .ok_or_else(|| DynoError::Tool("Operation data range overflow".into()))?;
+    if blob_end > payload.len() {
+        return Err(DynoError::Tool(format!(
+            "Operation data range {blob_start}..{blob_end} exceeds payload length {}",
+            payload.len()
+        )));
+    }
+    let data_len = usize::try_from(data_length)
+        .map_err(|_| DynoError::Tool("Operation data length exceeds addressable memory".into()))?;
+    blob.resize(data_len, 0);
+    if !blob.is_empty() {
+        payload.read_exact_at(blob_start, blob)?;
+    }
+    validate_sha256("operation data", blob, op.data_sha256_hash.as_deref())?;
+
+    match op_type {
+        Type::Replace => patcher.write_extents_at(dst_file, file_len, &op.dst_extents, blob),
+        Type::ReplaceBz => {
+            let expected = patcher.count_extents_size(&op.dst_extents)?;
+            let decompressed = decompress_replace_to_exact_size(
+                bzip2::read::BzDecoder::new(&blob[..]),
+                expected,
+                "REPLACE_BZ",
+            )?;
+            patcher.write_extents_at(dst_file, file_len, &op.dst_extents, &decompressed)
+        }
+        Type::ReplaceXz => {
+            let expected = patcher.count_extents_size(&op.dst_extents)?;
+            let decompressed = decompress_replace_to_exact_size(
+                liblzma::read::XzDecoder::new(&blob[..]),
+                expected,
+                "REPLACE_XZ",
+            )?;
+            patcher.write_extents_at(dst_file, file_len, &op.dst_extents, &decompressed)
+        }
+        Type::Zero => {
+            let total_size = patcher.count_extents_size(&op.dst_extents)?;
+            let pattern_len =
+                usize::try_from(std::cmp::min(total_size, 1024 * 1024)).map_err(|_| {
+                    DynoError::Tool("ZERO pattern length exceeds addressable memory".into())
+                })?;
+            let zeros = vec![0u8; pattern_len];
+            patcher.write_repeated_at(dst_file, file_len, &op.dst_extents, &zeros, total_size)
+        }
+        _ => Err(DynoError::Tool(
+            "parallel apply received a non-replace operation".into(),
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn write_at_impl(file: &File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.write_at(buf, offset)
+}
+
+#[cfg(windows)]
+fn write_at_impl(file: &File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    file.seek_write(buf, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write_at_impl(file: &File, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut clone = file.try_clone()?;
+    clone.seek(SeekFrom::Start(offset))?;
+    clone.write(buf)
+}
+
+/// Positioned write covering the whole buffer.
+fn write_all_at(file: &File, mut buf: &[u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match write_at_impl(file, buf, offset) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "short positioned write",
+                ));
+            }
+            Ok(written) => {
+                offset += written as u64;
+                buf = &buf[written..];
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+impl Patcher {
+    fn write_extents_at(
+        &self,
+        file: &File,
+        file_len: u64,
+        extents: &[Extent],
+        data: &[u8],
+    ) -> Result<()> {
+        self.validate_extents_within_file(extents, file_len, "destination")?;
+        let total_required = self.count_extents_size(extents)?;
+        if (data.len() as u64) < total_required {
+            return Err(DynoError::Tool(format!(
+                "REPLACE data is {} bytes but destination extents need {} bytes",
+                data.len(),
+                total_required
+            )));
+        }
+        let mut data_offset = 0usize;
+        for extent in extents {
+            let (offset, size) = self.extent_byte_range(extent)?;
+            let size_usize = usize::try_from(size).map_err(|_| {
+                DynoError::Tool(format!("Extent length {size} exceeds addressable memory"))
+            })?;
+            let end = data_offset.checked_add(size_usize).ok_or_else(|| {
+                DynoError::Tool("REPLACE data offset overflow while slicing blob".into())
+            })?;
+            if end > data.len() {
+                return Err(DynoError::Tool(format!(
+                    "REPLACE data is {} bytes but destination extents need {} bytes",
+                    data.len(),
+                    total_required
+                )));
+            }
+            write_all_at(file, &data[data_offset..end], offset)?;
+            data_offset = end;
+        }
+        Ok(())
+    }
+
+    fn write_repeated_at(
+        &self,
+        file: &File,
+        file_len: u64,
+        extents: &[Extent],
+        pattern: &[u8],
+        mut total_to_write: u64,
+    ) -> Result<()> {
+        self.validate_extents_within_file(extents, file_len, "destination")?;
+        if pattern.is_empty() {
+            return Err(DynoError::Tool("ZERO pattern must not be empty".into()));
+        }
+        for extent in extents {
+            let (mut offset, mut extent_remaining) = self.extent_byte_range(extent)?;
+            while extent_remaining > 0 && total_to_write > 0 {
+                let chunk = std::cmp::min(extent_remaining, pattern.len() as u64);
+                let chunk = std::cmp::min(chunk, total_to_write);
+                let chunk_usize = usize::try_from(chunk).map_err(|_| {
+                    DynoError::Tool(format!(
+                        "ZERO write chunk {chunk} exceeds addressable memory"
+                    ))
+                })?;
+                write_all_at(file, &pattern[..chunk_usize], offset)?;
+                offset += chunk;
+                extent_remaining -= chunk;
+                total_to_write -= chunk;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn regenerate_fec(
@@ -1446,6 +1761,83 @@ mod tests {
             + 2 * block_size as u64;
         assert_eq!(total, expected_total);
         assert_eq!(done, total);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn parallel_replace_apply_writes_every_extent() {
+        let dir = test_temp_dir("parallel-replace");
+        let payload_path = dir.join("payload.bin");
+        let old_image = dir.join("missing-old.img");
+        let new_image = dir.join("new.img");
+        let block_size = 4096u32;
+        let blocks = 64u64;
+
+        let mut operation_data = Vec::new();
+        let mut operations = Vec::new();
+        for block in 0..blocks {
+            let offset = operation_data.len() as u64;
+            let data: Vec<u8> = (0..block_size as u64)
+                .map(|index| ((block * 7 + index) % 251) as u8)
+                .collect();
+            operations.push(InstallOperation {
+                r#type: Type::Replace as i32,
+                data_offset: Some(offset),
+                data_length: Some(data.len() as u64),
+                dst_extents: vec![extent(block, 1)],
+                ..Default::default()
+            });
+            operation_data.extend_from_slice(&data);
+        }
+        let partition = PartitionUpdate {
+            partition_name: "system".into(),
+            new_partition_info: Some(PartitionInfo {
+                size: Some(blocks * block_size as u64),
+                ..Default::default()
+            }),
+            operations,
+            ..Default::default()
+        };
+        let manifest = DeltaArchiveManifest {
+            block_size: Some(block_size),
+            partitions: vec![partition],
+            ..Default::default()
+        };
+        let manifest_bytes = manifest.encode_to_vec();
+        let mut payload = fs::File::create(&payload_path).unwrap();
+        payload.write_all(crate::payload::PAYLOAD_MAGIC).unwrap();
+        payload.write_all(&2u64.to_be_bytes()).unwrap();
+        payload
+            .write_all(&(manifest_bytes.len() as u64).to_be_bytes())
+            .unwrap();
+        payload.write_all(&0u32.to_be_bytes()).unwrap();
+        payload.write_all(&manifest_bytes).unwrap();
+        payload.write_all(&operation_data).unwrap();
+        payload.flush().unwrap();
+        drop(payload);
+
+        apply_partition_payload_with_progress(
+            &payload_path,
+            "system",
+            &old_image,
+            &new_image,
+            block_size,
+            None,
+        )
+        .unwrap();
+
+        let out = fs::read(&new_image).unwrap();
+        assert_eq!(out.len(), (blocks * block_size as u64) as usize);
+        for block in 0..blocks {
+            let start = (block * block_size as u64) as usize;
+            for index in 0..block_size as u64 {
+                assert_eq!(
+                    out[start + index as usize],
+                    ((block * 7 + index) % 251) as u8,
+                    "block {block} byte {index}"
+                );
+            }
+        }
         fs::remove_dir_all(dir).unwrap();
     }
 
