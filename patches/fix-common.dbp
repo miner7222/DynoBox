@@ -1530,3 +1530,19 @@ proto = "(Landroid/content/Context;Landroid/app/ActivityManager;Ljava/lang/Strin
 from = "12 03 0f 03"
 to = "28 02 00 00"
 expected = 1
+
+# Zui's QS tile label is a CustomQSTileTextView whose layouts pin
+# android:breakStrategy="0" (BREAK_STRATEGY_SIMPLE). When
+# CustomQSTileLabelRelativeLayout switches the label to two lines it then
+# breaks Korean text between Hangul syllables. Raise the strategy to
+# BREAK_STRATEGY_HIGH_QUALITY (1) on the tile label in every layout that
+# carries the attribute; entries without it are skipped, so the expected
+# count is only the two custom_qs_tile_label variants.
+[[op]]
+kind = "layout_int_attribute"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+node_id = 0x7f0b0c6d
+attribute = "breakStrategy"
+value = 1
+expected = 2

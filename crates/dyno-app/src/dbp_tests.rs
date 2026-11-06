@@ -1000,7 +1000,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(uc.ops.len(), 85);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 30);
+    assert_eq!(fc.ops.len(), 31);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 5);
@@ -1333,6 +1333,35 @@ fn bundled_unlock_adds_global_gpp_games() {
             }
         }
         other => panic!("unexpected gpp op: {other:?}"),
+    }
+}
+
+/// Zui's two-line QS tile label pins breakStrategy to SIMPLE and breaks Korean
+/// between syllables; raise it to HIGH_QUALITY on the tile label node.
+#[test]
+fn bundled_fix_common_sets_qs_label_break_strategy() {
+    let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+    let op = fc
+        .ops
+        .iter()
+        .find(|op| matches!(op, DbpOp::LayoutIntAttribute { attribute, .. } if attribute == "breakStrategy"))
+        .expect("qs label break strategy op");
+    match op {
+        DbpOp::LayoutIntAttribute {
+            partition,
+            file,
+            node_id,
+            value,
+            expected,
+            ..
+        } => {
+            assert_eq!(partition, "system_ext");
+            assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
+            assert_eq!(*node_id, 0x7f0b0c6d);
+            assert_eq!(*value, 1);
+            assert_eq!(*expected, 2);
+        }
+        other => panic!("unexpected qs label op: {other:?}"),
     }
 }
 
