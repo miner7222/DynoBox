@@ -1,6 +1,7 @@
 //! Custom OTA support: signing keys and OTA generation from DynoBox image
 //! directories.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,7 @@ use dynobox_payload::payload::proto::{DeltaArchiveManifest, PartitionInfo, Parti
 use sha2::{Digest, Sha256};
 
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
+use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume};
 use crate::integrity_signature::write_atomic_noclobber;
 use crate::pipeline;
 
@@ -303,19 +305,95 @@ fn select_partitions<'a>(
         .collect())
 }
 
-fn cow_free_dynamic_metadata(manifest: &DeltaArchiveManifest) -> Result<()> {
-    if manifest
-        .dynamic_partition_metadata
-        .as_ref()
-        .and_then(|d| d.vabc_enabled)
-        .unwrap_or(false)
-    {
-        bail!(
-            "the reference OTA uses Virtual A/B compression, which needs CoW size \
-             estimates DynoBox does not compute yet"
-        );
+/// Parse an Android `build.prop` into key/value pairs. Quoted values lose
+/// their quotes; unknown/malformed lines are ignored.
+fn parse_build_props(text: &str) -> BTreeMap<String, String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            Some((
+                key.trim().to_string(),
+                value.trim().trim_matches('"').to_string(),
+            ))
+        })
+        .collect()
+}
+
+/// Build the OTA postcondition and downgrade ceiling from the target build.
+///
+/// An OEM reference OTA can belong to a different build (for example an older
+/// incremental used only for partition sizes). Copying its `post-build` and
+/// `max_timestamp` would then label the package as that older build and make
+/// update_engine reject it as a downgrade, so the postcondition and the
+/// downgrade ceiling must come from the target images instead.
+fn read_target_device_state<S>(
+    targets: &mut PartitionImages<'_>,
+    included: &[&PartitionUpdate],
+    events: &mut S,
+    reference: &Reference,
+) -> Result<DeviceState>
+where
+    S: EventSink + ?Sized,
+{
+    let size = included
+        .iter()
+        .find(|p| p.partition_name == "system")
+        .and_then(|p| p.new_partition_info.as_ref().and_then(|info| info.size))
+        .ok_or_else(|| anyhow!("reference OTA gives no new size for `system`"))?;
+    let image = targets.locate("system", size, events)?;
+    let mut volume = open_ext4_volume(&image)?;
+    let inode = lookup_inode_at_path(&mut volume, &["system", "build.prop"])?
+        .ok_or_else(|| anyhow!("target system image has no /system/build.prop"))?;
+    let bytes = inode
+        .open_read(&mut volume)
+        .context("reading the target /system/build.prop")?;
+    let text = String::from_utf8_lossy(&bytes);
+    let props = parse_build_props(&text);
+    let get = |key: &str| props.get(key).cloned().unwrap_or_default();
+
+    // Lenovo rewrites the runtime fingerprint at boot (region suffix), so the
+    // image only has the partition-level fingerprint. Prefer the full one when
+    // present; otherwise use the system fingerprint rather than failing: the
+    // package's post-build is informational for update_engine.
+    let fingerprint = {
+        let full = get("ro.build.fingerprint");
+        if full.is_empty() {
+            get("ro.system.build.fingerprint")
+        } else {
+            full
+        }
+    };
+    if fingerprint.is_empty() {
+        bail!("target build.prop has no build fingerprint");
     }
-    Ok(())
+    let timestamp = get("ro.build.date.utc").parse::<i64>().unwrap_or(0);
+    if timestamp <= 0 {
+        bail!("target build.prop has no usable ro.build.date.utc");
+    }
+    let build_incremental = get("ro.build.version.incremental");
+    // When the reference OTA was built from the same build (same incremental)
+    // its post-build is the OEM's own fingerprint, which is better than the
+    // partition-level one the image carries.
+    let build = reference
+        .metadata
+        .postcondition
+        .as_ref()
+        .filter(|post| !post.build.is_empty() && post.build_incremental == build_incremental)
+        .map(|post| post.build.clone())
+        .unwrap_or_else(|| vec![fingerprint]);
+    Ok(DeviceState {
+        device: vec![get("ro.product.device")],
+        build,
+        build_incremental,
+        timestamp,
+        sdk_level: get("ro.build.version.sdk"),
+        security_patch_level: get("ro.build.version.security_patch"),
+        ..Default::default()
+    })
 }
 
 /// Build a signed A/B OTA of `request.target`: incremental from
@@ -346,7 +424,9 @@ where
     });
 
     let reference = read_reference(&request.reference)?;
-    cow_free_dynamic_metadata(&reference.manifest)?;
+    // Virtual A/B compression is fine: the generated payload keeps the
+    // reference's dynamic-partition metadata (including its VABC settings) and
+    // update_engine applies the plain delta ops through snapuserd.
     // With an OEM incremental, reuse its operations; with a full reference
     // or when asked, diff A' and B' block by block.
     let incremental_reference = reference.manifest.minor_version.unwrap_or(0) > 0;
@@ -386,6 +466,9 @@ where
         Some(dir) => Some(PartitionImages::new(dir, &source_scratch)?),
         None => None,
     };
+    // The reference may describe another build; always label the package with
+    // the target's own fingerprint and downgrade ceiling.
+    let target_state = read_target_device_state(&mut targets, &included, events, &reference)?;
     let mut reference_blobs = match rebase {
         true => Some(crate::ota_rebase::ReferenceBlobs::open(
             &reference.path,
@@ -496,6 +579,23 @@ where
                     filesystem_type: reference_partition.filesystem_type.clone(),
                     postinstall_optional: reference_partition.postinstall_optional,
                     version: reference_partition.version.clone(),
+                    // VABC needs a COW size per partition; derive a bound from
+                    // the ops we just generated (the reference's estimate is
+                    // for its own, much larger payload).
+                    estimate_cow_size: Some({
+                        // VABC sizes the COW from the blocks it must write.
+                        // The delta carries whole-partition source-copy ops, so
+                        // dst extents cover the partition; only the carried
+                        // blobs actually land in the COW. A generous multiple
+                        // plus a floor keeps the total under the device's free
+                        // space while covering compression expansion.
+                        let data: u64 = delta
+                            .operations
+                            .iter()
+                            .map(|op| op.data_length.unwrap_or(0))
+                            .sum();
+                        (data * 8 + delta.operations.len() as u64 * 256 + (32 << 20)).min(size)
+                    }),
                     old_partition_info: delta.old_hash.map(|hash| PartitionInfo {
                         size: Some(old_size),
                         hash: Some(hash.to_vec()),
@@ -533,6 +633,18 @@ where
                     filesystem_type: reference_partition.filesystem_type.clone(),
                     postinstall_optional: reference_partition.postinstall_optional,
                     version: reference_partition.version.clone(),
+                    // VABC snapshots need a COW size; the reference's estimate
+                    // is for its own (much larger) payload, so derive a bound
+                    // from the ops we just wrote.
+                    estimate_cow_size: Some(
+                        encoded
+                            .operations
+                            .iter()
+                            .map(|op| op.dst_length.unwrap_or(0).max(op.data_length.unwrap_or(0)))
+                            .sum::<u64>()
+                            .saturating_mul(2)
+                            .saturating_add(4 << 20),
+                    ),
                     new_partition_info: Some(PartitionInfo {
                         size: Some(size),
                         hash: Some(encoded.hash.to_vec()),
@@ -553,7 +665,10 @@ where
         manifest.partitions = partitions;
         manifest.signatures_offset = None;
         manifest.signatures_size = None;
-        (manifest, reference.metadata.clone())
+        manifest.max_timestamp = Some(target_state.timestamp);
+        let mut metadata = reference.metadata.clone();
+        metadata.postcondition = Some(target_state.clone());
+        (manifest, metadata)
     } else {
         // Full and native-delta OTAs pin only the device: a delta run on the
         // wrong build fails update_engine's source hash checks before the
@@ -562,7 +677,7 @@ where
             block_size: Some(block_size),
             minor_version: Some(if delta { DELTA_MINOR_VERSION } else { 0 }),
             partitions,
-            max_timestamp: reference.manifest.max_timestamp,
+            max_timestamp: Some(target_state.timestamp),
             dynamic_partition_metadata: reference.manifest.dynamic_partition_metadata.clone(),
             partial_update: reference.manifest.partial_update,
             apex_info: reference.manifest.apex_info.clone(),
@@ -581,7 +696,7 @@ where
                     .unwrap_or_default(),
                 ..Default::default()
             }),
-            postcondition: reference.metadata.postcondition.clone(),
+            postcondition: Some(target_state.clone()),
             ..Default::default()
         };
         (manifest, metadata)
@@ -731,6 +846,33 @@ mod tests {
             .to_string();
         assert!(err.contains("refusing to overwrite"), "{err}");
         assert!(generate_ota_keypair(&key_path, &key_path, 2048, "x").is_err());
+    }
+
+    #[test]
+    fn parse_build_props_reads_fingerprint_and_timestamp() {
+        let props = parse_build_props(
+            "# comment\n\nro.build.fingerprint=Lenovo/TB324ZC/TB324ZC:17/x/y:user/release-keys\n\
+             ro.build.date.utc=1793437559\n\
+             ro.build.version.sdk=\"37\"\n\
+             ro.product.device=TB324ZC\n",
+        );
+        assert_eq!(
+            props.get("ro.build.fingerprint").map(String::as_str),
+            Some("Lenovo/TB324ZC/TB324ZC:17/x/y:user/release-keys")
+        );
+        assert_eq!(
+            props.get("ro.build.date.utc").map(String::as_str),
+            Some("1793437559")
+        );
+        assert_eq!(
+            props.get("ro.build.version.sdk").map(String::as_str),
+            Some("37")
+        );
+        assert_eq!(
+            props.get("ro.product.device").map(String::as_str),
+            Some("TB324ZC")
+        );
+        assert!(!props.contains_key("# comment"));
     }
 
     #[test]
