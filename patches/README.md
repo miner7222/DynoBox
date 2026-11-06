@@ -538,6 +538,11 @@ while still advancing the setup wizard.
 * **`debloat-wuji.dbp`**
 * **`enable-adb-debug.dbp`**
 * **`fix-common.dbp`**
+* **`fix-wuji.dbp`** — keeps the Netflix Widevine L1 BSP revision set on
+  the Wuji build. `vendor.media.system.build_codename` is empty on A17, so
+  `init.qti.media.sh` never runs its `setprop vendor.netflix.bsp_rev` and
+  Netflix drops to L3 while Widevine still reports L1; the patch makes the
+  canoe guard unconditional without changing the line length
 * **`show-google-lens.dbp`**
 * **`unlock-common.dbp`**
 * **`unlock-wuji.dbp`** — surfaces the hidden Developer options "device

@@ -1,0 +1,22 @@
+name = "fix-wuji"
+description = "Wuji-only fixes: keep the Netflix Widevine L1 BSP revision set on Android 17."
+
+# /vendor/bin/init.qti.media.sh decides the Netflix BSP revision from the
+# platform name plus `vendor.media.system.build_codename`. That vendor property
+# is empty on A17 (the rc that copies ro.build.version.release_or_codename into
+# it does not land), so the numeric test aborts and the canoe branch never runs
+# `setprop vendor.netflix.bsp_rev`. The prop stays empty even though Widevine
+# reports L1 (sys.lenovo.widevine_security_level=L1), and Netflix falls back to
+# L3 for lack of the revision string.
+#
+# Make the canoe guard unconditional by swapping the variable for a literal and
+# padding with spaces, keeping the line byte-for-byte the same length. The
+# per-soc_hwid overrides below still run: 660/661/704 at hardware revision 1.0,
+# 743 and 722/723 keep their explicit 0, and every other unit gets the
+# Q8850-41474-1 revision this script was written to set on the platform.
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "bin/init.qti.media.sh"
+from = "        if [ $build_codename -le \"16\" ]; then"
+to = "        if [ \"0\"             -le \"16\" ]; then"

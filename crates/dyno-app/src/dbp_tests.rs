@@ -1013,6 +1013,9 @@ fn bundled_dbp_files_inventory() {
     let wj = load_dbp(&patches_dir().join("unlock-wuji.dbp")).expect("unlock-wuji.dbp");
     assert_eq!(wj.name, "unlock-wuji");
     assert_eq!(wj.ops.len(), 1);
+    let fw = load_dbp(&patches_dir().join("fix-wuji.dbp")).expect("fix-wuji.dbp");
+    assert_eq!(fw.name, "fix-wuji");
+    assert_eq!(fw.ops.len(), 1);
 }
 
 /// A17's "Built-in Data SIM Card" OOBE page only advances through the TianXi
@@ -1057,6 +1060,38 @@ fn bundled_debloat_skips_builtin_sim_page() {
             assert!(!*value, "supportLight must be forced off");
         }
         _ => panic!("wrong variant"),
+    }
+}
+
+/// A17 leaves `vendor.media.system.build_codename` empty, so the canoe guard in
+/// `/vendor/bin/init.qti.media.sh` aborts and `vendor.netflix.bsp_rev` is never
+/// set; without it Netflix reports L3 even though Widevine is L1. The fix makes
+/// that single guard unconditional with a same-length replacement.
+#[test]
+fn bundled_fix_wuji_keeps_netflix_bsp_rev() {
+    let fw = load_dbp(&patches_dir().join("fix-wuji.dbp")).expect("fix-wuji.dbp");
+    assert_eq!(fw.ops.len(), 1);
+    match &fw.ops[0] {
+        DbpOp::TextReplace {
+            partition,
+            file,
+            from,
+            to,
+            all,
+        } => {
+            assert_eq!(partition, "vendor");
+            assert_eq!(file, "bin/init.qti.media.sh");
+            assert_eq!(from.len(), to.len(), "size-preserving replacement");
+            assert!(from.contains("$build_codename"), "guards on the empty prop");
+            assert!(from.contains("-le \"16\""));
+            assert!(
+                !to.contains("$build_codename"),
+                "guard must not read the prop"
+            );
+            assert!(to.contains("-le \"16\""));
+            assert!(!*all, "the guard line occurs once per script");
+        }
+        other => panic!("unexpected fix-wuji op: {other:?}"),
     }
 }
 
@@ -7939,6 +7974,7 @@ fn audit_bundled_dbps_per_op() {
         "debloat-wuji.dbp",
         "enable-adb-debug.dbp",
         "fix-common.dbp",
+        "fix-wuji.dbp",
         "show-google-lens.dbp",
         "unlock-common.dbp",
     ] {
@@ -8012,6 +8048,7 @@ fn dump_bundled_dbp_targets() {
         "debloat-wuji.dbp",
         "enable-adb-debug.dbp",
         "fix-common.dbp",
+        "fix-wuji.dbp",
         "show-google-lens.dbp",
         "unlock-common.dbp",
     ] {
