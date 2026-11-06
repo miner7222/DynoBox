@@ -994,7 +994,7 @@ fn patches_dir() -> std::path::PathBuf {
 fn bundled_dbp_files_inventory() {
     let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
     assert_eq!(dc.name, "debloat-common");
-    assert_eq!(dc.ops.len(), 93);
+    assert_eq!(dc.ops.len(), 95);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
     assert_eq!(uc.ops.len(), 84);
@@ -1248,6 +1248,54 @@ fn bundled_fix_common_lockscreen_date_uses_description_pattern() {
             assert_eq!(value, "EEEE MMMM d");
         }
         other => panic!("unexpected lockscreen date op: {other:?}"),
+    }
+}
+
+/// The never-activated built-in data SIM on slot 1 still counts as an active
+/// subscription, and SystemUI's mobile pipeline shows one signal icon per
+/// active subscription. Its icon filter drops models whose profileClass is 1,
+/// so both SubscriptionInfo mappers feed the slot index into profileClass:
+/// slot 0 (physical SIM) stays, slot 1 is dropped from the icon list.
+#[test]
+fn bundled_debloat_hides_iot_signal_icon() {
+    let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+    for class in [
+        "Lcom/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionsRepositoryImpl$subscriptions$1;",
+        "Lcom/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionsRepositoryKairosImpl$fetchSubscriptionModels$2;",
+    ] {
+        let op = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class: c, method, .. }
+                        if c == class && method == "invokeSuspend")
+            })
+            .unwrap_or_else(|| panic!("missing signal-icon op for {class}"));
+        match op {
+            DbpOp::MethodCodePatch {
+                file,
+                proto,
+                symbols,
+                replacements,
+                ..
+            } => {
+                assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
+                assert_eq!(proto, "(Ljava/lang/Object;)Ljava/lang/Object;");
+                let names: Vec<String> = symbols.iter().map(|s| format!("{s:?}")).collect();
+                assert!(names.iter().any(|n| n.contains("get_profile_class")));
+                assert!(names.iter().any(|n| n.contains("get_sim_slot_index")));
+                assert_eq!(replacements.len(), 1);
+                let r = &replacements[0];
+                assert_eq!(
+                    r.from.split_whitespace().count(),
+                    r.to.split_whitespace().count(),
+                    "size-preserving replacement"
+                );
+                assert!(r.from.contains("get_profile_class"));
+                assert!(r.to.contains("get_sim_slot_index"));
+            }
+            other => panic!("unexpected signal-icon op: {other:?}"),
+        }
     }
 }
 

@@ -821,6 +821,73 @@ from = "1a 1a ${key_qq:u16} 4d 1a 08 0f"
 to = "1a 1a ${key_floating_info:u16} 4d 1a 08 0f"
 expected = 1
 
+# The status bar draws one mobile icon per subscription from SystemUI's
+# Android-16 mobile pipeline. Its SubscriptionModel carries profileClass, and
+# MobileIconsInteractorImpl drops entries whose profileClass is 1 (the
+# "testing" profile) behind the released filter_provisioning_network_subscriptions
+# flag. The never-activated built-in data SIM sits on slot 1 and still counts
+# as an active subscription, so its "no service" icon shows up next to the
+# physical SIM. Feed the slot index into SubscriptionModel.profileClass instead
+# of SubscriptionInfo.getProfileClass() in both mappers: slot 0 (the physical
+# SIM) stays visible, slot 1 is filtered out of the icon list. profileClass is
+# read nowhere else in SystemUI, so the substitution does not affect data,
+# calling or the QS internet panel.
+[[op]]
+kind = "method_code_patch"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+class = "Lcom/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionsRepositoryImpl$subscriptions$1;"
+method = "invokeSuspend"
+proto = "(Ljava/lang/Object;)Ljava/lang/Object;"
+
+[[op.symbol]]
+name = "get_profile_class"
+kind = "method"
+class = "Landroid/telephony/SubscriptionInfo;"
+method = "getProfileClass"
+proto = "()I"
+
+[[op.symbol]]
+name = "get_sim_slot_index"
+kind = "method"
+class = "Landroid/telephony/SubscriptionInfo;"
+method = "getSimSlotIndex"
+proto = "()I"
+
+[[op.replacement]]
+from = "6e 10 ${get_profile_class:u16} 00 00 0a 07"
+to = "6e 10 ${get_sim_slot_index:u16} 00 00 0a 07"
+expected = 1
+
+# Kairos keeps a second copy of the same mapper; patch it too so a build that
+# switches the mobile pipeline to Kairos keeps the icon hidden.
+[[op]]
+kind = "method_code_patch"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+class = "Lcom/android/systemui/statusbar/pipeline/mobile/data/repository/prod/MobileConnectionsRepositoryKairosImpl$fetchSubscriptionModels$2;"
+method = "invokeSuspend"
+proto = "(Ljava/lang/Object;)Ljava/lang/Object;"
+
+[[op.symbol]]
+name = "get_profile_class"
+kind = "method"
+class = "Landroid/telephony/SubscriptionInfo;"
+method = "getProfileClass"
+proto = "()I"
+
+[[op.symbol]]
+name = "get_sim_slot_index"
+kind = "method"
+class = "Landroid/telephony/SubscriptionInfo;"
+method = "getSimSlotIndex"
+proto = "()I"
+
+[[op.replacement]]
+from = "6e 10 ${get_profile_class:u16} 00 00 0a 07"
+to = "6e 10 ${get_sim_slot_index:u16} 00 00 0a 07"
+expected = 1
+
 # ============================ ANTISPAM ============================
 # The smart SMS check runs the bundled TMS engine online while the network is
 # up (checkSms(entity, true)) and only falls back to the offline engine when
