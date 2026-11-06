@@ -994,16 +994,16 @@ fn patches_dir() -> std::path::PathBuf {
 fn bundled_dbp_files_inventory() {
     let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
     assert_eq!(dc.name, "debloat-common");
-    assert_eq!(dc.ops.len(), 76);
+    assert_eq!(dc.ops.len(), 86);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
-    assert_eq!(uc.ops.len(), 61);
+    assert_eq!(uc.ops.len(), 71);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 17);
+    assert_eq!(fc.ops.len(), 23);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
-    assert_eq!(wj.ops.len(), 4);
+    assert_eq!(wj.ops.len(), 5);
     let adb = load_dbp(&patches_dir().join("enable-adb-debug.dbp")).expect("enable-adb-debug.dbp");
     assert_eq!(adb.name, "enable-adb-debug");
     assert_eq!(adb.ops.len(), 3);
@@ -2332,7 +2332,11 @@ fn bundled_dbp_files_parse() {
             _ => false,
         })
         .collect();
-    assert_eq!(cts_ops.len(), 4, "all four circle-to-search ops must parse");
+    assert_eq!(
+        cts_ops.len(),
+        7,
+        "seven circle-to-search ops (4 base + 3 A17)"
+    );
     let mut sysui = false;
     let mut settings = false;
     let mut declared = String::new();
@@ -2380,7 +2384,7 @@ fn bundled_dbp_files_parse() {
             _ => panic!("unexpected op in the merged circle-to-search ops"),
         }
     }
-    assert_eq!(text_ops, 2, "google.xml feature swaps");
+    assert_eq!(text_ops, 4, "google.xml feature swaps (2 base + 2 A17)");
     for feature in [
         "com.google.android.feature.CONTEXTUAL_SEARCH\"",
         "com.google.android.feature.GEMINI_EXPERIENCE\"",
@@ -5370,7 +5374,11 @@ fn bundled_debloat_network_accel_op_shape() {
         .iter()
         .filter(|op| op.file() == "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk")
         .collect();
-    assert_eq!(ops.len(), 8, "eight NetworkAccelerate ops");
+    assert_eq!(
+        ops.len(),
+        11,
+        "eleven NetworkAccelerate ops (8 base + 3 A17)"
+    );
     for op in &ops {
         assert_eq!(op.partition(), "system");
     }
@@ -5903,15 +5911,41 @@ fn bundled_unlock_common_super_god_ladder_op_shape() {
                 replacements,
                 ..
             } => {
-                assert!(symbols.iter().any(
-                    |symbol| matches!(symbol, DbpCodeSymbol::Method { method, proto, .. }
-                    if method == "isHidDeviceConnected" && proto == "()Z")
-                ));
-                assert_eq!(replacements.len(), 1);
+                for (method, proto) in [
+                    ("isHidDeviceConnected", "()Z"),
+                    ("valueOf", "(I)Ljava/lang/Integer;"),
+                    ("add", "(Ljava/lang/Object;)Z"),
+                    ("getSettings", "()Lcom/zui/game/service/di/Settings;"),
+                    ("getSupportPerformanceMode", "()Z"),
+                ] {
+                    assert!(
+                        symbols.iter().any(
+                            |symbol| matches!(symbol, DbpCodeSymbol::Method { method: m, proto: p, .. }
+                            if m == method && p == proto)
+                        ),
+                        "missing symbol {method}{proto}"
+                    );
+                }
+                assert_eq!(replacements.len(), 2);
                 assert_eq!(replacements[0].expected, expected_hits);
                 assert!(
                     replacements[0].to.ends_with("00 00 00 00"),
                     "the fan skip branch must be nop'ed"
+                );
+                // Power save (add 4) must come before balanced (add 1) and
+                // performance (add 2), so the cycle is
+                // power save -> balanced -> performance -> turbo.
+                assert_eq!(replacements[1].expected, 1);
+                assert!(replacements[1].from.starts_with("12 11"));
+                assert!(
+                    replacements[1].to.starts_with("71 00 ${settings_get:u16}"),
+                    "the support check must move to the front of the list"
+                );
+                assert!(
+                    replacements[1].to.contains(
+                        "12 42 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00 12 11"
+                    ),
+                    "mode 4 must precede mode 1"
                 );
             }
             _ => unreachable!(),

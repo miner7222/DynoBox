@@ -84,3 +84,26 @@ ty = "I"
 from = "52 53 ${count:u16} 12 64 34 43 10 00"
 to = "52 53 ${count:u16} 12 64 28 0a 00 00"
 expected = 1
+
+# A17 stores the update counter in mCount and compares it with 6 through a
+# different register pair; keep the A16 op and add the A17 shape (same goto
+# target, L+0x0a lands on the setVisible(true) call).
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/LenovoOTA/LenovoOTA.apk"
+class = "Lcom/lenovo/row/ota/core/d/ui/MainActivity;"
+method = "onPrepareOptionsMenu"
+proto = "(Landroid/view/Menu;)Z"
+
+[[op.symbol]]
+name = "count"
+kind = "field"
+class = "Lcom/lenovo/row/ota/core/d/ui/MainActivity;"
+field = "mCount"
+ty = "I"
+
+[[op.replacement]]
+from = "52 61 ${count:u16} 12 64 34 41 10 00"
+to = "52 61 ${count:u16} 12 64 28 0a 00 00"
+expected = 1

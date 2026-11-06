@@ -1307,3 +1307,233 @@ target_class = "Lcom/zui/launcher/cloudfolder/CloudUtils;"
 target_method = "isCloudFolderOnLine"
 proto = "(Landroid/content/Context;)Z"
 value = false
+
+# ===========================================================================
+# ZUXOS 2.5.10.068 (Android 17 / TB324ZC) alternates.
+# A17 moved the ZUI launcher utilities into com.zui.launcher.UtilitiesZux,
+# renamed the launcher-settings handlers and the freeform/contacts helpers,
+# and changed several register allocations. Each alternate below matches one
+# A17 shape only; the original ops stay for the 165/187/223/A16 builds.
+# ===========================================================================
+
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/UtilitiesZux;"
+method = "isZuiRow"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/android/launcher3/icons/BitmapInfo;"
+scan_method = "getBadgeType"
+target_class = "Lcom/android/launcher3/icons/GraphicsUtils;"
+target_method = "isZuiRow"
+value = false
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/zui/launcher/settings/ZuiLauncherFragment;"
+scan_method = "J"
+target_class = "Lcom/zui/launcher/cloudfolder/CloudUtils;"
+target_method = "isCloudFolderOnLine"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+# A17 renamed the contacts helper method to e()V, but A16 also has an
+# unrelated e()V. Gate the patch on the Ted service literal so it only
+# rewrites the A17 body (A16 keeps using the original f()V op above).
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiContacts/ZuiContacts.apk"
+class = "Ld1/a;"
+method = "e"
+proto = "()V"
+
+[[op.symbol]]
+name = "ted_service"
+kind = "string"
+value = "com.ted.number.service"
+
+[[op.symbol]]
+name = "intent_init"
+kind = "method"
+class = "Landroid/content/Intent;"
+method = "<init>"
+proto = "(Ljava/lang/String;)V"
+
+[[op.replacement]]
+from = "1a 02 ${ted_service:u16} 70 20 ${intent_init:u16} 20 00"
+to = "0e 00 00 00 00 00 00 00 00 00"
+expected = 1
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/statusbar/phone/CentralSurfacesImpl;"
+scan_method = "start"
+target_class = "Lcom/android/systemui/utils/XSystemUtil;"
+target_method = "isDevicePrc"
+value = false
+
+# A17 keys the WUJI profile list with const/16 array indexes; the only
+# key_we_chat entry left sits at aput index v40.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/FeaturesBaseOnRomKt;"
+method = "<clinit>"
+proto = "()V"
+
+[[op.symbol]]
+name = "key_we_chat"
+kind = "string"
+value = "key_we_chat"
+
+[[op.symbol]]
+name = "key_floating_info"
+kind = "string"
+value = "key_floating_info"
+
+[[op.replacement]]
+from = "1a 02 ${key_we_chat:u16} 4d 02 03 28"
+to = "1a 02 ${key_floating_info:u16} 4d 02 03 28"
+expected = 1
+
+# A17 kept the same bind block but moved the pool indexes and the receiver
+# register; symbolize every reference instead of pinning indexes.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiCallSettings/ZuiCallSettings.apk"
+class = "Lcom/zui/callsettings/appcompat/AdvancedCallSetingsFragmentCompat;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.symbol]]
+name = "set_listener"
+kind = "method"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+method = "setOnPreferenceChangeListener"
+proto = "(Landroidx/preference/Preference$OnPreferenceChangeListener;)V"
+
+[[op.symbol]]
+name = "get_context"
+kind = "method"
+class = "Lcom/zui/callsettings/appcompat/AdvancedCallSetingsFragmentCompat;"
+method = "getContext"
+proto = "()Landroid/content/Context;"
+
+[[op.symbol]]
+name = "is_enable_mark_number"
+kind = "method"
+class = "Lcom/zui/callsettings/OperatorFunctionUtil;"
+method = "isEnableMarkNumber"
+proto = "(Landroid/content/Context;)Z"
+
+[[op.symbol]]
+name = "set_checked"
+kind = "method"
+class = "Lcom/zui/callsettings/appcompat/CallsettingSwitchPerferenceCompat;"
+method = "setChecked"
+proto = "(Z)V"
+
+[[op.symbol]]
+name = "get_parent"
+kind = "method"
+class = "Landroidx/preference/Preference;"
+method = "getParent"
+proto = "()Landroidx/preference/PreferenceGroup;"
+
+[[op.symbol]]
+name = "remove_preference"
+kind = "method"
+class = "Landroidx/preference/PreferenceGroup;"
+method = "removePreference"
+proto = "(Landroidx/preference/Preference;)Z"
+
+[[op.replacement]]
+from = "6e 20 ${set_listener:u16} 12 00 6e 10 ${get_context:u16} 01 00 0c 00 71 10 ${is_enable_mark_number:u16} 00 00 0a 00 6e 20 ${set_checked:u16} 02 00"
+to = "6e 10 ${get_parent:u16} 02 00 0c 00 6e 20 ${remove_preference:u16} 20 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+expected = 1
+
+# A17 holds the two VPN-row booleans in v0 (the enabled branch) and leaves
+# v2 at zero in both branches; disable the rows by passing v2 instead.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "updateState"
+proto = "()V"
+
+[[op.symbol]]
+name = "pref_set_enabled"
+kind = "method"
+class = "Landroidx/preference/Preference;"
+method = "setEnabled"
+proto = "(Z)V"
+
+[[op.replacement]]
+from = "6e 20 ${pref_set_enabled:u16} 01 00"
+to = "6e 20 ${pref_set_enabled:u16} 21 00"
+expected = 2
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "updateState"
+proto = "()V"
+
+[[op.symbol]]
+name = "pref_set_summary"
+kind = "method"
+class = "Landroidx/preference/Preference;"
+method = "setSummary"
+proto = "(I)V"
+
+[[op.replacement]]
+from = "6e 20 ${pref_set_summary:u16} 35 00"
+to = "00 00 00 00 00 00"
+expected = 1
+
+# A17's updateState has no `setSummary {v1, #0}` call for the game row; the
+# remaining summary write uses a resource id at 008c. Nop it as well, but keep
+# the following mMeetingAcclerationPreference lookup so the sequence stays
+# unique to this late branch.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/NetworkAccelerate/NetworkAccelerate.apk"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+method = "updateState"
+proto = "()V"
+
+[[op.symbol]]
+name = "pref_set_summary"
+kind = "method"
+class = "Landroidx/preference/Preference;"
+method = "setSummary"
+proto = "(I)V"
+
+[[op.symbol]]
+name = "meeting_pref"
+kind = "field"
+class = "Lcom/android/networkaccelerate/SettingsFragment;"
+field = "mMeetingAcclerationPreference"
+ty = "Landroidx/preference/Preference;"
+
+[[op.replacement]]
+from = "6e 20 ${pref_set_summary:u16} 10 00 54 55 ${meeting_pref:u16}"
+to = "00 00 00 00 00 00 54 55 ${meeting_pref:u16}"
+expected = 1

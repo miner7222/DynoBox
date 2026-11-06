@@ -753,9 +753,42 @@ class = "Lcom/zui/game/service/ui/view/FloatingMainViewNew;"
 method = "isHidDeviceConnected"
 proto = "()Z"
 
+[[op.symbol]]
+name = "integer_value_of"
+kind = "method"
+class = "Ljava/lang/Integer;"
+method = "valueOf"
+proto = "(I)Ljava/lang/Integer;"
+
+[[op.symbol]]
+name = "list_add"
+kind = "method"
+class = "Ljava/util/List;"
+method = "add"
+proto = "(Ljava/lang/Object;)Z"
+
+[[op.symbol]]
+name = "settings_get"
+kind = "method"
+class = "Lcom/zui/game/service/di/SettingsKt;"
+method = "getSettings"
+proto = "()Lcom/zui/game/service/di/Settings;"
+
+[[op.symbol]]
+name = "support_perf"
+kind = "method"
+class = "Lcom/zui/game/service/di/Settings;"
+method = "getSupportPerformanceMode"
+proto = "()Z"
+
 [[op.replacement]]
 from = "70 10 ${is_hid_connected:u16} 03 00 0a 01 38 01 0b 00"
 to = "70 10 ${is_hid_connected:u16} 03 00 0a 01 00 00 00 00"
+expected = 1
+
+[[op.replacement]]
+from = "12 11 71 10 ${integer_value_of:u16} 01 00 0c 02 72 20 ${list_add:u16} 20 00 12 22 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00 71 00 ${settings_get:u16} 00 00 0c 02 6e 10 ${support_perf:u16} 02 00 0a 02 39 02 0a 00 12 42 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00"
+to = "71 00 ${settings_get:u16} 00 00 0c 02 6e 10 ${support_perf:u16} 02 00 0a 02 39 02 0a 00 12 42 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00 12 11 71 10 ${integer_value_of:u16} 01 00 0c 02 72 20 ${list_add:u16} 20 00 12 22 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00"
 expected = 1
 
 [[op]]
@@ -773,15 +806,44 @@ class = "Lcom/zui/game/service/ui/view/FloatingMainViewRight;"
 method = "isHidDeviceConnected"
 proto = "()Z"
 
+[[op.symbol]]
+name = "integer_value_of"
+kind = "method"
+class = "Ljava/lang/Integer;"
+method = "valueOf"
+proto = "(I)Ljava/lang/Integer;"
+
+[[op.symbol]]
+name = "list_add"
+kind = "method"
+class = "Ljava/util/List;"
+method = "add"
+proto = "(Ljava/lang/Object;)Z"
+
+[[op.symbol]]
+name = "settings_get"
+kind = "method"
+class = "Lcom/zui/game/service/di/SettingsKt;"
+method = "getSettings"
+proto = "()Lcom/zui/game/service/di/Settings;"
+
+[[op.symbol]]
+name = "support_perf"
+kind = "method"
+class = "Lcom/zui/game/service/di/Settings;"
+method = "getSupportPerformanceMode"
+proto = "()Z"
+
 [[op.replacement]]
 from = "70 10 ${is_hid_connected:u16} 05 00 0a 01 38 01 05 00"
 to = "70 10 ${is_hid_connected:u16} 05 00 0a 01 00 00 00 00"
 expected = 2
 
-# ZUI theme permissions in framework-res.apk: downgrade the protection
-# levels so ordinary apps can change the system font without signature
-# privileges. 0x404 = internal | verifier; 0 = normal, which
-# PackageManager grants to any app that declares the permission.
+[[op.replacement]]
+from = "12 11 71 10 ${integer_value_of:u16} 01 00 0c 02 72 20 ${list_add:u16} 20 00 71 00 ${settings_get:u16} 00 00 0c 02 6e 10 ${support_perf:u16} 02 00 0a 02 39 02 0a 00 12 42 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00 12 22 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00"
+to = "71 00 ${settings_get:u16} 00 00 0c 02 6e 10 ${support_perf:u16} 02 00 0a 02 39 02 0a 00 12 42 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00 12 11 71 10 ${integer_value_of:u16} 01 00 0c 02 72 20 ${list_add:u16} 20 00 12 22 71 10 ${integer_value_of:u16} 02 00 0c 02 72 20 ${list_add:u16} 20 00"
+expected = 1
+
 [[op]]
 kind = "permission_protection"
 partition = "system"
@@ -802,3 +864,178 @@ partition = "system"
 file = "system/framework/framework-res.apk"
 permission = "zui.permission.WRITE_THEMES"
 protection_level = 0
+# ===========================================================================
+# ZUXOS 2.5.10.068 (Android 17 / TB324ZC) alternates.
+# ===========================================================================
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+scan_class = "Lcom/android/systemui/assist/AssistManager;"
+target_class = "Lcom/android/systemui/utils/XSystemUtil;"
+target_method = "isDeviceRow"
+value = true
+
+# A17 now restores the Dolby choice from recordDolbySwitchStatusWidthHeadSet
+# on connect but still writes 0 on disconnect, so nop the disconnect write.
+# Register shape: move-result-object v0 / putInt {v0, v4, v3}.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/audio/AudioService;"
+method = "setWiredDeviceConnectionState"
+proto = "(Landroid/media/AudioDeviceAttributes;ILjava/lang/String;)V"
+
+[[op.symbol]]
+name = "put_int"
+kind = "method"
+class = "Landroid/provider/Settings$Global;"
+method = "putInt"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;I)Z"
+
+[[op.replacement]]
+from = "0c 00 71 30 ${put_int:u16} 40 03"
+to = "0c 00 00 00 00 00 00 00"
+expected = 1
+
+# The "voice_interaction_service" literal outgrew the 16-bit string pool on
+# A17 (const-string/jumbo), so swap the u32 operand instead.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/android/server/voiceinteraction/VoiceInteractionManagerService$VoiceInteractionManagerServiceStub;"
+method = "switchImplementationIfNeededNoTracingLocked"
+proto = "(Z)V"
+
+[[op.symbol]]
+name = "voice_interaction_service"
+kind = "string"
+value = "voice_interaction_service"
+
+[[op.symbol]]
+name = "assistant"
+kind = "string"
+value = "assistant"
+
+[[op.replacement]]
+from = "1b 01 ${voice_interaction_service:u32}"
+to = "1b 01 ${assistant:u32}"
+expected = 1
+
+# A17 renamed the obfuscated launcher-settings handlers: L/M/N -> H/I/J.
+# isCommercialProject also moved to FeatureFlagsExt (the TaskbarUtilities
+# helper is gone from this call site). A17 also inverted both gate
+# polarities: H removes the auto-reorder row when isCommercialProject is
+# false, and I removes the blue-point row when hasBluePointFunction is true.
+# Pin them to true/false respectively (opposite of the A16 L/M ops).
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/zui/launcher/settings/ZuiLauncherFragment;"
+scan_method = "H"
+target_class = "Lcom/zui/launcher/config/FeatureFlagsExt;"
+target_method = "isCommercialProject"
+proto = "()Z"
+value = true
+
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+scan_class = "Lcom/zui/launcher/settings/ZuiLauncherFragment;"
+scan_method = "I"
+target_class = "Lcom/zui/launcher/BluePoint;"
+target_method = "hasBluePointFunction"
+proto = "(Landroid/content/Context;)Z"
+value = false
+
+# queryGridOptions moved with the other ZUI helpers into UtilitiesZux; the
+# body keeps the same cursor/equalsIgnoreCase shape.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/UtilitiesZux;"
+method = "queryGridOptions"
+proto = "(Landroid/content/Context;)Ljava/util/List;"
+
+[[op.symbol]]
+name = "cursor_get_string"
+kind = "method"
+class = "Landroid/database/Cursor;"
+method = "getString"
+proto = "(I)Ljava/lang/String;"
+
+[[op.symbol]]
+name = "string_equals_ignore_case"
+kind = "method"
+class = "Ljava/lang/String;"
+method = "equalsIgnoreCase"
+proto = "(Ljava/lang/String;)Z"
+
+[[op.replacement]]
+from = "72 20 ${cursor_get_string:u16} 57 00 0c 08 6e 20 ${string_equals_ignore_case:u16} 80 00 0a 08"
+to = "72 20 ${cursor_get_string:u16} 57 00 0c 08 6e 20 ${string_equals_ignore_case:u16} 80 00 12 18"
+expected = 1
+
+# A17 keeps the getNextMode bodies but moves the HID result to v3.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/ui/view/FloatingMainViewNew;"
+method = "getNextMode"
+proto = "(I)I"
+
+[[op.symbol]]
+name = "is_hid_connected"
+kind = "method"
+class = "Lcom/zui/game/service/ui/view/FloatingMainViewNew;"
+method = "isHidDeviceConnected"
+proto = "()Z"
+
+[[op.replacement]]
+from = "70 10 ${is_hid_connected:u16} 03 00 0a 03 38 03 0b 00"
+to = "70 10 ${is_hid_connected:u16} 03 00 0a 03 00 00 00 00"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+class = "Lcom/zui/game/service/ui/view/FloatingMainViewRight;"
+method = "getNextMode"
+proto = "(I)I"
+
+[[op.symbol]]
+name = "is_hid_connected"
+kind = "method"
+class = "Lcom/zui/game/service/ui/view/FloatingMainViewRight;"
+method = "isHidDeviceConnected"
+proto = "()Z"
+
+[[op.replacement]]
+from = "70 10 ${is_hid_connected:u16} 03 00 0a 03 38 03 0b 00"
+to = "70 10 ${is_hid_connected:u16} 03 00 0a 03 00 00 00 00"
+expected = 1
+
+# A17 dropped the OneTimeInitializer comment block that the A16 op consumed.
+# Insert CONTEXTUAL_SEARCH + GEMINI_EXPERIENCE by consuming two comments that
+# only exist in the A17 file (MOJITOX notes), keeping the file size unchanged.
+[[op]]
+kind = "text_replace"
+partition = "product"
+file = "etc/sysconfig/google.xml"
+from = "<!-- [MOJITOX-1662] The allow-association configuration for PCS is not required in Android 17. -->"
+to = "<feature name=\"com.google.android.feature.CONTEXTUAL_SEARCH\" />\n    <!--                       -->"
+
+[[op]]
+kind = "text_replace"
+partition = "product"
+file = "etc/sysconfig/google.xml"
+from = "<!-- <allow-association target=\"com.google.android.as.oss\" allowed=\"com.google.android.odad\" /> -->"
+to = "<feature name=\"com.google.android.feature.GEMINI_EXPERIENCE\" />\n    <!--                        -->"

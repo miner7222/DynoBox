@@ -55,3 +55,13 @@ partition = "vendor"
 file = "build.prop"
 from = "LenovoTab LEGION Y700 Wuji"
 to = "Legion Tab Y700 5G        "
+
+# A17 inserted spaces into the AI market name: the line now reads
+# "联想AI平板 拯救者 Y700 无极" (36 UTF-8 bytes). Keep the original 34-byte
+# op for the 165/A16 builds and add the 36-byte A17 replacement.
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "build.prop"
+from = "联想AI平板 拯救者 Y700 无极"
+to = "Legion Tab Y700 5G                  "
