@@ -1000,7 +1000,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(uc.ops.len(), 84);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 29);
+    assert_eq!(fc.ops.len(), 30);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 5);
@@ -1207,6 +1207,47 @@ fn bundled_debloat_drops_default_wechat_qq_shortcuts() {
             assert!(site_index.is_none());
         }
         other => panic!("unexpected shortcut op: {other:?}"),
+    }
+}
+
+/// A17's keyguard clock date text is formatted from the clock-face pattern
+/// through ICU getInstanceForSkeleton, which drops the literals ("11. 7.
+/// 토요일"). Point getTextPattern at the description pattern so the text goes
+/// through the same skeleton and Korean renders "11월 7일 토요일".
+#[test]
+fn bundled_fix_common_lockscreen_date_uses_description_pattern() {
+    let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+    let op = fc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodConstString { method, .. }
+                    if method == "getTextPattern")
+        })
+        .expect("lockscreen date pattern op");
+    match op {
+        DbpOp::MethodConstString {
+            partition,
+            file,
+            class,
+            method,
+            proto,
+            value,
+        } => {
+            assert_eq!(partition, "system_ext");
+            assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
+            assert_eq!(
+                class,
+                "Lcom/android/systemui/customization/clocks/DigitalDateFormatter;"
+            );
+            assert_eq!(method, "getTextPattern");
+            assert_eq!(
+                proto,
+                "(Lcom/android/systemui/plugins/keyguard/ui/clocks/TimeFormatKind;)Ljava/lang/String;"
+            );
+            assert_eq!(value, "EEEE MMMM d");
+        }
+        other => panic!("unexpected lockscreen date op: {other:?}"),
     }
 }
 

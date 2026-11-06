@@ -941,6 +941,27 @@ from = "71 20 ${get_instance_for_skeleton:u16} 10 00 0c 00 38 00 11 00"
 to = "22 02 ${icu_sdf:u16} 70 30 ${icu_sdf_init:u16} 02 01 07 20"
 expected = 1
 
+# The A17 keyguard clock renders its date text through DigitalDateFormatter,
+# which passes the clock-face pattern (e.g. "EEE, MMM d") to ICU
+# getInstanceForSkeleton. Skeleton normalization drops the literals, so Korean
+# shows "11. 7. 토요일" even though the accessibility text built from
+# getDescriptionPattern ("EEEE MMMM d") already reads "11월 7일 토요일".
+# Return that existing string from getTextPattern instead: the text then goes
+# through the same skeleton as the description and Korean renders correctly,
+# while every other locale keeps its ICU-derived layout.
+#
+# A code patch that rebuilt the formatter with SimpleDateFormat failed ART
+# verification in onLocaleChanged (register type conflict), so this stays a
+# body rewrite.
+[[op]]
+kind = "method_const_string"
+partition = "system_ext"
+file = "priv-app/ZuiSystemUI/ZuiSystemUI.apk"
+class = "Lcom/android/systemui/customization/clocks/DigitalDateFormatter;"
+method = "getTextPattern"
+proto = "(Lcom/android/systemui/plugins/keyguard/ui/clocks/TimeFormatKind;)Ljava/lang/String;"
+value = "EEEE MMMM d"
+
 # The freeform sidebar's hover bar is created as an application-overlay window
 # (type 2038), so the system hides it and blocks its touch strip whenever a
 # sensitive window such as a permission dialog asks for non-system overlays to
