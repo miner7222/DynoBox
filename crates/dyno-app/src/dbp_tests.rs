@@ -997,7 +997,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(dc.ops.len(), 86);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
-    assert_eq!(uc.ops.len(), 71);
+    assert_eq!(uc.ops.len(), 84);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
     assert_eq!(fc.ops.len(), 29);
@@ -5960,6 +5960,26 @@ fn bundled_unlock_common_super_god_ladder_op_shape() {
     }
 }
 
+/// The ROW gate flip otherwise exposes a disabled taskbar search-bar row on a
+/// PRC build without the Google search app.
+#[test]
+fn bundled_unlock_common_hides_taskbar_search_bar() {
+    let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+    let op = uc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodConstInt { class, method, .. }
+                if class == "Lcom/lenovo/settings/system/taskbar/TaskbarSearchBarController;"
+                    && method == "getAvailabilityStatus")
+        })
+        .expect("taskbar search-bar availability op");
+    match op {
+        DbpOp::MethodConstInt { value, .. } => assert_eq!(*value, 3),
+        other => panic!("unexpected taskbar op: {other:?}"),
+    }
+}
+
 /// Land the floating-view mode ladder ops on the real ZuiGameHelper APK:
 /// both `getNextMode` variants must nop their HID-connected skip branch so
 /// mode 16 stays reachable without a cooling fan. Set
@@ -8001,4 +8021,126 @@ fn bundled_fix_common_safecenter_background_kill() {
         }
         other => panic!("unexpected SafeCenter op: {other:?}"),
     }
+}
+
+/// A17 PRC/ROW gate flips from `a17_prc_row_gate_report.md`: the tier-1
+/// settings/tile gates plus the adopted tier-2 items (taskbar search bar,
+/// Lab focus mode, standby power optimization). Every op is a per-call-site
+/// pin; no region property is rewritten.
+#[test]
+fn bundled_unlock_a17_prc_row_gate_ops_shape() {
+    let doc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
+
+    let has_bool_method = |class: &str, method: &str| {
+        doc.ops.iter().any(|op| {
+            matches!(op, DbpOp::MethodConstBool { class: c, method: m, value: true, .. }
+                if c.as_str() == class && m.as_str() == method)
+        })
+    };
+    let has_int_status = |class: &str| {
+        doc.ops.iter().any(|op| {
+            matches!(op, DbpOp::MethodConstInt { class: c, method: m, value: 0, .. }
+                if c.as_str() == class && m == "getAvailabilityStatus")
+        })
+    };
+    let has_invoke_row = |scan_class: &str, scan_method: &str, target_class: &str| {
+        doc.ops.iter().any(|op| {
+            matches!(op, DbpOp::InvokeConstBool {
+                scan_class: sc,
+                scan_method: Some(sm),
+                target_class: tc,
+                value: true,
+                ..
+            } if sc.as_str() == scan_class && sm.as_str() == scan_method && tc.as_str() == target_class)
+        })
+    };
+
+    let has_invoke_prc_false = |scan_class: &str, scan_method: &str| {
+        doc.ops.iter().any(|op| {
+            matches!(op, DbpOp::InvokeConstBool {
+                scan_class: sc,
+                scan_method: Some(sm),
+                target_class: tc,
+                target_method: tm,
+                value: false,
+                ..
+            } if sc.as_str() == scan_class
+                && sm.as_str() == scan_method
+                && tc.as_str() == "Lcom/lenovo/common/utils/LenovoUtils;"
+                && tm == "isPrcVersion")
+        })
+    };
+
+    assert!(has_bool_method(
+        "Lcom/android/settings/notification/AlarmRingtonePreferenceController;",
+        "isAvailable"
+    ));
+    assert!(has_int_status(
+        "Lcom/lenovo/settings/zen/NotifiFreePreferenceController;"
+    ));
+    assert!(has_invoke_row(
+        "Lcom/android/systemui/shade/ShadeHeaderController$onViewAttached$2;",
+        "onClick",
+        "Lcom/android/systemui/utils/XSystemUtil;"
+    ));
+    assert!(has_invoke_row(
+        "Lcom/lenovo/settings/keyboard/ThreeFingerTapDetailFragment;",
+        "getCandidates",
+        "Lcom/lenovo/common/utils/LenovoUtils;"
+    ));
+    assert!(has_invoke_row(
+        "Lcom/lenovo/settings/keyboard/ThreeFingerTapDetailFragment;",
+        "getDefaultKey",
+        "Lcom/lenovo/common/utils/LenovoUtils;"
+    ));
+    assert!(has_invoke_row(
+        "Lcom/lenovo/settings/keyboard/AppQuickSettingsFragment;",
+        "buildCandidates",
+        "Lcom/lenovo/common/utils/LenovoUtils;"
+    ));
+    assert!(has_invoke_row(
+        "Lcom/lenovo/pen/bt/ui/tail/QuickSettingDataManager;",
+        "buildCandidates",
+        "Lcom/lenovo/pen/cap/util/SystemProps;"
+    ));
+    assert!(has_invoke_row(
+        "Lcom/lenovo/pen/cap/util/Features;",
+        "isSupportCircleToSearch",
+        "Lcom/lenovo/pen/cap/util/SystemProps;"
+    ));
+    assert!(doc.ops.iter().any(|op| {
+        matches!(op, DbpOp::MethodCodeRedirect {
+            class: c,
+            method: m,
+            donor_class: d,
+            donor_method: dm,
+            ..
+        } if c.as_str() == "Lcom/lenovo/settings/applications/specialaccess/TurnScreenOnPreferenceController;"
+            && m == "getAvailabilityStatus"
+            && d.as_str() == "Lcom/lenovo/settings/battery/ZuiBatteryOverheatPreferenceController;"
+            && dm == "getAvailabilityStatus")
+    }));
+
+    assert!(doc.ops.iter().any(|op| {
+        matches!(op, DbpOp::MethodConstInt {
+            class: c,
+            method: m,
+            value,
+            ..
+        } if c.as_str() == "Lcom/lenovo/settings/system/taskbar/TaskbarSearchBarController;"
+            && m == "getAvailabilityStatus"
+            && *value == 3)
+    }));
+    assert!(has_bool_method(
+        "Lcom/lenovo/settings/advancedfeatures/LabFeaturePreferenceController;",
+        "isFocusModeEnable"
+    ));
+    assert!(has_bool_method(
+        "Lcom/lenovo/settings/homepage/controller/TopLevelAdvancedPreferenceController;",
+        "isFocusModeEnable"
+    ));
+    assert!(has_invoke_prc_false(
+        "Lcom/lenovo/settings/battery/ZuiPowerSavingDuringSleepController;",
+        "isSupport"
+    ));
 }
