@@ -1523,35 +1523,54 @@ where
             )?;
 
             let split_fragments = find_split_source_fragments(&catalog, &p_info.name);
-            if !split_fragments.is_empty() && p_info.old_size > 0 {
+            // Split layouts are honored even when the payload carries no source
+            // image. Full OTAs omit `old_partition_info` (`old_size == 0`) and
+            // emit only REPLACE operations, so the patcher never opens a source
+            // file; the fragment re-split is still required, because writing the
+            // dense post-OTA image over `name_1.img` (the previous fallback)
+            // leaves the flashing XML pointing at a 24 KB slice of a 512 MB
+            // file while `name_2..N.img` keep the pre-OTA bytes.
+            if !split_fragments.is_empty() {
                 let all_present = split_fragments.iter().all(|f| {
                     input.join(&f.filename).exists() || out_dir.join(&f.filename).exists()
                 });
                 if all_present {
-                    message(
-                        events,
-                        MessageLevel::Info,
-                        format!(
-                            "apply {}: reconstructing {} fragments (split source)",
-                            p_info.name,
-                            split_fragments.len()
-                        ),
-                    );
-                    let src_base = if split_fragments
-                        .iter()
-                        .all(|f| out_dir.join(&f.filename).exists())
-                    {
-                        out_dir
-                    } else {
-                        input
-                    };
                     let recon_src = working_dir.join(format!("{}_split_src.img", p_info.name));
-                    reconstruct_split_source(
-                        &split_fragments,
-                        src_base,
-                        p_info.old_size,
-                        &recon_src,
-                    )?;
+                    if p_info.old_size > 0 {
+                        message(
+                            events,
+                            MessageLevel::Info,
+                            format!(
+                                "apply {}: reconstructing {} fragments (split source)",
+                                p_info.name,
+                                split_fragments.len()
+                            ),
+                        );
+                        let src_base = if split_fragments
+                            .iter()
+                            .all(|f| out_dir.join(&f.filename).exists())
+                        {
+                            out_dir
+                        } else {
+                            input
+                        };
+                        reconstruct_split_source(
+                            &split_fragments,
+                            src_base,
+                            p_info.old_size,
+                            &recon_src,
+                        )?;
+                    } else {
+                        message(
+                            events,
+                            MessageLevel::Info,
+                            format!(
+                                "apply {}: re-splitting into {} fragments (payload carries no source image)",
+                                p_info.name,
+                                split_fragments.len()
+                            ),
+                        );
+                    }
                     let temp_new = working_dir.join(format!("{}_new.img", p_info.name));
                     apply_payload_with_event_progress(
                         events,
@@ -1587,10 +1606,44 @@ where
                             size_policy: PartitionSizePolicy::AllowSourceContainer,
                         },
                     )?;
-                    split_new_image_to_fragments(&temp_new, &split_fragments, out_dir)?;
-                    if let Some(rebuilt) = regenerate_whole_partition_image(
+                    let sector_size = split_fragments[0].sector_size;
+                    let fragments = if split_layout_covers_image(
                         &temp_new,
                         &split_fragments,
+                        sector_size,
+                    )? {
+                        split_fragments.clone()
+                    } else {
+                        let retiled = retiled_fragments(&split_fragments, p_info.new_size);
+                        message(
+                            events,
+                            MessageLevel::Info,
+                            format!(
+                                "apply {}: vendor chunk layout no longer covers the image; retiling {} chunks across the whole {:.1} MiB partition",
+                                p_info.name,
+                                retiled.len(),
+                                p_info.new_size as f64 / (1024.0 * 1024.0)
+                            ),
+                        );
+                        let rewritten =
+                            rewrite_split_layout_xmls(input, out_dir, &split_fragments, &retiled)?;
+                        if !rewritten.is_empty() {
+                            message(
+                                events,
+                                MessageLevel::Info,
+                                format!(
+                                    "apply {}: rewrote {} flashing XML(s) for the new chunk layout",
+                                    p_info.name,
+                                    rewritten.len()
+                                ),
+                            );
+                        }
+                        retiled
+                    };
+                    split_new_image_to_fragments(&temp_new, &fragments, out_dir)?;
+                    if let Some(rebuilt) = regenerate_whole_partition_image(
+                        &temp_new,
+                        &fragments,
                         &p_info.name,
                         p_info.new_size,
                         input,
@@ -1848,6 +1901,10 @@ pub(crate) fn find_existing_filename_in_dir(dir: &Path, candidates: &[String]) -
 #[derive(Debug, Clone)]
 pub(crate) struct SplitFragment {
     pub(crate) filename: String,
+    /// Absolute flash LBA the fragment starts at (XML `start_sector` units).
+    pub(crate) start_sector: u64,
+    /// Sector size the XML uses for this partition (bytes).
+    pub(crate) sector_size: u64,
     offset: u64,
     size: u64,
 }
@@ -1925,6 +1982,8 @@ pub(crate) fn find_split_source_fragments(
         .into_iter()
         .map(|(name, start, num, sec_size)| SplitFragment {
             filename: name,
+            start_sector: start,
+            sector_size: sec_size,
             offset: (start - base_sector) * sec_size,
             size: num * sec_size,
         })
@@ -2090,6 +2149,177 @@ fn regenerate_whole_partition_image(
     avbtool_rs::sparse::write_sparse_image(&image, std::io::BufWriter::new(out))
         .map_err(|e| anyhow::anyhow!("writing {}: {e}", dst_path.display()))?;
     Ok(Some(file_name))
+}
+
+/// True when every non-zero block of `image` starts inside one of the vendor
+/// fragment ranges. The vendor split layout is content-derived (it ships only
+/// the image's mapped, non-zero regions), so a release that grows a partition's
+/// data leaves content outside the old ranges; re-splitting into those ranges
+/// would silently drop it and break the partition's dm-verity root.
+fn split_layout_covers_image(
+    image: &Path,
+    fragments: &[SplitFragment],
+    block: u64,
+) -> anyhow::Result<bool> {
+    use std::io::Read;
+
+    let mut ranges: Vec<(u64, u64)> = fragments
+        .iter()
+        .map(|f| (f.offset, f.offset.saturating_add(f.size)))
+        .collect();
+    ranges.sort_unstable();
+
+    let mut file =
+        std::fs::File::open(image).with_context(|| format!("opening {}", image.display()))?;
+    let mut buf = vec![0u8; block as usize];
+    let mut pos = 0u64;
+    let mut cursor = 0usize;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if buf[..n].iter().any(|byte| *byte != 0) {
+            while cursor < ranges.len() && ranges[cursor].1 <= pos {
+                cursor += 1;
+            }
+            let covered = cursor < ranges.len() && ranges[cursor].0 <= pos;
+            if !covered {
+                return Ok(false);
+            }
+        }
+        pos += n as u64;
+    }
+    Ok(true)
+}
+
+/// Re-tile the vendor chunk slots so they cover the whole post-OTA image.
+///
+/// The vendor ships only mapped (non-zero) regions, so a release that grows a
+/// partition's data leaves content outside the old ranges. Re-deriving just the
+/// non-zero runs of the new image is not enough either: the device still holds
+/// the previous release's bytes wherever the new image is zero, and those stale
+/// bytes break the partition's dm-verity root. Spreading the image across the
+/// existing chunk count and names covers every byte, keeps the flashing XML
+/// shape, and leaves no unreferenced chunk files behind.
+fn retiled_fragments(fragments: &[SplitFragment], image_size: u64) -> Vec<SplitFragment> {
+    let Some(first) = fragments.first() else {
+        return Vec::new();
+    };
+    let sector = first.sector_size.max(1);
+    let slots = fragments.len() as u64;
+    let per_slot = image_size.div_ceil(slots).div_ceil(sector) * sector;
+    let mut out = Vec::new();
+    let mut offset = 0u64;
+    for template in fragments {
+        if offset >= image_size {
+            break;
+        }
+        let size = per_slot.min(image_size - offset);
+        out.push(SplitFragment {
+            filename: template.filename.clone(),
+            start_sector: first.start_sector + offset / sector,
+            sector_size: sector,
+            offset,
+            size,
+        });
+        offset += size;
+    }
+    out
+}
+
+/// Replace one attribute's value in a single-line `<program ...>` element.
+/// Keys are matched case-insensitively and only when already present.
+fn set_xml_attr(line: &str, key: &str, value: &str) -> String {
+    let lower = line.to_ascii_lowercase();
+    let needle = format!(" {}=\"", key.to_ascii_lowercase());
+    let Some(at) = lower.find(&needle) else {
+        return line.to_string();
+    };
+    let value_start = at + needle.len();
+    let Some(value_len) = line[value_start..].find('"') else {
+        return line.to_string();
+    };
+    let value_end = value_start + value_len;
+    let mut out = String::with_capacity(line.len() + value.len());
+    out.push_str(&line[..value_start]);
+    out.push_str(value);
+    out.push_str(&line[value_end..]);
+    out
+}
+
+fn split_program_line(template: &str, fragment: &SplitFragment) -> String {
+    let sectors = fragment.size.div_ceil(fragment.sector_size);
+    let kb = format!("{:.1}", fragment.size as f64 / 1024.0);
+    let mut line = set_xml_attr(template, "filename", &fragment.filename);
+    line = set_xml_attr(&line, "start_sector", &fragment.start_sector.to_string());
+    line = set_xml_attr(&line, "num_partition_sectors", &sectors.to_string());
+    line = set_xml_attr(&line, "size_in_KB", &kb);
+    line = set_xml_attr(&line, "size_in_kb", &kb);
+    line = set_xml_attr(
+        &line,
+        "start_byte_hex",
+        &format!("0x{:x}", fragment.start_sector * fragment.sector_size),
+    );
+    line
+}
+
+/// Rewrite the flashing XML entries that reference the old chunk files into the
+/// derived layout. The rewritten copies land in `out_dir`; the later
+/// `--complete` pass only materializes files that are missing, so it leaves
+/// them alone.
+fn rewrite_split_layout_xmls(
+    input: &Path,
+    out_dir: &Path,
+    old_fragments: &[SplitFragment],
+    new_fragments: &[SplitFragment],
+) -> anyhow::Result<Vec<String>> {
+    use std::collections::HashSet;
+
+    let old_names: HashSet<String> = old_fragments
+        .iter()
+        .map(|f| format!("filename=\"{}\"", f.filename))
+        .collect();
+    let mut rewritten = Vec::new();
+    for entry in std::fs::read_dir(input)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let lower = name.to_string_lossy().to_ascii_lowercase();
+        if !(lower.starts_with("rawprogram") && lower.ends_with(".xml")) {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)?;
+        if !old_names.iter().any(|n| content.contains(n)) {
+            continue;
+        }
+        let mut out = String::new();
+        let mut replaced = false;
+        for line in content.lines() {
+            let is_chunk_line =
+                line.contains("<program") && old_names.iter().any(|n| line.contains(n.as_str()));
+            if is_chunk_line {
+                if !replaced {
+                    for fragment in new_fragments {
+                        out.push_str(&split_program_line(line, fragment));
+                        out.push('\n');
+                    }
+                    replaced = true;
+                }
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        if replaced {
+            std::fs::write(out_dir.join(&name), out)?;
+            rewritten.push(name.to_string_lossy().into_owned());
+        }
+    }
+    Ok(rewritten)
 }
 
 fn split_new_image_to_fragments(
@@ -3658,7 +3888,13 @@ where
                 let name = path.file_name().unwrap().to_string_lossy();
                 if name.starts_with("rawprogram") && name.ends_with(".xml") {
                     let out_xml = out_dir.join(name.as_ref());
-                    std::fs::copy(&path, &out_xml)?;
+                    // Apply may already have written a rewritten copy (for a
+                    // split partition whose vendor chunk layout no longer fits
+                    // the payload image). Keep it; only materialize the XML when
+                    // the output has none yet.
+                    if !out_xml.exists() {
+                        std::fs::copy(&path, &out_xml)?;
+                    }
                     xml_paths.push(out_xml);
                 }
             }
@@ -3875,8 +4111,14 @@ fn prepare_repack_stage(
                     || declared_super_chunks.contains(&name.to_ascii_lowercase())));
 
         if copy_to_stage {
+            // Apply rewrites a rawprogram XML when a split partition's vendor
+            // chunk layout no longer fits the payload image. Prefer the staged
+            // copy so repack's super rewrite layers on top of it instead of
+            // reverting to the vendor XML.
+            let staged = image_dir.join(name);
+            let source = if staged.is_file() { &staged } else { &path };
             transfers.record(materialize_file_with_fallback(
-                &path,
+                source,
                 &stage_dir.join(name),
             )?);
             if name.ends_with(".xml") {

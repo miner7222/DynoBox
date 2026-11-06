@@ -100,6 +100,8 @@ fn rebuilds_sparse_whole_partition_image_from_fragments() {
         .enumerate()
         .map(|(i, &(offset, size))| SplitFragment {
             filename: format!("dataext_{}.img", i + 1),
+            start_sector: 5399080 + offset / block,
+            sector_size: block,
             offset,
             size,
         })
@@ -158,6 +160,143 @@ fn rebuilds_sparse_whole_partition_image_from_fragments() {
     }
 }
 
+/// The re-split half of the split-layout path. Full OTAs carry no source
+/// image (`old_size == 0`), so the payload image is materialized dense and
+/// then sliced back into the vendor's `name_1..N.img` fragment layout that the
+/// flashing XML references. Without this, `name_1.img` ends up holding the
+/// whole dense partition while `name_2..N.img` keep pre-OTA bytes.
+#[test]
+fn resplits_dense_payload_image_into_vendor_fragments() {
+    let dir = tempdir().unwrap();
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let block = 4096u64;
+    let total = 16 * block;
+    let ranges = [
+        (0u64, 2 * block),
+        (5 * block, 4 * block),
+        (15 * block, block),
+    ];
+    let dense: Vec<u8> = (0..total).map(|i| (i % 199) as u8).collect();
+    let new_image = dir.path().join("dataext_new.img");
+    std::fs::write(&new_image, &dense).unwrap();
+
+    let fragments: Vec<SplitFragment> = ranges
+        .iter()
+        .enumerate()
+        .map(|(i, &(offset, size))| SplitFragment {
+            filename: format!("dataext_{}.img", i + 1),
+            start_sector: 5399080 + offset / block,
+            sector_size: block,
+            offset,
+            size,
+        })
+        .collect();
+
+    split_new_image_to_fragments(&new_image, &fragments, &out_dir).unwrap();
+
+    for (i, &(offset, size)) in ranges.iter().enumerate() {
+        let path = out_dir.join(format!("dataext_{}.img", i + 1));
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes.len() as u64, size, "{} size", path.display());
+        let start = offset as usize;
+        assert_eq!(
+            bytes,
+            dense[start..start + size as usize].to_vec(),
+            "{} must hold the post-OTA slice at {offset}",
+            path.display()
+        );
+    }
+}
+
+/// A release can grow a split partition's data past the vendor chunk ranges
+/// (`dataext` gained AI-model bytes outside the 165 layout). The chunk slots
+/// must then be re-tiled across the whole partition: the device still holds the
+/// previous release's bytes where the new image is zero, and those stale bytes
+/// would break the partition's dm-verity root.
+#[test]
+fn retiles_chunk_layout_when_content_leaves_vendor_ranges() {
+    let dir = tempdir().unwrap();
+    let input = dir.path().join("input");
+    let out_dir = dir.path().join("out");
+    std::fs::create_dir_all(&input).unwrap();
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    let block = 4096u64;
+    let total = 64 * block;
+    let mut dense = vec![0u8; total as usize];
+    dense[0..2 * block as usize].fill(0xa1);
+    dense[20 * block as usize..24 * block as usize].fill(0xb2);
+    let new_image = dir.path().join("dataext_new.img");
+    std::fs::write(&new_image, &dense).unwrap();
+
+    let vendor: Vec<SplitFragment> = [(0u64, 2 * block), (40 * block, block)]
+        .iter()
+        .enumerate()
+        .map(|(i, &(offset, size))| SplitFragment {
+            filename: format!("dataext_{}.img", i + 1),
+            start_sector: 5399080 + offset / block,
+            sector_size: block,
+            offset,
+            size,
+        })
+        .collect();
+
+    assert!(
+        !split_layout_covers_image(&new_image, &vendor, block).unwrap(),
+        "content at 80 KiB is outside the vendor ranges"
+    );
+
+    let retiled = retiled_fragments(&vendor, total);
+    assert_eq!(retiled.len(), vendor.len(), "slots and names are reused");
+    assert_eq!((retiled[0].offset, retiled[0].size), (0, 32 * block));
+    assert_eq!(
+        (retiled[1].offset, retiled[1].size),
+        (32 * block, 32 * block)
+    );
+    assert_eq!(retiled[1].filename, "dataext_2.img");
+    assert_eq!(retiled[1].start_sector, 5399080 + 32);
+    assert!(
+        split_layout_covers_image(&new_image, &retiled, block).unwrap(),
+        "re-tiled layout must cover every byte"
+    );
+
+    std::fs::write(
+        input.join("rawprogram_unsparse0.xml"),
+        "<?xml version=\"1.0\" ?>\n\
+         <data>\n\
+         \x20 <program SECTOR_SIZE_IN_BYTES=\"4096\" label=\"dataext_a\" \
+         start_sector=\"5399080\" num_partition_sectors=\"2\" \
+         size_in_KB=\"8.0\" start_byte_hex=\"0x0\" filename=\"dataext_1.img\" \
+         sparse=\"false\" />\n\
+         \x20 <program SECTOR_SIZE_IN_BYTES=\"4096\" label=\"dataext_a\" \
+         start_sector=\"5399120\" num_partition_sectors=\"1\" \
+         size_in_KB=\"4.0\" start_byte_hex=\"0x0\" filename=\"dataext_2.img\" \
+         sparse=\"false\" />\n\
+         \x20 <program SECTOR_SIZE_IN_BYTES=\"4096\" label=\"other\" \
+         start_sector=\"1\" num_partition_sectors=\"1\" filename=\"other.img\" />\n\
+         </data>\n",
+    )
+    .unwrap();
+
+    let rewritten = rewrite_split_layout_xmls(&input, &out_dir, &vendor, &retiled).unwrap();
+    assert_eq!(rewritten, vec!["rawprogram_unsparse0.xml".to_string()]);
+
+    let out = std::fs::read_to_string(out_dir.join("rawprogram_unsparse0.xml")).unwrap();
+    assert!(
+        out.contains("label=\"other\""),
+        "unrelated entries stay put"
+    );
+    assert_eq!(out.matches("label=\"dataext_a\"").count(), 2);
+    assert!(out.contains("filename=\"dataext_1.img\""));
+    assert!(out.contains("filename=\"dataext_2.img\""));
+    assert!(out.contains("num_partition_sectors=\"32\""));
+    assert!(out.contains("start_sector=\"5399112\""));
+    assert!(out.contains("size_in_KB=\"128.0\""));
+    assert!(out.contains(&format!("start_byte_hex=\"0x{:x}\"", 5399112u64 * 4096)));
+}
+
 /// A dense whole-partition sibling is rewritten verbatim, and a partition
 /// that ships no combined image leaves the output untouched.
 #[test]
@@ -177,6 +316,8 @@ fn rebuilds_dense_sibling_and_skips_when_absent() {
 
     let fragments = vec![SplitFragment {
         filename: "vm-bootsys_1.img".to_string(),
+        start_sector: 0,
+        sector_size: block,
         offset: 0,
         size: total,
     }];
