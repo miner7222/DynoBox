@@ -36,6 +36,7 @@ system:/system/preinstall/HSJPRO/
 system:/system/preinstall/HybridWorkSpace/
 system:/system/preinstall/JinDong/
 system:/system/preinstall/LFHEducenterHD/
+system:/system/preinstall/LenovoCHF/
 system:/system/preinstall/LenovoExtremeCoreCommunity/
 system:/system/preinstall/LenovoSmartBuy_lenovopad/
 system:/system/preinstall/LegionZone/
@@ -45,6 +46,7 @@ system:/system/preinstall/QWen/
 system:/system/preinstall/SmarterReader/
 system:/system/preinstall/SogouInput/
 system:/system/preinstall/TabletVantage/
+system:/system/preinstall/TencentStart/
 system:/system/preinstall/TenxunSTART/
 system:/system/preinstall/Touchnotes_HD/
 system:/system/preinstall/VeryKuai/
@@ -78,3 +80,4 @@ vendor:/app/SoterService/
 vendor:/app/ifaa_service/
 vendor:/bin/modemlog.sh
 vendor:/bin/modemlog_setup.sh
+product:/etc/permissions/cn.google.services.xml
