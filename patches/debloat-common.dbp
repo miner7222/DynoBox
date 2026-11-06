@@ -636,6 +636,49 @@ proto = "(Landroid/os/Bundle;)V"
 from = "36 24 20 00"
 to = "00 00 00 00"
 expected = 1
+# The dialer resolves the same built-in SIM through its own inline copy of the
+# remote-slot check (g1.c methods d/i/j): each reads
+# persist.radio.uim.remote.slot and falls back to -1 when the property is
+# empty, so slot 1 (the never-activated built-in data SIM) survives the filter
+# and appears as a second SIM in the dialpad picker, the call-back-with-SIM
+# menu and the voicemail notifier. Change only that fallback constant from -1
+# to 1 (const/4 vX, -0x1 -> const/4 vX, 0x1); a property value set by the
+# platform still wins, and the physical SIM in slot 0 is untouched.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Lg1/c;"
+method = "d"
+proto = "(Landroid/content/Context;)Ljava/util/List;"
+
+[[op.replacement]]
+from = "12 f5"
+to = "12 15"
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Lg1/c;"
+method = "i"
+proto = "(Ljava/lang/Integer;Landroid/content/Context;)Landroid/telecom/PhoneAccountHandle;"
+
+[[op.replacement]]
+from = "12 f4"
+to = "12 14"
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiDialer/ZuiDialer.apk"
+class = "Lg1/c;"
+method = "j"
+proto = "(Landroid/content/Context;)Ljava/util/List;"
+
+[[op.replacement]]
+from = "12 f4"
+to = "12 14"
 
 # Call Settings keeps its own "Mark unknown number" switch (pref_mark_number),
 # shown unconditionally by both the regular and compat fragments. Its checked

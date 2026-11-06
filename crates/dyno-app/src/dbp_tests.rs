@@ -994,7 +994,7 @@ fn patches_dir() -> std::path::PathBuf {
 fn bundled_dbp_files_inventory() {
     let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
     assert_eq!(dc.name, "debloat-common");
-    assert_eq!(dc.ops.len(), 89);
+    assert_eq!(dc.ops.len(), 92);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
     assert_eq!(uc.ops.len(), 84);
@@ -1121,6 +1121,55 @@ fn bundled_unlock_wuji_surfaces_model_switch() {
             assert_eq!(*value, 0);
         }
         other => panic!("unexpected unlock-wuji op: {other:?}"),
+    }
+}
+
+/// The Messages patch drops the built-in data SIM from the subscription
+/// list; the dialer's own copy of the remote-slot check (g1.c) falls back to
+/// -1 when the property is empty, so flip that fallback to slot 1 in the three
+/// methods that build the SIM picker and phone-account list.
+#[test]
+fn bundled_debloat_hides_iot_sim_from_dialer() {
+    let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+    for (method, proto, from) in [
+        ("d", "(Landroid/content/Context;)Ljava/util/List;", "12 f5"),
+        (
+            "i",
+            "(Ljava/lang/Integer;Landroid/content/Context;)Landroid/telecom/PhoneAccountHandle;",
+            "12 f4",
+        ),
+        ("j", "(Landroid/content/Context;)Ljava/util/List;", "12 f4"),
+    ] {
+        let op = dc
+            .ops
+            .iter()
+            .find(|op| {
+                matches!(op, DbpOp::MethodCodePatch { class, method: m, .. }
+                        if class == "Lg1/c;" && m == method)
+            })
+            .unwrap_or_else(|| panic!("missing dialer op for {method}"));
+        match op {
+            DbpOp::MethodCodePatch {
+                file,
+                proto: op_proto,
+                replacements,
+                ..
+            } => {
+                assert_eq!(file, "system/priv-app/ZuiDialer/ZuiDialer.apk");
+                assert_eq!(op_proto, proto);
+                assert_eq!(replacements.len(), 1);
+                assert_eq!(replacements[0].from, from);
+                // const/4 vX, -0x1 -> const/4 vX, 0x1 flips the literal
+                // nibble (the register nibble is unchanged).
+                assert_eq!(replacements[0].to.len(), from.len());
+                assert_eq!(
+                    replacements[0].to,
+                    from.replace("f", "1"),
+                    "only the literal nibble changes"
+                );
+            }
+            other => panic!("unexpected dialer op: {other:?}"),
+        }
     }
 }
 
