@@ -84,6 +84,10 @@ struct FormSnapshot {
     #[serde(default = "default_true")]
     add_overlays_enabled: bool,
     #[serde(default)]
+    add_spoof: Option<PathBuf>,
+    #[serde(default)]
+    add_spoof_enabled: bool,
+    #[serde(default)]
     info: bool,
     plus_patches: Vec<PathBuf>,
     #[serde(default = "default_true")]
@@ -134,6 +138,8 @@ impl FormSnapshot {
             debloat_list: gui.debloat_list.clone(),
             add_overlays: gui.add_overlays.clone(),
             add_overlays_enabled: gui.add_overlays_enabled,
+            add_spoof: gui.add_spoof.clone(),
+            add_spoof_enabled: gui.add_spoof_enabled,
             info: gui.info,
             plus_patches: gui.plus_patches.clone(),
             plus_patches_enabled: gui.plus_patches_enabled,
@@ -166,6 +172,8 @@ impl FormSnapshot {
         gui.debloat_list.clone_from(&self.debloat_list);
         gui.add_overlays.clone_from(&self.add_overlays);
         gui.add_overlays_enabled = self.add_overlays_enabled;
+        gui.add_spoof.clone_from(&self.add_spoof);
+        gui.add_spoof_enabled = self.add_spoof_enabled;
         gui.info = self.info;
         gui.plus_patches.clone_from(&self.plus_patches);
         gui.plus_patches_enabled = self.plus_patches_enabled;
@@ -238,6 +246,7 @@ impl MissingPaths {
             .chain(snapshot.fuck_lgsi_config.iter())
             .chain(snapshot.debloat_list.iter())
             .chain(snapshot.add_overlays.iter())
+            .chain(snapshot.add_spoof.iter())
             .chain(snapshot.plus_patches.iter())
             .chain(snapshot.ota.source.iter())
             .chain(snapshot.ota.target.iter())
@@ -295,6 +304,8 @@ struct DynoGui {
     debloat_list: Option<PathBuf>,
     add_overlays: Vec<PathBuf>,
     add_overlays_enabled: bool,
+    add_spoof: Option<PathBuf>,
+    add_spoof_enabled: bool,
     info: bool,
     plus_patches: Vec<PathBuf>,
     plus_patches_enabled: bool,
@@ -352,6 +363,8 @@ impl Default for DynoGui {
             debloat_list: None,
             add_overlays: Vec::new(),
             add_overlays_enabled: true,
+            add_spoof: None,
+            add_spoof_enabled: false,
             info: false,
             plus_patches: Vec::new(),
             plus_patches_enabled: true,
@@ -553,6 +566,11 @@ impl DynoGui {
             for overlay in &self.add_overlays {
                 a.push(format!("--add-overlay={}", overlay.display()));
             }
+        }
+        if self.add_spoof_enabled
+            && let Some(spoof) = &self.add_spoof
+        {
+            a.push(format!("--add-spoof={}", spoof.display()));
         }
     }
 
@@ -1292,9 +1310,35 @@ impl DynoGui {
                 {
                     self.overlay_manager_open = true;
                 }
+            });
 
-                ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.add_spoof_enabled, "--add-spoof")
+                    .on_hover_text(
+                        "Install the zygote preload (libspoof.so, the per-app config \
+                         from this JSON list, and the init.zygote64.rc preload line) \
+                         into system.img during resign",
+                    );
+                if ui.button("📁").clicked()
+                    && let Some(p) = file_dialog(self.add_spoof.as_deref())
+                        .add_filter("JSON", &["json"])
+                        .pick_file()
+                {
+                    self.add_spoof = Some(p);
+                }
+                if let Some(path) = &self.add_spoof {
+                    let text = path.display().to_string();
+                    let missing = self.missing_paths.contains(path);
+                    drag_scroll_path(ui, &text, "add-spoof", missing);
+                    if ui.small_button("✖").clicked() {
+                        self.add_spoof = None;
+                    }
+                }
+            });
 
+            ui.add_space(12.0);
+
+            ui.horizontal(|ui| {
                 ui.checkbox(&mut self.plus_patches_enabled, "")
                     .on_hover_text("Apply the --plus list during resign");
                 let patches_missing = self
@@ -1746,6 +1790,27 @@ mod tests {
         assert!(
             !args.iter().any(|a| a.starts_with("--plus=")),
             "disabled patch list must not emit --plus, got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn add_spoof_is_emitted_only_when_enabled() {
+        let mut gui = populated_gui(Mode::Resign);
+        gui.add_spoof = Some(PathBuf::from("spoof.json"));
+        gui.add_spoof_enabled = true;
+        assert!(
+            gui.build_args()
+                .contains(&"--add-spoof=spoof.json".to_string()),
+            "enabled spoof list should emit --add-spoof, got: {:?}",
+            gui.build_args()
+        );
+
+        gui.add_spoof_enabled = false;
+        assert!(
+            !gui.build_args()
+                .iter()
+                .any(|a| a.starts_with("--add-spoof=")),
+            "disabled spoof list must not emit --add-spoof"
         );
     }
 

@@ -1258,6 +1258,7 @@ fn secondary_protected_paths_cover_ota_key_lgsi_debloat_and_plus() {
         fuck_lgsi: Some(FuckLgsiMode::Config(lgsi.clone())),
         debloat: Some(crate::debloat::DebloatMode::ListFile(debloat.clone())),
         add_overlay: Vec::new(),
+        add_spoof: None,
         plus: vec![plus.clone()],
     };
     let secondary =
@@ -1718,6 +1719,7 @@ fn sample_resign_config() -> ResignConfig {
         fuck_lgsi: None,
         debloat: None,
         add_overlay: Vec::new(),
+        add_spoof: None,
         plus: Vec::new(),
     }
 }

@@ -1,3 +1,10 @@
 # Detached Ed25519 fixtures sign these exact textual bytes.
 /crates/dyno-app/testdata/andtabcus-manifest.json text eol=lf
 /crates/dyno-app/testdata/andtabcus-manifest.sig text eol=lf
+
+# PIF payload sources and build scripts are used on every host.
+/spoof/README.md text eol=lf
+/spoof/spoof.json text eol=lf
+/spoof/native/*.cpp text eol=lf
+/spoof/native/*.sh text eol=lf
+/spoof/native/*.ps1 text eol=lf

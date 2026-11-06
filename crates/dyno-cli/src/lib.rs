@@ -127,6 +127,13 @@ enum Commands {
         #[arg(long, value_name = "APK", requires = "resign")]
         add_overlay: Vec<PathBuf>,
 
+        /// Install the zygote preload into system.img: `libspoof.so` and the
+        /// per-app config generated from this JSON list, plus the 64-bit
+        /// zygote service preload line in init.zygote64.rc. The list's
+        /// directory must also contain `libspoof.so`. Requires --resign.
+        #[arg(long, value_name = "JSON", requires = "resign")]
+        add_spoof: Option<PathBuf>,
+
         /// Apply an external `.dbp` patch to files inside the partition images
         /// during resign. Repeat the flag to apply several patches
         /// (`--plus a.dbp --plus b.dbp`). Requires --resign.
@@ -243,6 +250,14 @@ enum Commands {
         #[arg(long, value_name = "APK")]
         add_overlay: Vec<PathBuf>,
 
+        /// Install the zygote preload into system.img: `libspoof.so` and the
+        /// per-app config generated from this JSON list, plus the 64-bit
+        /// zygote service preload line in init.zygote64.rc. The list's
+        /// directory must also contain `libspoof.so`. Requires `resign` or
+        /// `--resign`.
+        #[arg(long, value_name = "JSON", requires = "resign")]
+        add_spoof: Option<PathBuf>,
+
         /// Apply an external `.dbp` patch to files inside the partition images
         /// during resign. Repeat the flag to apply several patches
         /// (`--plus a.dbp --plus b.dbp`). Requires `resign` or `--resign`.
@@ -352,6 +367,14 @@ enum Commands {
         /// records each file by name and SHA-256.
         #[arg(long, value_name = "APK")]
         add_overlay: Vec<PathBuf>,
+
+        /// Install the zygote preload into system.img: `libspoof.so` and the
+        /// per-app config generated from this JSON list
+        /// (`[{"package": "...", "props": {"ro.product.model": "..."}}]`), plus
+        /// the 64-bit zygote service preload line in init.zygote64.rc. The
+        /// list's directory must also contain `libspoof.so`.
+        #[arg(long, value_name = "JSON")]
+        add_spoof: Option<PathBuf>,
 
         /// Apply an external `.dbp` patch to files inside the partition images.
         /// Repeat the flag to apply several patches
@@ -599,6 +622,7 @@ struct ApplyResignOptions<'a> {
     fuck_lgsi: &'a Option<String>,
     debloat: bool,
     add_overlay: &'a [PathBuf],
+    add_spoof: &'a Option<PathBuf>,
     plus: &'a [PathBuf],
 }
 
@@ -614,6 +638,7 @@ impl ApplyResignOptions<'_> {
             || self.fuck_lgsi.is_some()
             || self.debloat
             || !self.add_overlay.is_empty()
+            || self.add_spoof.is_some()
             || !self.plus.is_empty()
     }
 }
@@ -699,6 +724,7 @@ fn make_resign_config(
     fuck_lgsi: Option<FuckLgsiMode>,
     debloat: Option<DebloatMode>,
     add_overlay: Vec<PathBuf>,
+    add_spoof: Option<PathBuf>,
     plus: Vec<PathBuf>,
 ) -> Option<ResignConfig> {
     key.map(|key| ResignConfig {
@@ -712,6 +738,7 @@ fn make_resign_config(
         fuck_lgsi,
         debloat,
         add_overlay,
+        add_spoof,
         plus,
     })
 }
@@ -775,6 +802,7 @@ where
             fuck_lgsi,
             debloat,
             add_overlay,
+            add_spoof,
             plus,
             info,
             complete,
@@ -800,6 +828,7 @@ where
                     resolve_fuck_lgsi_mode(fuck_lgsi),
                     resolve_debloat_mode(debloat),
                     add_overlay,
+                    add_spoof,
                     plus,
                 ),
                 repack,
@@ -828,6 +857,7 @@ where
             fuck_lgsi,
             debloat,
             add_overlay,
+            add_spoof,
             plus,
             info,
             complete,
@@ -854,13 +884,13 @@ where
                 fuck_lgsi: &fuck_lgsi,
                 debloat: debloat.is_some(),
                 add_overlay: &add_overlay,
+                add_spoof: &add_spoof,
                 plus: &plus,
             };
             validate_apply_resign_options(resign, &resign_options)?;
 
             let lgsi_mode = resolve_fuck_lgsi_mode(fuck_lgsi);
             let debloat_mode = resolve_debloat_mode(debloat);
-
             let out_dir = resolve_output_dir(output, default_output_name_for_apply(resign, repack));
             let request = ApplyRequest {
                 input,
@@ -879,6 +909,7 @@ where
                     lgsi_mode,
                     debloat_mode,
                     add_overlay,
+                    add_spoof,
                     plus,
                 ),
                 repack,
@@ -904,6 +935,7 @@ where
             fuck_lgsi,
             debloat,
             add_overlay,
+            add_spoof,
             plus,
             info,
             repack,
@@ -925,6 +957,7 @@ where
                     fuck_lgsi: lgsi_mode,
                     debloat: resolve_debloat_mode(debloat),
                     add_overlay,
+                    add_spoof,
                     plus,
                 },
                 repack,
@@ -1478,6 +1511,7 @@ mod tests {
             "testkey_rsa4096",
             "--fuck-lgsi=lgsi_features.json",
             "--debloat=debloat.txt",
+            "--add-spoof=spoof.json",
             "--plus=one.dbp",
             "--plus=two.dbp",
         ])
@@ -1488,10 +1522,12 @@ mod tests {
             Commands::Unpack {
                 fuck_lgsi: Some(fuck_lgsi),
                 debloat: Some(debloat),
+                add_spoof: Some(add_spoof),
                 plus,
                 ..
             } if fuck_lgsi == "lgsi_features.json"
                 && debloat == "debloat.txt"
+                && add_spoof.as_path() == std::path::Path::new("spoof.json")
                 && plus == [PathBuf::from("one.dbp"), PathBuf::from("two.dbp")]
         ));
     }
@@ -1555,6 +1591,7 @@ mod tests {
             fuck_lgsi: &None,
             debloat: false,
             add_overlay: &[],
+            add_spoof: &None,
             plus: &[],
         };
         let err = validate_apply_resign_options(false, &options)
@@ -1577,10 +1614,34 @@ mod tests {
             fuck_lgsi: &None,
             debloat: false,
             add_overlay: &[],
+            add_spoof: &None,
             plus: &[],
         };
         let err = validate_apply_resign_options(false, &options)
             .expect_err("boot SPL without resign should be rejected");
+
+        assert!(err.to_string().contains("require `resign`"));
+    }
+
+    #[test]
+    fn validate_apply_resign_options_rejects_add_spoof_without_resign() {
+        let add_spoof = Some(PathBuf::from("spoof.json"));
+        let options = ApplyResignOptions {
+            key: &None,
+            algorithm: &None,
+            force: false,
+            rollback_index: &None,
+            boot_spl: &None,
+            vendor_spl: &None,
+            system_spl: &None,
+            fuck_lgsi: &None,
+            debloat: false,
+            add_overlay: &[],
+            add_spoof: &add_spoof,
+            plus: &[],
+        };
+        let err = validate_apply_resign_options(false, &options)
+            .expect_err("add-spoof without resign should be rejected");
 
         assert!(err.to_string().contains("require `resign`"));
     }
@@ -1598,6 +1659,7 @@ mod tests {
             fuck_lgsi: &None,
             debloat: false,
             add_overlay: &[],
+            add_spoof: &None,
             plus: &[],
         };
         let err = validate_apply_resign_options(true, &options)
@@ -1625,6 +1687,7 @@ mod tests {
             fuck_lgsi: &Some(String::new()),
             debloat: false,
             add_overlay: &[],
+            add_spoof: &None,
             plus: &[],
         };
         validate_apply_resign_options(true, &options).expect("resign with key should be accepted");

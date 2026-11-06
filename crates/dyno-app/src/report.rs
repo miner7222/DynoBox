@@ -35,6 +35,7 @@ pub struct PipelineReport {
     pub signing_key_change: Option<SigningKeyChange>,
     pub debloat: Option<DebloatRecord>,
     pub overlay: Option<OverlayRecord>,
+    pub spoof: Option<SpoofRecord>,
     pub plus: Option<PlusRecord>,
 }
 
@@ -97,6 +98,32 @@ pub struct OverlayRecord {
 #[derive(Debug, Clone)]
 pub struct OverlayFileRecord {
     pub name: String,
+    pub size: u64,
+    pub sha256: String,
+    pub inode: u32,
+    pub blocks: u32,
+}
+
+/// `--add-spoof` summary: the payload inserted into system.img, the
+/// `app_process64` dependency that loads it, and the legacy init cleanup.
+#[derive(Debug, Clone, Default)]
+pub struct SpoofRecord {
+    pub partition: String,
+    pub files: Vec<SpoofFileRecord>,
+    pub apps: usize,
+    pub props: usize,
+    pub app_process_path: String,
+    pub app_process_outcome: String,
+    pub init_path: String,
+    pub init_outcome: String,
+    pub old_root_digest: String,
+    pub new_root_digest: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpoofFileRecord {
+    /// Path inside the partition image, e.g. `system/lib64/libspoof.so`.
+    pub path: String,
     pub size: u64,
     pub sha256: String,
     pub inode: u32,
@@ -183,6 +210,7 @@ impl PipelineReport {
             || self.signing_key_change.is_some()
             || self.debloat.is_some()
             || self.overlay.is_some()
+            || self.spoof.is_some()
             || self.plus.is_some()
     }
 
@@ -234,6 +262,9 @@ impl PipelineReport {
         }
         if let Some(ov) = &self.overlay {
             push_overlay_section(&mut out, ov);
+        }
+        if let Some(spoof) = &self.spoof {
+            push_spoof_section(&mut out, spoof);
         }
         if let Some(pl) = &self.plus {
             push_plus_section(&mut out, pl);
@@ -503,6 +534,50 @@ fn push_overlay_section(out: &mut String, ov: &OverlayRecord) {
         out.push_str("</td></tr>\n");
     }
     out.push_str("</table></section>\n");
+}
+
+fn push_spoof_section(out: &mut String, spoof: &SpoofRecord) {
+    out.push_str("<section><div class='section-heading'><h2>Per-app spoof</h2></div>\n");
+    out.push_str("<p class='section-note'>Zygote-loaded payload installed into ");
+    out.push_str(&esc(&spoof.partition));
+    out.push_str(". Only the listed app processes see the override values.</p>\n");
+    out.push_str(
+        "<table><tr><th>Path</th><th>Size</th><th>SHA-256</th><th>Inode</th><th>Blocks</th></tr>\n",
+    );
+    for f in &spoof.files {
+        out.push_str("<tr><td><code>");
+        out.push_str(&esc(&f.path));
+        out.push_str("</code></td><td class='to'>");
+        out.push_str(&f.size.to_string());
+        out.push_str("</td><td class='mono'>");
+        out.push_str(&esc(&f.sha256));
+        out.push_str("</td><td>");
+        out.push_str(&f.inode.to_string());
+        out.push_str("</td><td>");
+        out.push_str(&f.blocks.to_string());
+        out.push_str("</td></tr>\n");
+    }
+    out.push_str("</table><p class='section-note'>");
+    out.push_str(&spoof.apps.to_string());
+    out.push_str(" app(s), ");
+    out.push_str(&spoof.props.to_string());
+    out.push_str(" prop(s). Loader: <code>");
+    out.push_str(&esc(&spoof.app_process_path));
+    out.push_str("</code> (");
+    out.push_str(&esc(&spoof.app_process_outcome));
+    out.push_str("). Legacy init: <code>");
+    out.push_str(&esc(&spoof.init_path));
+    out.push_str("</code> (");
+    out.push_str(&esc(&spoof.init_outcome));
+    out.push_str(")</p>\n");
+    if !spoof.old_root_digest.is_empty() || !spoof.new_root_digest.is_empty() {
+        out.push_str("<p class='section-note'>dm-verity root digest: <code>");
+        out.push_str(&esc(&spoof.old_root_digest));
+        out.push_str("</code> &rarr; <code>");
+        out.push_str(&esc(&spoof.new_root_digest));
+        out.push_str("</code></p>\n");
+    }
+    out.push_str("</section>\n");
 }
 
 fn push_plus_section(out: &mut String, pl: &PlusRecord) {

@@ -85,7 +85,10 @@ dynobox integrity-keygen   Generate a manifest-signing keypair
 ```
 
 Use `dynobox <command> --help` for every option, including `--boot-spl`,
-`--vendor-spl`, `--system-spl`, `--fuck-lgsi`, `--debloat`, and `--plus`.
+`--vendor-spl`, `--system-spl`, `--fuck-lgsi`, `--debloat`, `--add-overlay`,
+`--add-spoof`, and `--plus`. The payload layout, the per-app JSON format, and
+the native library contract are documented in
+[`spoof/README.md`](spoof/README.md).
 
 ### Output provenance and trusted verification
 
