@@ -7952,6 +7952,13 @@ fn audit_apply_op(buf: &mut [u8], op: &DbpOp) -> Result<bool> {
             expected,
             ..
         } => force_axml_background(buf, *node_id as u32, *drawable as u32, *expected)?,
+        DbpOp::LayoutIntAttribute {
+            node_id,
+            attribute,
+            value,
+            expected,
+            ..
+        } => force_axml_int_attribute(buf, *node_id as u32, attribute, *value as u32, *expected)?,
         DbpOp::PermissionProtection {
             permission,
             protection_level,
@@ -7978,6 +7985,7 @@ fn audit_op_kind(op: &DbpOp) -> &'static str {
         DbpOp::ZipEntryReplace { .. } => "zip_entry_replace",
         DbpOp::LayoutCollapse { .. } => "layout_collapse",
         DbpOp::LayoutBackground { .. } => "layout_background",
+        DbpOp::LayoutIntAttribute { .. } => "layout_int_attribute",
         DbpOp::PermissionProtection { .. } => "permission_protection",
         DbpOp::InvokeConstBool { .. } => "invoke_const_bool",
         DbpOp::InvokeConstInt { .. } => "invoke_const_int",
@@ -8076,6 +8084,13 @@ fn audit_op_label(op: &DbpOp) -> String {
             expected,
             ..
         } => format!("background id={node_id:#x} -> {drawable:#x} x{expected}"),
+        DbpOp::LayoutIntAttribute {
+            node_id,
+            attribute,
+            value,
+            expected,
+            ..
+        } => format!("int-attr id={node_id:#x} {attribute}={value} x{expected}"),
         DbpOp::PermissionProtection {
             permission,
             protection_level,

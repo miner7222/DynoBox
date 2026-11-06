@@ -3642,6 +3642,9 @@ enum AxmlEditKind {
     Collapse,
     /// Swap the node's android:background reference to `drawable`.
     Background { drawable: u32 },
+    /// Force one integer attribute (looked up by AXML attribute name) to
+    /// `value`. Nodes without the attribute are skipped.
+    IntAttribute { attribute: String, value: u32 },
 }
 
 /// Collect validated per-entry edit plans for every `.xml` entry containing
@@ -3786,6 +3789,22 @@ fn collect_axml_works(
                         type_off: bg.type_off,
                         new_type: AXML_TYPE_REFERENCE,
                         new_data: *drawable,
+                    });
+                }
+                AxmlEditKind::IntAttribute { attribute, value } => {
+                    let Some(attr) = axml_attr(&el.attrs, attribute) else {
+                        continue;
+                    };
+                    if attr.data_type != AXML_TYPE_INT_DEC {
+                        continue;
+                    }
+                    if attr.data == *value {
+                        continue;
+                    }
+                    edits.push(AxmlEdit {
+                        type_off: attr.type_off,
+                        new_type: AXML_TYPE_INT_DEC,
+                        new_data: *value,
                     });
                 }
             }
@@ -4133,6 +4152,38 @@ pub fn force_axml_background(
         &layout,
         node_id,
         &AxmlEditKind::Background { drawable },
+    )?;
+    let patched: usize = works.iter().map(|w| w.patched_nodes).sum();
+    if patched != expected {
+        return Ok(false);
+    }
+    commit_axml_works(zip_bytes, &layout, works)
+}
+
+/// Force one integer attribute (`attribute`, looked up by its AXML name) of
+/// every layout node with `android:id == node_id` to `value`. Same
+/// size-preserving machinery as [`force_axml_collapse`]; nodes that do not
+/// carry the attribute, or carry it with a non-integer type, are skipped, and
+/// exactly `expected` nodes must be patched.
+pub fn force_axml_int_attribute(
+    zip_bytes: &mut [u8],
+    node_id: u32,
+    attribute: &str,
+    value: u32,
+    expected: usize,
+) -> Result<bool> {
+    if node_id == 0 || attribute.is_empty() || expected == 0 {
+        return Ok(false);
+    }
+    let layout = parse_zip_central_directory(zip_bytes)?;
+    let works = collect_axml_works(
+        zip_bytes,
+        &layout,
+        node_id,
+        &AxmlEditKind::IntAttribute {
+            attribute: attribute.to_string(),
+            value,
+        },
     )?;
     let patched: usize = works.iter().map(|w| w.patched_nodes).sum();
     if patched != expected {

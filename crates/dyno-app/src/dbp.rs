@@ -48,14 +48,15 @@ use serde::Deserialize;
 use crate::byte_io::write_u32_le;
 use crate::dex_patch::{
     DexMethodRef, DexPoolSymbol, DexPoolSymbolKind, MethodCodeReplacement, MethodCodeTemplateSlot,
-    NopAnchor, force_axml_background, force_axml_collapse, force_axml_permission_protection,
-    force_field_const_bool, force_fragment_render_gone, force_invoke_const_bool,
-    force_invoke_const_bool_at, force_invoke_const_int, force_method_broadcast_finish,
-    force_method_return_bool, force_method_return_const_string, force_method_return_int,
-    force_method_return_void, force_nop_anchored_invoke, force_preference_controller_hidden,
-    force_remoteviews_gone, force_view_gone, force_zip_entry_replace, parse_method_descriptor,
-    patch_method_code, redirect_intent_action_to_broadcast, redirect_method_code,
-    resolve_dex_pool_symbol, validate_method_code_template_slots,
+    NopAnchor, force_axml_background, force_axml_collapse, force_axml_int_attribute,
+    force_axml_permission_protection, force_field_const_bool, force_fragment_render_gone,
+    force_invoke_const_bool, force_invoke_const_bool_at, force_invoke_const_int,
+    force_method_broadcast_finish, force_method_return_bool, force_method_return_const_string,
+    force_method_return_int, force_method_return_void, force_nop_anchored_invoke,
+    force_preference_controller_hidden, force_remoteviews_gone, force_view_gone,
+    force_zip_entry_replace, parse_method_descriptor, patch_method_code,
+    redirect_intent_action_to_broadcast, redirect_method_code, resolve_dex_pool_symbol,
+    validate_method_code_template_slots,
 };
 use crate::dex_util::recompute_dex_header_sums;
 use crate::ext4_helpers::{lookup_inode_at_path, open_ext4_volume, write_via_extents};
@@ -324,6 +325,20 @@ pub enum DbpOp {
         #[serde(default = "default_expected_matches")]
         expected: usize,
     },
+    /// Force one integer layout attribute (`attribute`, looked up by its AXML
+    /// name, e.g. `breakStrategy`) of every node with `android:id == node_id`
+    /// to `value`. Same size-preserving machinery as
+    /// [`DbpOp::LayoutCollapse`]; nodes without the attribute are skipped and
+    /// exactly `expected` nodes must be patched.
+    LayoutIntAttribute {
+        partition: String,
+        file: String,
+        node_id: i32,
+        attribute: String,
+        value: i32,
+        #[serde(default = "default_expected_matches")]
+        expected: usize,
+    },
     /// Rewrite `android:protectionLevel` of one
     /// `<permission android:name="...">` element in `AndroidManifest.xml`
     /// inside an APK/JAR. The manifest may be STORED or deflated; the archive
@@ -471,6 +486,7 @@ impl DbpOp {
             | DbpOp::ZipEntryReplace { partition, .. }
             | DbpOp::LayoutCollapse { partition, .. }
             | DbpOp::LayoutBackground { partition, .. }
+            | DbpOp::LayoutIntAttribute { partition, .. }
             | DbpOp::PermissionProtection { partition, .. }
             | DbpOp::InvokeConstBool { partition, .. }
             | DbpOp::InvokeConstInt { partition, .. }
@@ -500,6 +516,7 @@ impl DbpOp {
             | DbpOp::ZipEntryReplace { file, .. }
             | DbpOp::LayoutCollapse { file, .. }
             | DbpOp::LayoutBackground { file, .. }
+            | DbpOp::LayoutIntAttribute { file, .. }
             | DbpOp::PermissionProtection { file, .. }
             | DbpOp::InvokeConstBool { file, .. }
             | DbpOp::InvokeConstInt { file, .. }
@@ -930,6 +947,28 @@ pub fn load_dbp(path: &Path) -> Result<DbpDocument> {
                 if *expected == 0 {
                     return Err(bail(
                         "layout_background `expected` must be non-zero".to_string(),
+                    ));
+                }
+            }
+            DbpOp::LayoutIntAttribute {
+                node_id,
+                attribute,
+                expected,
+                ..
+            } => {
+                if *node_id <= 0 {
+                    return Err(bail(
+                        "layout_int_attribute `node_id` must be a positive resource id".to_string(),
+                    ));
+                }
+                if attribute.is_empty() {
+                    return Err(bail(
+                        "layout_int_attribute `attribute` must be non-empty".to_string(),
+                    ));
+                }
+                if *expected == 0 {
+                    return Err(bail(
+                        "layout_int_attribute `expected` must be non-zero".to_string(),
                     ));
                 }
             }
@@ -1748,6 +1787,22 @@ fn apply_ops_to_apk(
                 )?,
                 format!("axml-background:{node_id:#x}"),
             ),
+            DbpOp::LayoutIntAttribute {
+                node_id,
+                attribute,
+                value,
+                expected,
+                ..
+            } => (
+                force_axml_int_attribute(
+                    &mut apk_bytes,
+                    *node_id as u32,
+                    attribute,
+                    *value as u32,
+                    *expected,
+                )?,
+                format!("axml-int-attr:{node_id:#x}:{attribute}"),
+            ),
             DbpOp::PermissionProtection {
                 permission,
                 protection_level,
@@ -2086,6 +2141,7 @@ fn apply_one_op(dex: &mut [u8], op: &DbpOp) -> Result<bool> {
         DbpOp::ZipEntryReplace { .. } => Ok(false),
         DbpOp::LayoutCollapse { .. }
         | DbpOp::LayoutBackground { .. }
+        | DbpOp::LayoutIntAttribute { .. }
         | DbpOp::PermissionProtection { .. } => Ok(false),
     }
 }
