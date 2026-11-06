@@ -1010,6 +1010,38 @@ fn bundled_dbp_files_inventory() {
     let gl = load_dbp(&patches_dir().join("show-google-lens.dbp")).expect("show-google-lens.dbp");
     assert_eq!(gl.name, "show-google-lens");
     assert_eq!(gl.ops.len(), 3);
+    let wj = load_dbp(&patches_dir().join("unlock-wuji.dbp")).expect("unlock-wuji.dbp");
+    assert_eq!(wj.name, "unlock-wuji");
+    assert_eq!(wj.ops.len(), 1);
+}
+
+/// The hidden Developer options device-compatibility switch is the frontend
+/// for the hidden edition toggle: surface it unconditionally so the PIF
+/// preload can read `persist.sys.config.model_cust`.
+#[test]
+fn bundled_unlock_wuji_surfaces_model_switch() {
+    let wj = load_dbp(&patches_dir().join("unlock-wuji.dbp")).expect("unlock-wuji.dbp");
+    match &wj.ops[0] {
+        DbpOp::MethodConstInt {
+            partition,
+            file,
+            class,
+            method,
+            proto,
+            value,
+        } => {
+            assert_eq!(partition, "system");
+            assert_eq!(file, "system/priv-app/ZuiSettings/ZuiSettings.apk");
+            assert_eq!(
+                class,
+                "Lcom/lenovo/settings/development/ChangeModelNamePreferenceController;"
+            );
+            assert_eq!(method, "getAvailabilityStatus");
+            assert_eq!(proto, "()I");
+            assert_eq!(*value, 0);
+        }
+        other => panic!("unexpected unlock-wuji op: {other:?}"),
+    }
 }
 
 /// The antispam ops: offline-only smart SMS check, disabled call

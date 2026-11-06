@@ -1,0 +1,17 @@
+name = "unlock-wuji"
+description = "Show the hidden developer-options device compatibility switch, which the spoof preload uses as the hidden edition toggle."
+
+# LgsiChangeModelName is compiled off in this build, so
+# ChangeModelNamePreferenceController.getAvailabilityStatus() returns 3
+# (unavailable) and the "change_model_name" row never appears in Developer
+# options. Force the status to AVAILABLE; the controller's own toggle already
+# writes persist.sys.config.model_cust (1/0) as a system_app, which is the
+# switch libspoof reads to report the hidden edition. Nothing else in the
+# firmware reads that property, so the row is otherwise inert.
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/development/ChangeModelNamePreferenceController;"
+method = "getAvailabilityStatus"
+value = 0

@@ -540,3 +540,8 @@ while still advancing the setup wizard.
 * **`fix-common.dbp`**
 * **`show-google-lens.dbp`**
 * **`unlock-common.dbp`**
+* **`unlock-wuji.dbp`** — surfaces the hidden Developer options "device
+  compatibility test mode" row (`change_model_name`) on the Wuji build. The
+  spoof preload reads the row's `persist.sys.config.model_cust` toggle as the
+  hidden edition switch; see
+  [`spoof/README.md`](../spoof/README.md#runtime-behaviour).
