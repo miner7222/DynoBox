@@ -498,11 +498,30 @@ fn capture_original_input_artifacts(
     input: &Path,
     events: &mut dyn EventSink,
 ) -> anyhow::Result<Vec<crate::integrity::ManifestArtifact>> {
+    // --repack records the original input images in the output manifest, so
+    // this hashes every .img before the pipeline starts. Announce the size
+    // first: a multi-GB input otherwise looks like a hang.
+    let (count, bytes) = crate::integrity::input_image_inventory(input)?;
+    if count > 0 {
+        message(
+            events,
+            MessageLevel::Info,
+            format!(
+                "input: hashing {count} images ({:.1} GiB) for the output manifest",
+                bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+            ),
+        );
+    }
+    let started = std::time::Instant::now();
     let artifacts = crate::integrity::collect_input_image_artifacts(input)?;
     message(
         events,
         MessageLevel::Info,
-        format!("input: {} image SHA-256 digests captured", artifacts.len()),
+        format!(
+            "input: {} image SHA-256 digests captured in {:.1}s",
+            artifacts.len(),
+            started.elapsed().as_secs_f64()
+        ),
     );
     Ok(artifacts)
 }
@@ -4396,7 +4415,7 @@ fn stream_sha256_logical(
         );
     }
 
-    let mut hasher = Sha256::new();
+    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
     let mut remaining = logical_size;
     let mut buf = vec![0u8; 1024 * 1024];
     let readable = std::cmp::min(file_len, logical_size);
@@ -4438,9 +4457,9 @@ fn stream_sha256_logical(
         }
     }
 
-    let digest = hasher.finalize();
+    let digest = hasher.finish();
     let mut out = [0u8; PAYLOAD_SHA256_LEN];
-    out.copy_from_slice(&digest);
+    out.copy_from_slice(digest.as_ref());
     Ok(out)
 }
 

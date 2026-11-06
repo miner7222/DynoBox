@@ -19,6 +19,7 @@ liblzma = "0.4"
 bsdiff-android = "0.0.2"
 lz4_flex = "0.13.1"
 sha2 = "0.11.0"
+ring.workspace = true
 
 [build-dependencies]
 cc = "1.4.3"

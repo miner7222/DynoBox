@@ -15,7 +15,6 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 use dynobox_core::hex::hex_encode;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// Manifest file written into the output directory root.
 pub const MANIFEST_FILE_NAME: &str = "dynobox-manifest.json";
@@ -568,7 +567,8 @@ fn walk_discover_output(
 ///
 /// Directory inputs use normalized relative paths; a regular file input uses
 /// its basename. Symlinks and special files are rejected rather than followed.
-pub fn collect_input_image_artifacts(input: &Path) -> Result<Vec<ManifestArtifact>> {
+/// Walk input and return its .img candidates without hashing them.
+fn discover_input_candidates(input: &Path) -> Result<Vec<ArtifactCandidate>> {
     let metadata = fs::symlink_metadata(input)
         .with_context(|| format!("Failed to inspect original input {}", input.display()))?;
     let file_type = metadata.file_type();
@@ -601,7 +601,28 @@ pub fn collect_input_image_artifacts(input: &Path) -> Result<Vec<ManifestArtifac
     }
 
     candidates.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(candidates)
+}
+
+pub fn collect_input_image_artifacts(input: &Path) -> Result<Vec<ManifestArtifact>> {
+    let candidates = discover_input_candidates(input)?;
     hash_candidates_bounded(&candidates)
+}
+
+/// Number of image files and their total bytes, without reading them.
+///
+/// --repack records the original input images in the output manifest, which
+/// means hashing every .img before the pipeline starts. Report the size up
+/// front so a multi-GB input does not look like a hang.
+pub fn input_image_inventory(input: &Path) -> Result<(usize, u64)> {
+    let candidates = discover_input_candidates(input)?;
+    Ok((
+        candidates.len(),
+        candidates
+            .iter()
+            .map(|candidate| candidate.discovered_size)
+            .sum(),
+    ))
 }
 
 fn walk_discover_input_images(
@@ -781,7 +802,7 @@ fn hash_candidates_bounded(candidates: &[ArtifactCandidate]) -> Result<Vec<Manif
     let worker_count = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
-        .min(2)
+        .clamp(1, 32)
         .min(candidates.len());
 
     let mut indexed = std::thread::scope(|scope| {
@@ -840,7 +861,9 @@ fn hash_candidate(candidate: &ArtifactCandidate, buffer: &mut [u8]) -> Result<Ma
     }
 
     let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
+    // `ring` uses the CPU's SHA extensions; the pure-Rust backend is scalar and
+    // materially slower on manifest-sized inputs.
+    let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
     let mut size = 0u64;
     loop {
         let read = file.read(buffer)?;
@@ -872,7 +895,7 @@ fn hash_candidate(candidate: &ArtifactCandidate, buffer: &mut [u8]) -> Result<Ma
     Ok(ManifestArtifact {
         path: candidate.path.clone(),
         size,
-        sha256: hex_encode(hasher.finalize().as_slice()),
+        sha256: hex_encode(hasher.finish().as_ref()),
     })
 }
 
@@ -929,6 +952,7 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn write_file(path: &Path, bytes: &[u8]) {
         if let Some(parent) = path.parent() {

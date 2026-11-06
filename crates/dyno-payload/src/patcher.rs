@@ -4,8 +4,6 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sha2::{Digest, Sha256};
-
 use crate::payload::proto::{
     DeltaArchiveManifest, Extent, InstallOperation, install_operation::Type,
 };
@@ -51,8 +49,8 @@ fn validate_sha256(label: &str, data: &[u8], expected_hash: Option<&[u8]>) -> Re
         return Ok(());
     };
     validate_sha256_len(label, expected_hash)?;
-    let actual_hash = Sha256::digest(data);
-    compare_sha256(label, &actual_hash, expected_hash)
+    let actual_hash = ring::digest::digest(&ring::digest::SHA256, data);
+    compare_sha256(label, actual_hash.as_ref(), expected_hash)
 }
 
 /// Read from `reader` until EOF or `limit + 1` bytes, whichever comes first.
@@ -471,7 +469,7 @@ impl Patcher {
         let file_len = file.metadata()?.len();
         self.validate_extents_within_file(extents, file_len, "source")?;
 
-        let mut hasher = Sha256::new();
+        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
         SCRATCH_BUFFER.with(|cell| -> Result<()> {
             let mut buffer = cell.borrow_mut();
             if buffer.is_empty() {
@@ -492,11 +490,7 @@ impl Patcher {
             }
             Ok(())
         })?;
-        compare_sha256(
-            "operation source",
-            hasher.finalize().as_slice(),
-            expected_hash,
-        )
+        compare_sha256("operation source", hasher.finish().as_ref(), expected_hash)
     }
 
     fn apply_bsdiff_android(
@@ -1512,8 +1506,6 @@ fn hash_data_blocks(
     salt: &[u8],
     mut progress: Option<&mut dyn FnMut(u64)>,
 ) -> Result<Vec<u8>> {
-    use sha2::{Digest, Sha256};
-
     const READ_BATCH_BYTES: u64 = 4 * 1024 * 1024;
 
     let block_size_usize = usize::try_from(block_size)
@@ -1551,10 +1543,10 @@ fn hash_data_blocks(
         dst_file.read_exact(&mut buf[..batch_bytes_usize])?;
 
         for block in buf[..batch_bytes_usize].chunks_exact(block_size_usize) {
-            let mut hasher = Sha256::new();
+            let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
             hasher.update(salt);
             hasher.update(block);
-            level0.extend_from_slice(&hasher.finalize());
+            level0.extend_from_slice(hasher.finish().as_ref());
         }
         done_blocks += batch_blocks;
         if let Some(cb) = progress.as_deref_mut() {
