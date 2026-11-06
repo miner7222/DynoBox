@@ -1206,3 +1206,16 @@ target_class = "Lcom/lenovo/common/utils/LenovoUtils;"
 target_method = "isPrcVersion"
 proto = "()Z"
 value = false
+
+# The A17 GPP list still ships the Qualcomm placeholder entry and does not
+# carry the global builds of Wild Rift and Teamfight Tactics, even though the
+# CN clients (com.tencent.lolm / com.tencent.jkchess) are listed. GPP entries
+# live one per line and the patcher is size-preserving, so use the dead
+# placeholder line plus its format comment as the slot: the two global
+# packages replace them with no trailing spaces on a package line.
+[[op]]
+kind = "text_replace"
+partition = "system"
+file = "system/etc/gpp_app_list"
+from = "# game package name, there must be no extra spaces at the end of each line\ncom.YourCompany.srgb\n"
+to = "# DynoBox global games     \ncom.riotgames.league.wildrift\ncom.riotgames.league.teamfighttactics\n"

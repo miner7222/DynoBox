@@ -997,7 +997,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(dc.ops.len(), 95);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
-    assert_eq!(uc.ops.len(), 84);
+    assert_eq!(uc.ops.len(), 85);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
     assert_eq!(fc.ops.len(), 30);
@@ -1296,6 +1296,43 @@ fn bundled_debloat_hides_iot_signal_icon() {
             }
             other => panic!("unexpected signal-icon op: {other:?}"),
         }
+    }
+}
+
+/// The GPP list is line based and size preserving, so the two missing global
+/// builds replace the Qualcomm placeholder line and its format comment.
+#[test]
+fn bundled_unlock_adds_global_gpp_games() {
+    let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).unwrap();
+    let op = uc
+        .ops
+        .iter()
+        .find(
+            |op| matches!(op, DbpOp::TextReplace { file, .. } if file == "system/etc/gpp_app_list"),
+        )
+        .expect("gpp list op");
+    match op {
+        DbpOp::TextReplace {
+            partition,
+            from,
+            to,
+            ..
+        } => {
+            assert_eq!(partition, "system");
+            assert_eq!(from.len(), to.len(), "size-preserving replacement");
+            assert!(from.contains("com.YourCompany.srgb"));
+            assert!(to.contains("com.riotgames.league.wildrift"));
+            assert!(to.contains("com.riotgames.league.teamfighttactics"));
+            assert!(!to.contains("com.YourCompany.srgb"));
+            for line in to.lines().filter(|l| !l.starts_with('#')) {
+                assert_eq!(
+                    line.trim_end(),
+                    line,
+                    "no trailing spaces on a package line"
+                );
+            }
+        }
+        other => panic!("unexpected gpp op: {other:?}"),
     }
 }
 
