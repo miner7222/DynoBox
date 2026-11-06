@@ -1386,3 +1386,126 @@ expected = 1
 from = "38 06 03 00 28 29"
 to = "38 06 03 00 28 2c"
 expected = 1
+
+# Recents "stop app" kill policy: PRC builds escalate a swipe/clear-all to
+# SystemUiProxy.killUid() for every running process (uid > 2000), which also
+# kills FGS such as music players or AdGuard. ROW builds only call
+# ActivityManager.killBackgroundProcesses(), so FGS survives at adj 200.
+#
+# A17 routes every ForceStopTask kill path through m() ("region contains
+# ROW") / o() (!m): syncRemoveAppProcess, h(), r(), t() and the async
+# ForceStopTask$b path. Force m() to true so o() is false everywhere and the
+# force-kill branches become unreachable.
+[[op]]
+kind = "method_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/util/ForceStopTask;"
+method = "m"
+proto = "()Z"
+value = true
+
+# A16 has no local region helper in ForceStopTask; its kill methods read the
+# ActivityManagerWrapper.IS_PRC static directly. Patch each read inside
+# ForceStopTask only (bound to a specific method prototype) to a constant
+# false, which selects the existing killBackgroundProcesses branch.
+# The same four method prototypes do not exist on A17, so these ops skip
+# there, and the A17 m() op skips on A16.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/util/ForceStopTask$b;"
+method = "invokeSuspend"
+proto = "(Ljava/lang/Object;)Ljava/lang/Object;"
+
+[[op.symbol]]
+name = "is_prc"
+kind = "field"
+class = "Lcom/android/systemui/shared/system/ActivityManagerWrapper;"
+field = "IS_PRC"
+ty = "Z"
+
+[[op.replacement]]
+from = "63 06 ${is_prc:u16}"
+to = "12 06 00 00"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/util/ForceStopTask;"
+method = "l"
+proto = "(Landroid/app/Activity;Ljava/util/LinkedHashSet;Ljava/util/LinkedHashSet;)V"
+
+[[op.symbol]]
+name = "is_prc"
+kind = "field"
+class = "Lcom/android/systemui/shared/system/ActivityManagerWrapper;"
+field = "IS_PRC"
+ty = "Z"
+
+[[op.replacement]]
+from = "63 04 ${is_prc:u16}"
+to = "12 04 00 00"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/util/ForceStopTask;"
+method = "m"
+proto = "(Ljava/lang/ref/WeakReference;Ljava/util/List;ZLkotlin/coroutines/Continuation;)Ljava/lang/Object;"
+
+[[op.symbol]]
+name = "is_prc"
+kind = "field"
+class = "Lcom/android/systemui/shared/system/ActivityManagerWrapper;"
+field = "IS_PRC"
+ty = "Z"
+
+[[op.replacement]]
+from = "63 00 ${is_prc:u16}"
+to = "12 00 00 00"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/util/ForceStopTask;"
+method = "f"
+proto = "(Landroid/app/Activity;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;Ljava/util/List;)Lkotlin/Pair;"
+
+[[op.symbol]]
+name = "is_prc"
+kind = "field"
+class = "Lcom/android/systemui/shared/system/ActivityManagerWrapper;"
+field = "IS_PRC"
+ty = "Z"
+
+[[op.replacement]]
+from = "63 05 ${is_prc:u16}"
+to = "12 05 00 00"
+expected = 1
+
+# SafeCenter's clean/accelerate paths try killBackgroundProcesses first but
+# fall back to ActivityManager.killUid for every non-special package, which
+# kills whole UIDs (phone, permission controller, providers). Redirect the
+# shared false return in tryCallKillBackground(...Z)Z to its background-kill
+# branch; the deskclock/WeChat/special-widget and desktop-launcher cases stay
+# exactly as they are.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSecurity/ZuiSecurity.apk"
+class = "Lcom/lenovo/performance/root/LedroidRootWrapper;"
+method = "tryCallKillBackground"
+proto = "(Landroid/content/Context;Landroid/app/ActivityManager;Ljava/lang/String;Z)Z"
+
+[[op.replacement]]
+from = "12 03 0f 03"
+to = "28 02 00 00"
+expected = 1

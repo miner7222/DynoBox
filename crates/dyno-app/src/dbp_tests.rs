@@ -1000,7 +1000,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(uc.ops.len(), 71);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 23);
+    assert_eq!(fc.ops.len(), 29);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 5);
@@ -3292,7 +3292,10 @@ fn bundled_recents_paths_match_existing_systemui_and_launcher_patches() {
         }
     }
     assert_eq!(systemui_ops, 2);
-    assert_eq!(launcher_ops, 1);
+    assert_eq!(
+        launcher_ops, 6,
+        "1 RecentsActivity guard + 5 ForceStopTask kill-policy ops"
+    );
 }
 
 /// Apply the reboot-state voice-interaction recovery to every configured
@@ -3522,7 +3525,11 @@ fn bundled_recents_launcher_guard_lands_on_supported_builds() {
     fn launcher_ops(doc: &DbpDocument) -> Vec<&DbpOp> {
         doc.ops
             .iter()
-            .filter(|op| op.file() == "system/priv-app/ZuiLauncher/ZuiLauncher.apk")
+            .filter(|op| {
+                op.file() == "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+                    && matches!(op, DbpOp::MethodCodePatch { class, .. }
+                        if class == "Lcom/android/quickstep/RecentsActivity;")
+            })
             .collect()
     }
 
@@ -7958,4 +7965,40 @@ fn bundled_unlock_common_zui_font_permission_op_shape() {
             "zui.permission.WRITE_THEMES",
         ]
     );
+}
+
+/// SafeCenter's clean path falls back to killUid for non-special packages; the patch routes the shared false return to the background-kill branch.
+#[test]
+fn bundled_fix_common_safecenter_background_kill() {
+    let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+
+    let safe = fc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                if class == "Lcom/lenovo/performance/root/LedroidRootWrapper;"
+                    && method == "tryCallKillBackground")
+        })
+        .expect("SafeCenter killUid fallback");
+    match safe {
+        DbpOp::MethodCodePatch {
+            partition,
+            file,
+            proto,
+            replacements,
+            ..
+        } => {
+            assert_eq!(partition, "system");
+            assert_eq!(file, "system/priv-app/ZuiSecurity/ZuiSecurity.apk");
+            assert_eq!(
+                proto,
+                "(Landroid/content/Context;Landroid/app/ActivityManager;Ljava/lang/String;Z)Z"
+            );
+            assert_eq!(replacements.len(), 1);
+            assert_eq!(replacements[0].from, "12 03 0f 03");
+            assert_eq!(replacements[0].to, "28 02 00 00");
+        }
+        other => panic!("unexpected SafeCenter op: {other:?}"),
+    }
 }
