@@ -10,7 +10,7 @@ plus fixes for a few issues Lenovo has left unaddressed.
 
 ## Features
 
-- Based on ZUXOS 2.0
+- Based on ZUXOS 2.5
 - ABL downgraded to allow GBL loading
 - Re-signed with `testkey_rsa4096` (requires the _arb EFI from gbl_root_baldur)
 - Most China-only apps and services removed
