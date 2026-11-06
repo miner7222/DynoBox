@@ -599,6 +599,44 @@ class = "Lcom/ted/number/TedServiceHelper;"
 method = "bindService"
 proto = "()V"
 
+# A17 registers the built-in data SIM (slot 1, carrier "No service") as a
+# subscription even though it is never activated, and
+# persist.radio.uim.remote.slot is empty, so PhoneUtils.getRemoteSlot()
+# returns -1 and the existing "remote slot" filter never fires: the Messages
+# settings list and the SIM selector show a second, dead SIM next to the
+# physical one. The device has one physical slot, so pin the remote slot to 1;
+# every getActiveSubscriptionInfoList() caller (settings items, SIM selector,
+# MMS config) then drops the built-in SIM while the physical SIM keeps working.
+[[op]]
+kind = "method_const_int"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/util/PhoneUtils;"
+method = "getRemoteSlot"
+proto = "()I"
+value = 1
+
+# getActiveSubscriptionCount() asks SubscriptionManager for the raw active
+# count, which still includes the never-activated built-in data SIM even
+# though getRemoteSlot() removes it from getActiveSubscriptionInfoList().
+# Messages therefore takes the multi-SIM branch in
+# ApplicationSettingsFragment.onCreate and leaves the two per-SIM "Advanced"
+# rows (advancedScreen1/2) in place; both open the same subscription screen
+# and look dead on this one-SIM tablet. Force the single-SIM branch: it drops
+# those two rows and keeps the generic Advanced row with its intent.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/ui/appsettings/ApplicationSettingsActivity$ApplicationSettingsFragment;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.replacement]]
+from = "36 24 20 00"
+to = "00 00 00 00"
+expected = 1
+
 # Call Settings keeps its own "Mark unknown number" switch (pref_mark_number),
 # shown unconditionally by both the regular and compat fragments. Its checked
 # state reads OperatorFunctionUtil.isEnableMarkNumber (setting

@@ -994,7 +994,7 @@ fn patches_dir() -> std::path::PathBuf {
 fn bundled_dbp_files_inventory() {
     let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
     assert_eq!(dc.name, "debloat-common");
-    assert_eq!(dc.ops.len(), 87);
+    assert_eq!(dc.ops.len(), 89);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
     assert_eq!(uc.ops.len(), 84);
@@ -1270,6 +1270,43 @@ fn bundled_debloat_antispam_ops_shape() {
     }
 }
 
+/// The Messages settings fragment resolves the two per-SIM "Advanced" rows
+/// (advancedScreen1/2) and keeps only the generic row when the active
+/// subscription count is at most one. getActiveSubscriptionCount() asks
+/// SubscriptionManager for the raw count, which still includes the built-in
+/// data SIM despite the remote-slot filter, so this one-SIM tablet keeps the
+/// two dead per-SIM rows. Force the single-SIM branch.
+#[test]
+fn bundled_debloat_hides_duplicate_message_advanced_rows() {
+    let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+    let op = dc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                if class
+                    == "Lcom/android/messaging/ui/appsettings/ApplicationSettingsActivity$ApplicationSettingsFragment;"
+                    && method == "onCreate")
+        })
+        .expect("Messages advanced-row op");
+    match op {
+        DbpOp::MethodCodePatch {
+            file,
+            proto,
+            replacements,
+            ..
+        } => {
+            assert_eq!(file, "system/priv-app/ZuiMessage/ZuiMessage.apk");
+            assert_eq!(proto, "(Landroid/os/Bundle;)V");
+            assert_eq!(replacements.len(), 1);
+            assert_eq!(replacements[0].from, "36 24 20 00");
+            assert_eq!(replacements[0].to, "00 00 00 00");
+            assert_eq!(replacements[0].expected, 1);
+        }
+        other => panic!("unexpected Messages advanced-row op: {other:?}"),
+    }
+}
+
 /// Land the antispam ops on the real APKs: the offline-only smart check
 /// (`DYNOBOX_ZUIMESSAGE_APK`), the disabled category switches
 /// (`DYNOBOX_ZUICALLSETTINGS_APK`) and the forced-empty telecom mark gate
@@ -1357,12 +1394,27 @@ fn bundled_debloat_antispam_land_on_real_apks() {
                     if target_method == "setAutoConnectionSwitch")
         })
         .expect("antispam tap auto-connection nop");
+    let advanced_row = dc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                if class
+                    == "Lcom/android/messaging/ui/appsettings/ApplicationSettingsActivity$ApplicationSettingsFragment;"
+                    && method == "onCreate")
+        })
+        .expect("Messages advanced-row op");
 
     if let Ok(p) = std::env::var("DYNOBOX_ZUIMESSAGE_APK") {
         assert_eq!(
             land(&p, offline, "AntiSpamModeUtils-SmsCheckThread.dex"),
             1,
             "smart check op should land once"
+        );
+        assert_eq!(
+            land(&p, advanced_row, "ApplicationSettingsFragment-onCreate.dex"),
+            1,
+            "advanced-row removal op should land once"
         );
         assert_eq!(
             land(
