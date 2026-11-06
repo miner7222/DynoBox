@@ -523,6 +523,25 @@ proto = "(Landroid/os/Bundle;)V"
 super_class = "Lcom/lenovo/lsf/lenovoid/ui/BaseWizardActivity;"
 action = "com.zui.setupwizard.action.CLOUD_SKIP"
 
+# A17 inserted a "Built-in Data SIM Card" OOBE page (BuiltinSimCardActivity)
+# that LightActivity starts unconditionally. Its only forward path is
+# goTianxiPage(), which requires com.lenovo.xiaotian.trigger plus DSP voice
+# wakeup; on a debloated build the page's Next button does nothing and the
+# wizard dead-ends. SystemNavigationActivity already has the fallback - go to
+# the TianXi page when it is available, otherwise starComplete() - so pin the
+# supportLight() gate to false at that one call site. The light-ring and
+# built-in-SIM pages are skipped and the wizard reaches its completion page.
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+scan_class = "Lcom/zui/setupwizard/SystemNavigationActivity;"
+scan_method = "onClick"
+target_class = "Lcom/zui/setupwizard/ZuiUtils;"
+target_method = "supportLight"
+proto = "()Z"
+value = false
+
 # ZuiTelecom binds com.ted.number.service on calls (plus rebind attempts);
 # without the service every query fails gracefully (null-checked onFail
 # paths), so nopping the single bind site stops all traffic.

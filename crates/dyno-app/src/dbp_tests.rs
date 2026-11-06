@@ -994,7 +994,7 @@ fn patches_dir() -> std::path::PathBuf {
 fn bundled_dbp_files_inventory() {
     let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
     assert_eq!(dc.name, "debloat-common");
-    assert_eq!(dc.ops.len(), 86);
+    assert_eq!(dc.ops.len(), 87);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
     assert_eq!(uc.ops.len(), 84);
@@ -1013,6 +1013,51 @@ fn bundled_dbp_files_inventory() {
     let wj = load_dbp(&patches_dir().join("unlock-wuji.dbp")).expect("unlock-wuji.dbp");
     assert_eq!(wj.name, "unlock-wuji");
     assert_eq!(wj.ops.len(), 1);
+}
+
+/// A17's "Built-in Data SIM Card" OOBE page only advances through the TianXi
+/// handoff, which needs `com.lenovo.xiaotian.trigger`; debloated builds dead-end
+/// on it. The gate is pinned off at the one call site so SystemNavigationActivity
+/// takes its TianXi-or-complete fallback and the page is skipped.
+#[test]
+fn bundled_debloat_skips_builtin_sim_page() {
+    let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
+    let op = dc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(
+                op,
+                DbpOp::InvokeConstBool { scan_class, .. }
+                    if scan_class == "Lcom/zui/setupwizard/SystemNavigationActivity;"
+            )
+        })
+        .expect("supportLight gate op");
+
+    match op {
+        DbpOp::InvokeConstBool {
+            partition,
+            file,
+            scan_method,
+            target_class,
+            target_method,
+            proto,
+            value,
+            ..
+        } => {
+            assert_eq!(partition, "system");
+            assert_eq!(
+                file,
+                "system/priv-app/ZUISetupWizardExtPRC/ZUISetupWizardExtPRC.apk"
+            );
+            assert_eq!(scan_method.as_deref(), Some("onClick"));
+            assert_eq!(target_class, "Lcom/zui/setupwizard/ZuiUtils;");
+            assert_eq!(target_method, "supportLight");
+            assert_eq!(proto, "()Z");
+            assert!(!*value, "supportLight must be forced off");
+        }
+        _ => panic!("wrong variant"),
+    }
 }
 
 /// The hidden Developer options device-compatibility switch is the frontend
