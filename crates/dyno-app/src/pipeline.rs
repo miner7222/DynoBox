@@ -471,7 +471,13 @@ fn verify_and_finalize_output<O>(
 where
     O: PipelineOps + ?Sized,
 {
+    let verify_started = std::time::Instant::now();
     ops.verify_stage(output_dir, events)?;
+    message(
+        events,
+        MessageLevel::Info,
+        format!("verify: {:.1}s", verify_started.elapsed().as_secs_f64()),
+    );
     ops.finalize_report(output_dir)?;
     if !seal_manifest {
         // `dynobox-manifest.json` is only sealed for repack outputs; without
@@ -485,13 +491,25 @@ where
         }
         return Ok(());
     }
-    ops.seal_output(
+    let seal_started = std::time::Instant::now();
+    let sealed = ops.seal_output(
         output_dir,
         resign_performed,
         input_artifacts,
         integrity_key,
         events,
-    )
+    );
+    if sealed.is_ok() {
+        message(
+            events,
+            MessageLevel::Info,
+            format!(
+                "manifest: hashed output in {:.1}s",
+                seal_started.elapsed().as_secs_f64()
+            ),
+        );
+    }
+    sealed
 }
 
 fn capture_original_input_artifacts(
@@ -1071,6 +1089,7 @@ where
     events.emit(ProgressEvent::StageStarted {
         stage: StageKind::Preflight,
     });
+    let preflight_started = std::time::Instant::now();
 
     let mut aggregate_counts = BTreeMap::new();
     let mut total_partitions = 0usize;
@@ -1133,6 +1152,14 @@ where
             total_partitions,
             total_operations,
             op_summary
+        ),
+    );
+    message(
+        events,
+        MessageLevel::Info,
+        format!(
+            "preflight: manifest scan in {:.2}s",
+            preflight_started.elapsed().as_secs_f64()
         ),
     );
 
@@ -1336,6 +1363,11 @@ where
     events.emit(ProgressEvent::StageStarted {
         stage: StageKind::Apply,
     });
+    let apply_started = std::time::Instant::now();
+    let mut payload_bytes: u64 = 0;
+    let mut written_bytes: u64 = 0;
+    let mut ops_seconds = 0.0f64;
+    let mut digest_seconds = 0.0f64;
 
     recreate_dir_safe(out_dir, &[input])?;
 
@@ -1427,6 +1459,21 @@ where
         let payload = dynobox_payload::Payload::open_ota(zip_path, &working_dir)?;
         let metadata = dynobox_payload::parse_payload_metadata_from(&payload)?;
         let manifest = dynobox_payload::read_manifest(&payload, &metadata)?;
+        payload_bytes = payload_bytes.saturating_add(
+            manifest
+                .partitions
+                .iter()
+                .flat_map(|partition| partition.operations.iter())
+                .map(|op| op.data_length.unwrap_or(0))
+                .sum::<u64>(),
+        );
+        written_bytes = written_bytes.saturating_add(
+            metadata
+                .partitions
+                .iter()
+                .map(|partition| partition.new_size)
+                .sum::<u64>(),
+        );
 
         message(
             events,
@@ -1615,6 +1662,7 @@ where
             }
 
             let temp_new = working_dir.join(format!("{}_new.img", p_info.name));
+            let ops_started = std::time::Instant::now();
             apply_payload_with_event_progress(
                 events,
                 StageKind::Apply,
@@ -1626,6 +1674,8 @@ where
                 &temp_new,
                 metadata.block_size,
             )?;
+            ops_seconds += ops_started.elapsed().as_secs_f64();
+            let digest_started = std::time::Instant::now();
             verify_applied_partition_digests_with_event_progress(
                 events,
                 partition_index + 1,
@@ -1646,10 +1696,31 @@ where
                     size_policy: PartitionSizePolicy::AllowSourceContainer,
                 },
             )?;
+            digest_seconds += digest_started.elapsed().as_secs_f64();
             move_file_across_drives(&temp_new, &out_path)?;
             trim_trailing_zero_padding(&out_path, input.join(&filename).as_path())?;
         }
     }
+
+    let elapsed = apply_started.elapsed().as_secs_f64();
+    let throughput = if elapsed > 0.0 {
+        written_bytes as f64 / elapsed / (1024.0 * 1024.0)
+    } else {
+        0.0
+    };
+    message(
+        events,
+        MessageLevel::Info,
+        format!(
+            "apply: payload data {:.1} GiB, wrote {:.1} GiB in {:.1}s ({:.0} MiB/s; ops {:.1}s, digest {:.1}s)",
+            gibibytes(payload_bytes),
+            gibibytes(written_bytes),
+            elapsed,
+            throughput,
+            ops_seconds,
+            digest_seconds
+        ),
+    );
 
     if auto_unpack_stage_open {
         events.emit(ProgressEvent::StageCompleted {
@@ -2601,6 +2672,7 @@ where
     events.emit(ProgressEvent::StageStarted {
         stage: StageKind::Resign,
     });
+    let resign_started = std::time::Instant::now();
 
     let mut report = PipelineReport::new("resign", out_dir);
 
@@ -3385,6 +3457,11 @@ where
         }
     }
 
+    message(
+        events,
+        MessageLevel::Info,
+        format!("resign: {:.1}s", resign_started.elapsed().as_secs_f64()),
+    );
     events.emit(ProgressEvent::StageCompleted {
         stage: StageKind::Resign,
     });
@@ -3533,6 +3610,7 @@ where
     let repack_stage_dir = scratch_dir.join("repack_stage");
     recreate_dir(&repack_stage_dir)?;
 
+    let prepare_started = std::time::Instant::now();
     events.emit(ProgressEvent::StageStarted {
         stage: StageKind::PrepareRepack,
     });
@@ -3553,8 +3631,15 @@ where
         stage: StageKind::PrepareRepack,
     });
 
+    let prepare_elapsed = prepare_started.elapsed().as_secs_f64();
+
+    let pack_started = std::time::Instant::now();
     run_repack_stage(&repack_stage_dir, final_output_dir, events)?;
+    let pack_elapsed = pack_started.elapsed().as_secs_f64();
+
+    let copy_started = std::time::Instant::now();
     let final_copy_stats = copy_all_top_level_files(image_dir, final_output_dir)?;
+    let copy_elapsed = copy_started.elapsed().as_secs_f64();
     message(
         events,
         MessageLevel::Info,
@@ -3566,6 +3651,14 @@ where
 
     // Remove standalone dynamic partition images from output — they are now
     // packed inside the super_*.img chunks produced by repack.
+    message(
+        events,
+        MessageLevel::Info,
+        format!(
+            "repack: prepare {prepare_elapsed:.1}s, pack {pack_elapsed:.1}s, copy {copy_elapsed:.1}s"
+        ),
+    );
+
     let catalog = dynobox_xml::XmlCatalog::from_dir(&repack_stage_dir)?;
     if let Ok(Some(layout)) = load_super_layout_for_repack(&catalog, &repack_stage_dir) {
         let mut removed = 0usize;
@@ -4289,6 +4382,7 @@ fn complete_output_from_input<S>(
 where
     S: EventSink + ?Sized,
 {
+    let started = std::time::Instant::now();
     workspace_prepare_output_dir(output)?;
     // With `--repack` the super chunks were regenerated into the output; the
     // input's chunks are stale (and may be named after the logical partitions
@@ -4328,6 +4422,11 @@ where
             format!("complete: {} input files copied", copied),
         );
     }
+    message(
+        events,
+        MessageLevel::Info,
+        format!("complete: {:.1}s", started.elapsed().as_secs_f64()),
+    );
     Ok(())
 }
 
@@ -5024,6 +5123,11 @@ pub(crate) fn create_pipeline_temp_root(final_output_dir: &Path) -> anyhow::Resu
     Ok(tempfile::Builder::new()
         .prefix("dynobox-stage-")
         .tempdir()?)
+}
+
+/// Bytes as GiB, for human-readable stage summaries.
+fn gibibytes(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0 * 1024.0)
 }
 
 fn message<S>(events: &mut S, level: MessageLevel, text: String)
