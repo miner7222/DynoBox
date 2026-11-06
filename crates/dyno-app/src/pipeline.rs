@@ -162,6 +162,7 @@ pub struct RepackRequest {
 struct TransferStats {
     hard_links: usize,
     copies: usize,
+    moved: usize,
 }
 
 impl TransferStats {
@@ -175,6 +176,7 @@ impl TransferStats {
     fn merge(&mut self, other: TransferStats) {
         self.hard_links += other.hard_links;
         self.copies += other.copies;
+        self.moved += other.moved;
     }
 }
 
@@ -288,6 +290,18 @@ trait PipelineOps {
         events: &mut dyn EventSink,
     ) -> anyhow::Result<()>;
 
+    /// Resign with a disposable input staging directory: files are moved
+    /// instead of copied. Defaults to the copying behaviour.
+    fn resign_stage_moving_inputs(
+        &self,
+        input: &Path,
+        out_dir: &Path,
+        config: &ResignConfig,
+        events: &mut dyn EventSink,
+    ) -> anyhow::Result<()> {
+        self.resign_stage(input, out_dir, config, events)
+    }
+
     fn repack_pipeline(
         &self,
         base_input_dir: &Path,
@@ -368,6 +382,16 @@ impl PipelineOps for RealPipelineOps {
         events: &mut dyn EventSink,
     ) -> anyhow::Result<()> {
         run_resign_stage(input, out_dir, config, events)
+    }
+
+    fn resign_stage_moving_inputs(
+        &self,
+        input: &Path,
+        out_dir: &Path,
+        config: &ResignConfig,
+        events: &mut dyn EventSink,
+    ) -> anyhow::Result<()> {
+        run_resign_stage_impl(input, out_dir, config, events, true)
     }
 
     fn repack_pipeline(
@@ -709,7 +733,7 @@ where
         } else {
             request.output.clone()
         };
-        ops.resign_stage(&current_image_dir, &resign_out_dir, config, events)?;
+        ops.resign_stage_moving_inputs(&current_image_dir, &resign_out_dir, config, events)?;
         if request.repack {
             staged_resign_dir = Some(resign_out_dir.clone());
         }
@@ -2669,6 +2693,24 @@ fn run_resign_stage<S>(
 where
     S: EventSink + ?Sized,
 {
+    run_resign_stage_impl(input, out_dir, config, events, false)
+}
+
+/// [`run_resign_stage`] with a choice of how the input is staged.
+///
+/// `move_inputs` is set by the apply pipeline, whose resign input is a
+/// temporary stage directory: renaming its files leaves private inodes and
+/// skips a full-partition copy that the user's input must otherwise pay for.
+fn run_resign_stage_impl<S>(
+    input: &Path,
+    out_dir: &Path,
+    config: &ResignConfig,
+    events: &mut S,
+    move_inputs: bool,
+) -> anyhow::Result<()>
+where
+    S: EventSink + ?Sized,
+{
     events.emit(ProgressEvent::StageStarted {
         stage: StageKind::Resign,
     });
@@ -2688,15 +2730,32 @@ where
 
     recreate_dir_safe(out_dir, &[input])?;
 
-    // Copy ALL input files to output first (preserves non-.img files like .elf, .mbn)
-    copy_all_top_level_files(input, out_dir)?;
-
     let all_images = collect_resignable_images(input)?;
     // Capture the OEM/OTA key before a prepared VBMeta is re-signed with the
     // replacement key. The final warning must describe the real key change.
     let original_key_pubkey_sha1 = all_images
         .iter()
         .find_map(|path| read_image_pubkey_sha1(path).ok().flatten());
+
+    // Copy ALL input files to output first (preserves non-.img files like .elf,
+    // .mbn). The apply pipeline hands us a disposable stage directory and asks
+    // for a move instead, which leaves private inodes behind and avoids
+    // copying every partition only to break the hard link afterwards.
+    let mut moved_private_paths: Vec<PathBuf> = Vec::new();
+    if move_inputs {
+        let (stats, private) = move_all_top_level_files(input, out_dir)?;
+        moved_private_paths = private;
+        message(
+            events,
+            MessageLevel::Info,
+            format!(
+                "resign: moved {} inputs ({} hardlinks, {} copies)",
+                stats.moved, stats.hard_links, stats.copies
+            ),
+        );
+    } else {
+        copy_all_top_level_files(input, out_dir)?;
+    }
 
     // Resolve --rollback. The flag's purpose is to override the AVB
     // rollback_index on boot.img / vbmeta_system.img so an older firmware can
@@ -2785,6 +2844,9 @@ where
     }
 
     let mut local_inode_cache = LocalInodeCache::default();
+    for path in moved_private_paths {
+        local_inode_cache.seen.insert(path);
+    }
     let mut prepared_vbmeta: BTreeMap<String, PreparedVbmetaResign> = BTreeMap::new();
 
     // Partitions whose ext4 data was mutated by SPL / fuck-lgsi / debloat.
@@ -3206,6 +3268,22 @@ where
             .ok()
             .and_then(|key| key.algorithm().ok())
     });
+
+    // Break the input hard links for every image up front, in parallel.
+    // `copy_all_top_level_files` hard-links same-volume inputs, and each image
+    // must be private before resign mutates it. On Windows `is_hardlinked`
+    // cannot be answered cheaply, so this copies every image once; doing it
+    // one image at a time would serialise the copy ahead of the signing loop.
+    let inode_started = std::time::Instant::now();
+    materialize_local_inodes_parallel(&images, out_dir, &mut local_inode_cache)?;
+    message(
+        events,
+        MessageLevel::Info,
+        format!(
+            "resign: staged private images in {:.1}s",
+            inode_started.elapsed().as_secs_f64()
+        ),
+    );
 
     for (index, path) in images.iter().enumerate() {
         let filename = path
@@ -3897,6 +3975,51 @@ fn copy_all_top_level_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<Tr
     })
 }
 
+/// Move every top-level input file into `dst_dir`, falling back to the
+/// hardlink/copy materializer when the two directories are on different
+/// volumes.
+///
+/// Used when the source directory is a pipeline staging area that is
+/// discarded afterwards: renaming leaves the destination with a private inode,
+/// so the resign stage skips its hard-link break copies entirely. Returns the
+/// paths that ended up private, for the `LocalInodeCache`.
+fn move_all_top_level_files(
+    src_dir: &Path,
+    dst_dir: &Path,
+) -> anyhow::Result<(TransferStats, Vec<PathBuf>)> {
+    workspace_prepare_output_dir(dst_dir)?;
+    let mut transfers = TransferStats::default();
+    let mut private = Vec::new();
+    for entry in std::fs::read_dir(src_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let file_name = path.file_name().unwrap();
+        let file_name_str = file_name.to_string_lossy();
+        let is_super_chunk = file_name_str.starts_with("super_") && file_name_str.ends_with(".img");
+        let is_encrypted_xml = file_name_str.to_ascii_lowercase().ends_with(".x");
+        if is_super_chunk || is_encrypted_xml {
+            continue;
+        }
+        let dst = dst_dir.join(file_name);
+        if dst.exists() {
+            continue;
+        }
+        match std::fs::rename(&path, &dst) {
+            Ok(()) => {
+                transfers.moved += 1;
+                private.push(dst);
+            }
+            Err(_) => {
+                transfers.record(materialize_file_with_fallback(&path, &dst)?);
+            }
+        }
+    }
+    Ok((transfers, private))
+}
+
 fn copy_avb_top_level_img_files(src_dir: &Path, dst_dir: &Path) -> anyhow::Result<TransferStats> {
     materialize_top_level_files(src_dir, dst_dir, false, |path, name| {
         if path.extension().and_then(|e| e.to_str()) != Some("img") || name.starts_with("super_") {
@@ -3921,6 +4044,80 @@ fn workspace_prepare_output_dir(dir: &Path) -> anyhow::Result<()> {
 /// from. Required before any in-place modification (resign / boot SPL patch),
 /// because [`materialize_file_with_fallback`] hard-links by default and a
 /// naive write through an O_RDWR handle would corrupt the original input.
+/// Give every image under `out_dir` a private inode before resign mutates it.
+///
+/// The copies are independent, so run them concurrently; `cache` is updated
+/// afterwards so the per-image loop's `ensure` becomes a no-op.
+fn materialize_local_inodes_parallel(
+    images: &[PathBuf],
+    out_dir: &Path,
+    cache: &mut LocalInodeCache,
+) -> anyhow::Result<()> {
+    let mut jobs: Vec<PathBuf> = Vec::new();
+    for image in images {
+        let Some(name) = image.file_name() else {
+            continue;
+        };
+        let out_path = out_dir.join(name);
+        if cache.seen.contains(&out_path) {
+            continue;
+        }
+        if !is_hardlinked(&out_path).unwrap_or(true) {
+            cache.seen.insert(out_path);
+            continue;
+        }
+        jobs.push(out_path);
+    }
+    if jobs.is_empty() {
+        return Ok(());
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
+        .min(jobs.len());
+    if workers == 1 {
+        for path in &jobs {
+            ensure_local_inode(path)?;
+        }
+        cache.seen.extend(jobs);
+        return Ok(());
+    }
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let failure: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let next = &next;
+            let failure = &failure;
+            let jobs = &jobs;
+            scope.spawn(move || {
+                loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if index >= jobs.len() {
+                        break;
+                    }
+                    if failure.lock().map(|slot| slot.is_some()).unwrap_or(true) {
+                        break;
+                    }
+                    if let Err(error) = ensure_local_inode(&jobs[index]) {
+                        if let Ok(mut slot) = failure.lock() {
+                            *slot = Some(error);
+                        }
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    if let Some(error) = failure.into_inner().unwrap_or(None) {
+        return Err(error);
+    }
+    cache.seen.extend(jobs);
+    Ok(())
+}
+
 fn ensure_local_inode(path: &Path) -> anyhow::Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".relink_tmp");

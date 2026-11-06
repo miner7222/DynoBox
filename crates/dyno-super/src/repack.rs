@@ -95,8 +95,11 @@ pub fn repack_super_image(
     std::fs::write(&meta_path, &metadata_prefix)?;
     created_files.push(meta_path);
 
-    // Write data chunks
-    let mut data_chunk_index = 2;
+    // Write data chunks. The copies are independent and dominate repack time
+    // for multi-GiB dynamic partitions, so run them concurrently; chunk plans
+    // are still built in partition order afterwards.
+    let mut copy_jobs: Vec<(PathBuf, PathBuf, String, u64, u64)> = Vec::new();
+    let mut data_chunk_index: u64 = 2;
     for partition in &new_layout.partitions {
         if partition.slot_suffix() == Some("b") || partition.logical_size() == 0 {
             continue;
@@ -105,34 +108,87 @@ pub fn repack_super_image(
         let img_path = image_dir.join(format!("{}.img", partition.base_name()));
         let filename = format!("super_{}.img", data_chunk_index);
         let out_path = output_dir.join(&filename);
-
-        std::fs::copy(&img_path, &out_path)?;
-
-        let size_bytes = std::fs::metadata(&out_path)?.len();
-        // `partition.extents` is rebuilt to a single LINEAR extent
-        // earlier in this function (see the loop that fills the
-        // `partition.extents = vec![SuperExtent { .. }]` slot), so
-        // `.first()` is always `Some` in the well-formed path.
-        // Surface a clean error instead of an index panic for any
-        // future code path that forgets to populate the slot.
+        // `partition.extents` is rebuilt to a single LINEAR extent earlier in
+        // this function, so `.first()` is always `Some` in the well-formed
+        // path; surface a clean error instead of an index panic otherwise.
         let extent = partition.extents.first().ok_or_else(|| {
             DynoError::Tool(format!(
                 "partition `{}` has no extents after repack planning",
                 partition.base_name()
             ))
         })?;
+        let start_sector = base_start_sector + (extent.target_data * 512 / flash_sector_size);
+        let size_bytes = std::fs::metadata(&img_path)?.len();
+        copy_jobs.push((img_path, out_path, filename, start_sector, size_bytes));
+        data_chunk_index += 1;
+    }
 
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8)
+        .min(copy_jobs.len().max(1));
+    if workers > 1 && copy_jobs.len() > 1 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let failure: std::sync::Mutex<Option<DynoError>> = std::sync::Mutex::new(None);
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let next = &next;
+                let failure = &failure;
+                let jobs = &copy_jobs;
+                scope.spawn(move || {
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if index >= jobs.len() {
+                            break;
+                        }
+                        if failure.lock().map(|slot| slot.is_some()).unwrap_or(true) {
+                            break;
+                        }
+                        let (src, dst, ..) = &jobs[index];
+                        // A chunk is just the partition image under another
+                        // name, and the standalone image is deleted afterwards,
+                        // so link it when the output is on the same volume; the
+                        // copy is only the cross-volume fallback.
+                        let copied = match std::fs::hard_link(src, dst) {
+                            Ok(()) => Ok(()),
+                            Err(_) => std::fs::copy(src, dst).map(|_| ()),
+                        };
+                        if let Err(error) = copied {
+                            if let Ok(mut slot) = failure.lock() {
+                                *slot = Some(DynoError::Tool(format!(
+                                    "copying {} to {}: {error}",
+                                    src.display(),
+                                    dst.display()
+                                )));
+                            }
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        if let Some(error) = failure.into_inner().unwrap_or(None) {
+            return Err(error);
+        }
+    } else {
+        for (src, dst, ..) in &copy_jobs {
+            if std::fs::hard_link(src, dst).is_err() {
+                std::fs::copy(src, dst)?;
+            }
+        }
+    }
+
+    for (_, out_path, filename, start_sector, size_bytes) in copy_jobs {
         chunk_plans.push(SuperFlashChunk {
             filename,
-            start_sector: base_start_sector + (extent.target_data * 512 / flash_sector_size),
+            start_sector,
             num_sectors: (size_bytes + flash_sector_size - 1) / flash_sector_size,
             sector_size_bytes: flash_sector_size,
             source_offset_bytes: 0,
             size_bytes,
         });
-
         created_files.push(out_path);
-        data_chunk_index += 1;
     }
 
     // 4. Rewrite XMLs
