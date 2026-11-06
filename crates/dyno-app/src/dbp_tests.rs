@@ -994,7 +994,7 @@ fn patches_dir() -> std::path::PathBuf {
 fn bundled_dbp_files_inventory() {
     let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
     assert_eq!(dc.name, "debloat-common");
-    assert_eq!(dc.ops.len(), 92);
+    assert_eq!(dc.ops.len(), 93);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
     assert_eq!(uc.ops.len(), 84);
@@ -1170,6 +1170,43 @@ fn bundled_debloat_hides_iot_sim_from_dialer() {
             }
             other => panic!("unexpected dialer op: {other:?}"),
         }
+    }
+}
+
+/// A17 seeds the dashboard shortcut strip from AppListUtils.getSelectionForPanel,
+/// whose PRC default is [WeChat, QQ] even when neither app is installed. Pin the
+/// isRow() read there true so the ROW (empty) default is used instead.
+#[test]
+fn bundled_debloat_drops_default_wechat_qq_shortcuts() {
+    let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+    let op = dc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::InvokeConstBool { target_method, .. }
+                    if target_method == "isRow")
+        })
+        .expect("shortcut-default op");
+    match op {
+        DbpOp::InvokeConstBool {
+            file,
+            scan_class,
+            scan_method,
+            target_class,
+            proto,
+            value,
+            site_index,
+            ..
+        } => {
+            assert_eq!(file, "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk");
+            assert_eq!(scan_class, "Lcom/zui/game/service/util/AppListUtils;");
+            assert_eq!(scan_method.as_deref(), Some("getSelectionForPanel"));
+            assert_eq!(target_class, "Lcom/zui/game/service/di/Settings;");
+            assert_eq!(proto, "()Z");
+            assert!(*value);
+            assert!(site_index.is_none());
+        }
+        other => panic!("unexpected shortcut op: {other:?}"),
     }
 }
 

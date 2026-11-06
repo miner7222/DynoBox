@@ -760,6 +760,25 @@ target_method = "isBusinessProject"
 proto = "(Landroid/content/Context;)Z"
 value = true
 
+# A17 builds the in-game dashboard's shortcut strip from third-party app
+# shortcuts, not from the feature list: FloatingMainViewNew/Right call
+# AppListUtils.getSelectionForPanel(), which seeds the PRC default with
+# "com.tencent.mm" and "com.tencent.mobileqq" even when neither app is
+# installed (buildShortcutItems then falls back to the packaged WeChat/QQ
+# labels and icons). Pin the isRow() read inside getSelectionForPanel true so
+# the default becomes the empty ROW list; a selection the user saves in the
+# panel still wins, so this only drops the fabricated defaults.
+[[op]]
+kind = "invoke_const_bool"
+partition = "system"
+file = "system/priv-app/ZuiGameHelper/ZuiGameHelper.apk"
+scan_class = "Lcom/zui/game/service/util/AppListUtils;"
+scan_method = "getSelectionForPanel"
+target_class = "Lcom/zui/game/service/di/Settings;"
+target_method = "isRow"
+proto = "()Z"
+value = true
+
 # The WeChat and QQ tiles come straight from the device feature list
 # (RomFeatures.keyList -> Repository.keys() -> findItemByKey), so the
 # companion getKEY decoys never removed them. Repoint the two WUJI profile
