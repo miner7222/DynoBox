@@ -34,7 +34,7 @@ serde_json = { workspace = true, features = ["preserve_order"] }
 toml.workspace = true
 thiserror.workspace = true
 zerocopy = { version = "0.8", features = ["derive"] }
-zip = "8.6.0"
+zip = "9.4.1"
 
 [dev-dependencies]
 dynobox-core = { workspace = true, features = ["testutil"] }
