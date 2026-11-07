@@ -1,6 +1,6 @@
 
 name = "fix-common"
-description = "Crash and behavior repairs: hidden-apps NPE, storage stats, third-party Recents, LE Audio, the ZuiMessage screens and the freeform sidebar's window type."
+description = "Crash and behavior repairs: hidden-apps NPE, storage stats, third-party Recents, LE Audio, the ZuiMessage screens, the freeform sidebar's window type, and the vendor seccomp, SELinux, SafeCenter kill-policy and missing-provider repairs."
 
 [[op]]
 kind = "nop_invoke"
@@ -1547,7 +1547,7 @@ attribute = "breakStrategy"
 value = 1
 expected = 2
 
-# --- Vendor policy gaps under the newer framework ---------------------------------------
+# --- Vendor policy gaps under the newer framework ---------------------------
 #
 # The vendor image can be older than the framework, so a few vendor
 # policies predate the accesses the newer services expect. These are size-preserving
@@ -1587,7 +1587,7 @@ file = "etc/selinux/vendor_sepolicy.cil"
 from = "(allow netutils_wrapper_202504 netutils_wrapper_exec_202504 (file (read getattr map execute open entrypoint)))\n"
 to = "(allow vendor_hal_poweroptservice_qti sysfs_202504 (file (read open getattr))) ;xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
 
-# system_server sets vendor.lenovocamera.frontcamera.status, but the A16
+# system_server sets vendor.lenovocamera.frontcamera.status, but the older
 # vendor policy maps unmatched vendor.* properties to vendor_default_prop and
 # the platform neverallow forbids coredomains from setting that type. Map this
 # one status property to system_prop (which system_server may set) by
