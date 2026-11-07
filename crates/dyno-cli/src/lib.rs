@@ -127,10 +127,11 @@ enum Commands {
         #[arg(long, value_name = "APK", requires = "resign")]
         add_overlay: Vec<PathBuf>,
 
-        /// Install the zygote preload into system.img: `libspoof.so` and the
-        /// per-app config generated from this JSON list, plus the 64-bit
-        /// zygote service preload line in init.zygote64.rc. The list's
-        /// directory must also contain `libspoof.so`. Requires --resign.
+        /// Install the zygote preload into system.img: `libspoof.so`, the
+        /// per-app config generated from this JSON list, and a `DT_NEEDED`
+        /// entry in app_process64 and bootanimation. A legacy `LD_PRELOAD`
+        /// line in init.zygote64.rc is removed. The list's directory must
+        /// also contain `libspoof.so`. Requires --resign.
         #[arg(long, value_name = "JSON", requires = "resign")]
         add_spoof: Option<PathBuf>,
 
@@ -250,11 +251,11 @@ enum Commands {
         #[arg(long, value_name = "APK")]
         add_overlay: Vec<PathBuf>,
 
-        /// Install the zygote preload into system.img: `libspoof.so` and the
-        /// per-app config generated from this JSON list, plus the 64-bit
-        /// zygote service preload line in init.zygote64.rc. The list's
-        /// directory must also contain `libspoof.so`. Requires `resign` or
-        /// `--resign`.
+        /// Install the zygote preload into system.img: `libspoof.so`, the
+        /// per-app config generated from this JSON list, and a `DT_NEEDED`
+        /// entry in app_process64 and bootanimation. A legacy `LD_PRELOAD`
+        /// line in init.zygote64.rc is removed. The list's directory must
+        /// also contain `libspoof.so`. Requires `resign` or `--resign`.
         #[arg(long, value_name = "JSON", requires = "resign")]
         add_spoof: Option<PathBuf>,
 
@@ -368,11 +369,12 @@ enum Commands {
         #[arg(long, value_name = "APK")]
         add_overlay: Vec<PathBuf>,
 
-        /// Install the zygote preload into system.img: `libspoof.so` and the
+        /// Install the zygote preload into system.img: `libspoof.so`, the
         /// per-app config generated from this JSON list
-        /// (`[{"package": "...", "props": {"ro.product.model": "..."}}]`), plus
-        /// the 64-bit zygote service preload line in init.zygote64.rc. The
-        /// list's directory must also contain `libspoof.so`.
+        /// (`[{"package": "...", "props": {"ro.product.model": "..."}}]`), and
+        /// a `DT_NEEDED` entry in app_process64 and bootanimation. A legacy
+        /// `LD_PRELOAD` line in init.zygote64.rc is removed. The list's
+        /// directory must also contain `libspoof.so`.
         #[arg(long, value_name = "JSON")]
         add_spoof: Option<PathBuf>,
 

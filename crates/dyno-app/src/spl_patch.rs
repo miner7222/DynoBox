@@ -1,19 +1,16 @@
 //! Shared engine for the ext4-partition security-patch-level (SPL) bumps
 //! behind `--vendor-spl` and `--system-spl`.
 //!
-//! Both flags do the exact same thing to different partitions: walk the
-//! ext4 filesystem inside the image to locate `build.prop`, rewrite the
-//! 10-byte `YYYY-MM-DD` SPL value in place through the inode's extent tree
-//! (ext4-aware, so the edit lands on the live data block rather than a
-//! stale copy of the same string in unallocated space), regenerate the
-//! dm-verity hash tree, then patch the AVB Hashtree `root_digest` and the
-//! matching Property descriptor in both the partition image (NONE
-//! algorithm — rewritten in place, length-stable) and the signed vbmeta
-//! image (whose stale signature the resign loop refreshes afterwards).
+//! Both flags do the same thing to different partitions: walk the ext4
+//! filesystem inside the image to `build.prop`, rewrite the 10-byte
+//! `YYYY-MM-DD` value in place through the inode's extent tree (so the edit
+//! lands on the live data block), regenerate the dm-verity hash tree, then
+//! patch the AVB Hashtree `root_digest` and the matching Property descriptor in
+//! both the partition image and the signed vbmeta, whose signature the resign
+//! loop refreshes afterwards.
 //!
-//! FEC blocks are intentionally left untouched: dm-verity validates
-//! against the new `root_digest` only, and FEC is a recovery code for
-//! damaged blocks — a stale FEC region does not break boot.
+//! FEC blocks are intentionally left untouched: dm-verity validates against the
+//! new `root_digest` only, so a stale FEC region does not break boot.
 //!
 //! The per-flag differences are captured in [`SplPatchSpec`]; `vendor_spl`
 //! and `system_spl` are thin wrappers that bind a spec and re-export the

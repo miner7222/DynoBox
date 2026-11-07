@@ -1,20 +1,13 @@
 //! Minimal ext4 read-only navigator.
 //!
-//! Distilled subset of `imgkit_scuti::filesystem::ext4` covering only the
-//! pieces dynobox needs for surgical byte patches inside an ext4 image
-//! (volume open → directory walk → inode → extent mapping → block read).
-//! The full upstream crate ships ext4 / erofs / f2fs / super extractors
-//! and builders plus a CLI; pulling all of that in just to navigate
-//! `vendor.img` to `/build.prop` is heavy. This file vendors ~900 lines
-//! of upstream into one module so dynobox depends on nothing more than
-//! `zerocopy` and `thiserror`.
+//! A trimmed copy of `imgkit_scuti::filesystem::ext4` covering only what
+//! DynoBox needs for surgical byte patches (volume open, directory walk, inode,
+//! extent mapping, block read). It vendors the used parts into one module so
+//! DynoBox depends on nothing beyond `zerocopy` and `thiserror`.
 //!
-//! What the upstream copy was trimmed of:
-//!   * extended attribute (`xattr`) parsing types
-//!   * `VfsCapData` / `CapData` capability blob decoding
-//!   * symlink helper (`is_symlink`) and unused `file_type::*` constants
-//!     other than `CHECKSUM` (still consumed by directory parsing)
-//!   * Chinese error messages (rewritten in English)
+//! Removed from the upstream copy: xattr parsing, capability blob decoding,
+//! symlink helpers, unused `file_type::*` constants and the Chinese error
+//! messages.
 //!
 //! Reference: <https://github.com/Kindness-Kismet/ImgKit-Scuti>
 //! files `src/filesystem/ext4/{types,volume,file,directory,error}.rs`.

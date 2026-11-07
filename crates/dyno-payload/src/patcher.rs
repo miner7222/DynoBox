@@ -839,38 +839,13 @@ pub fn apply_partition_payload_from(
 
     dst_file.set_len(new_size)?;
 
-    // The pre-copy that seeds the new image with the source partition's
-    // bytes used to be invisible to progress reporting: bytes were not
-    // counted in `total_weight`, so on a 12 GiB system.img with mostly
-    // SOURCE_COPY ops the bar sat at 0 % for tens of seconds while this
-    // copy ran, then jumped to 100 % once the op loop blew through its
-    // small per-op weights. Account for the copy in the total and
-    // report after every chunk so the bar moves linearly from the
-    // start of the apply.
-    //
-    // Weighting: bytes copied here go in 1:1 alongside the per-op
-    // weights below. `data_length` (CPU-bound diff/replace work) is
-    // the dominant term; copy bytes use the same coefficient so a
-    // partition that's mostly pre-copy + cheap SOURCE_COPY still
-    // produces a smooth ramp.
-    //
-    // Counting raw operations would advance the bar in lockstep with
-    // the operation count, but that ignores how lopsided OTA work
-    // actually is: SOURCE_COPY / ZERO ops typically make up the vast
-    // majority of the operation list while consuming almost no CPU,
-    // and BROTLI_BSDIFF / PUFFDIFF ops make up the long tail while
-    // consuming virtually all of the runtime. The bar would race to
-    // ~80 % during SOURCE_COPY and then stall for tens of seconds
-    // during the diff tail.
-    //
-    // Weight each op by `data_length + dst_bytes / 32`:
-    //   * `data_length` is the size of the compressed patch blob the
-    //     op consumes from the payload, which dominates the runtime
-    //     of every diff / replace op (decompress + apply work).
-    //   * `dst_bytes / 32` gives SOURCE_COPY / ZERO ops a small but
-    //     non-zero share so the bar still moves while the partition
-    //     is being seeded, and so partitions that contain no diff
-    //     ops at all do not divide by zero.
+    // Seed the new image from the source partition before applying ops, and
+    // give that copy its own share of the progress total: it was previously
+    // invisible, so on a 12 GiB system.img the bar sat at 0 % for tens of
+    // seconds and then jumped to 100 %. Ops are weighted by
+    // `data_length + dst_bytes / 32`: the compressed blob size tracks the
+    // CPU-bound diff/replace work, and the small per-destination-byte term
+    // keeps write-only partitions moving.
     let pre_copy_len = match src_file.as_mut() {
         Some(src) => std::cmp::min(src.metadata()?.len(), new_size),
         None => 0,

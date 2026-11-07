@@ -1,24 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Zygote-preload per-app property spoofing for DynoBox `--add-spoof`.
+// Per-app property spoofing for DynoBox `--add-spoof`.
 //
-// The 64-bit zygote executable (`/system/bin/app_process64`) carries this
-// library as its first DT_NEEDED entry, so the dynamic linker maps it before
-// libandroid_runtime.so. The older LD_PRELOAD path is ignored when the zygote
-// runs with AT_SECURE=1 and is no longer required.
+// `app_process64` and `bootanimation` carry this library as their first
+// DT_NEEDED entry, so the linker maps it before their other libraries; the
+// LD_PRELOAD path is ignored under AT_SECURE=1. It replaces
+// AndroidRuntime::startReg and ZygoteInit.nativeZygoteInit: the latter runs in
+// every app process after fork, matches /proc/self/cmdline against
+// system/etc/spoof/spoof.prop, and applies the overrides for that process only.
 //
-// It replaces AndroidRuntime::startReg (called through the PLT by
-// libandroid_runtime) and registers a replacement for
-// ZygoteInit.nativeZygoteInit. That native method runs in every app process
-// after fork, before the Application is created; the replacement matches
-// /proc/self/cmdline against system/etc/spoof/spoof.prop and applies the
-// matching property overrides for that process only.
-//
-// The library also answers reads of ro.vendor.config.lgsi.customize.usage from
-// persist.sys.config.model_cust, which is how the developer-options edition
-// toggle switches the factory customize token without touching persist. That
-// token has no entry in any prop file, so `__system_property_find` is
-// interposed as well: lookups must succeed for the read hooks to be reached.
+// It also answers reads of ro.vendor.config.lgsi.customize.usage from
+// persist.sys.config.model_cust (the developer-options edition toggle). No prop
+// file defines that token, so `__system_property_find` is interposed too:
+// lookups must succeed before a read hook can be reached.
 //
 // Build with the Android NDK:
 //   ./build.sh

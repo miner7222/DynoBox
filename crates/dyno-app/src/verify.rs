@@ -225,29 +225,17 @@ fn verify_input_semantic_into(input: &Path, report: &mut VerificationReport) -> 
                     });
                 }
                 avbtool_rs::info::ScanResult::Avb(info) => {
-                    // Cryptographic / hashtree verification.
+                    // Signature and hashtree verification.
                     //
                     // avbtool-rs rejects chain-partition descriptors unless
-                    // either `expected_chain_partitions` matches them or
-                    // `follow_chain_partitions` is enabled. Populate
-                    // expected entries from this image's own descriptors so
-                    // a lone vbmeta does not hard-fail when a chained
-                    // sibling is absent (common for packed super layouts
-                    // where `vendor`/`system` live inside super, not as
-                    // sibling `.img` files).
-                    //
-                    // Always leave `follow_chain_partitions` disabled: this
-                    // directory scan already visits every sibling AVB image
-                    // independently, and real vbmeta graphs can recurse or
-                    // cycle when follow is enabled (stack overflow on dense
-                    // OEM trees). expected_chain_partitions alone satisfies
-                    // the chain-descriptor check without recursion.
-                    //
-                    // Hash/Hashtree descriptor targets that are packed inside
-                    // a successfully validated super layout cannot be opened
-                    // as sibling files. In that case fall back to
-                    // signature-only verification of the vbmeta blob itself
-                    // (authentication digest + RSA). Arbitrary missing
+                    // they are declared as expected, so populate the expected
+                    // set from this image's own descriptors: a lone vbmeta must
+                    // not fail when a chained sibling is absent, as with
+                    // partitions packed inside super. Keep
+                    // `follow_chain_partitions` off; this directory scan visits
+                    // every sibling itself and real graphs can recurse.
+                    // Descriptor targets packed inside a validated super fall
+                    // back to signature-only verification; other missing
                     // targets still hard-fail.
                     let missing_targets = missing_descriptor_targets(&entry.path, info);
                     if missing_targets.is_empty() {

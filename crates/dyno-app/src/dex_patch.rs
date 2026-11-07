@@ -2,7 +2,7 @@
 //!
 //! These operate on a raw `classes*.dex` slice in place (no growth), so a
 //! STORED dex entry inside an APK can be patched and its header sums + zip
-//! CRC recomputed without repacking. Two primitives cover the region/flag
+//! CRC recomputed without repacking. The primitives cover the region/flag
 //! rewrites DynoBox ships as external `.dbp` patches:
 //!
 //! * [`force_method_return_bool`] — replace a `()Z`-style method body with
@@ -41,7 +41,7 @@
 //!   single imperative `List.add`/`Map.put`-style call site without
 //!   disturbing the surrounding method.
 //!
-//! Both mirror the byte-rewrite shapes proven in `fuck_lgsi`; the dex table
+//! They mirror the byte-rewrite shapes proven in `fuck_lgsi`; the dex table
 //! resolvers are the `pub(crate)` `fuck_lgsi::dex_walker` helpers.
 
 use std::collections::BTreeSet;

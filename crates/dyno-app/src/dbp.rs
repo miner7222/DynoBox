@@ -14,8 +14,8 @@
 //! Example:
 //!
 //! ```toml
-//! name = "debloat-common"
-//! description = "Force ZuiLauncher home search + first-run to ROW."
+//! name = "example"
+//! description = "Two illustrative ops: a forced boolean and an invoke result."
 //!
 //! [[op]]
 //! kind = "method_const_bool"

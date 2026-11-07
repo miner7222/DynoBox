@@ -1,38 +1,21 @@
 //! `--add-spoof`: per-app property overrides for a zygote preload.
 //!
-//! The caller passes one JSON file containing an array of app entries:
+//! The input is one JSON array of `{"package", "props"}` entries. It is
+//! validated and written as a compact `@package` / `key=value` file at
+//! `system/etc/spoof/spoof.prop`, which `libspoof.so` (loaded from the JSON's
+//! directory) reads once in zygote; only the matching app process applies the
+//! overrides.
+//!
+//! Installation also puts `libspoof.so` in `system/lib64/`, adds it as the
+//! first `DT_NEEDED` entry of `system/bin/app_process64` and
+//! `system/bin/bootanimation`, and removes a legacy `LD_PRELOAD` line from the
+//! 64-bit zygote service. The linker ignores `LD_PRELOAD` under `AT_SECURE=1`,
+//! and `bootanimation` is an init-native service outside the zygote, so both
+//! need the dependency to see the preload.
 //!
 //! ```json
-//! [
-//!   {
-//!     "package": "com.netflix.mediaclient",
-//!     "props": {
-//!       "ro.product.manufacturer": "OnePlus",
-//!       "ro.product.model": "PLK110"
-//!     }
-//!   }
-//! ]
+//! [{"package": "com.netflix.mediaclient", "props": {"ro.product.model": "PLK110"}}]
 //! ```
-//!
-//! The file is validated and converted to a compact line format at
-//! `system/etc/spoof/spoof.prop`:
-//!
-//! ```text
-//! @com.netflix.mediaclient
-//! ro.product.manufacturer=OnePlus
-//! ro.product.model=PLK110
-//! ```
-//!
-//! The preload library (`libspoof.so`, taken from the JSON file's directory)
-//! reads this file once in zygote, and only the matching app process applies
-//! the overrides. Installation inserts the library into `system/lib64/`, adds
-//! it as the first `DT_NEEDED` entry of `system/bin/app_process64` and
-//! `system/bin/bootanimation`, and removes any legacy `LD_PRELOAD` line from
-//! the 64-bit zygote service. The dynamic linker ignores `LD_PRELOAD` when the
-//! zygote runs with `AT_SECURE=1`, which is why the executable's own dependency
-//! list is the load path. `bootanimation` is an init-native service rather than
-//! a zygote child, and it resolves the hidden edition token itself, so it needs
-//! its own dependency to see the alias.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -84,7 +67,7 @@ pub struct SpoofPayload {
     pub props: usize,
 }
 
-/// State of the `app_process64` `DT_NEEDED` entry after [`apply`].
+/// State of one executable's `DT_NEEDED` entry after [`apply`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppProcessPatchOutcome {
     Patched,
@@ -100,7 +83,7 @@ impl AppProcessPatchOutcome {
     }
 }
 
-/// Result of patching the 64-bit zygote executable.
+/// Result of patching one loader executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppProcessPatchResult {
     pub path: String,

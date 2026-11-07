@@ -1,14 +1,13 @@
 //! `--debloat`: hide selected files/folders from unpacked super partitions
 //! (ext4 `system.img` / `product.img` / `vendor.img` …) without mounting.
 //!
-//! Approach (validated with an external review): the target partitions are
-//! mounted **read-only under dm-verity**, so the kernel never runs `e2fsck`
-//! on them and trusts the verity tree. That makes the smallest possible
-//! mutation — a *dirent-only hide* — both sufficient and safe: we edit only
-//! the parent directory's entry so the path becomes unreachable, leaving the
-//! inode, data blocks, bitmaps, and free counts untouched. Space is not
-//! reclaimed; the partition image keeps its size. The caller regenerates the
-//! dm-verity hash tree and re-signs AVB afterwards.
+//! Approach: the target partitions are mounted **read-only under dm-verity**,
+//! so the kernel never runs `e2fsck` on them and trusts the verity tree. That
+//! makes the smallest possible mutation — a *dirent-only hide* — both
+//! sufficient and safe: we edit only the parent directory's entry so the path
+//! becomes unreachable, leaving the inode, data blocks, bitmaps and free counts
+//! untouched. Space is not reclaimed; the partition image keeps its size. The
+//! caller regenerates the dm-verity hash tree and re-signs AVB afterwards.
 //!
 //! The edit reuses the existing read/write primitives: read the parent
 //! directory's data blocks ([`Inode::open_read_with_extents`]), rewrite the

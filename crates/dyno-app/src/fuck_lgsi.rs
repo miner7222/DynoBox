@@ -1,76 +1,25 @@
 //! Per-feature toggle for Lenovo's LGSI feature flags inside `system.img`.
 //!
-//! Lenovo's `com/lgsi/config/LgsiFeatures.<clinit>` registers each LGSI
-//! feature by constructing a `LgsiFeatureInfo(name, mIsRoot, mIsActive)`
-//! and stuffing it into a registry. The on-disk Dalvik encoding for each
-//! registration is a `const-string` followed immediately by an
-//! `invoke-direct {v1, v2, vE, vF}` against `LgsiFeatureInfo.<init>`,
-//! where `vE` and `vF` are the boolean register fields. With the
-//! constructor pinned to `(Ljava/lang/String;ZZ)V` the two boolean
-//! arguments map to the F|E nibble pair of the invoke-direct opcode.
-//! Toggling a feature on or off is a single-nibble byte rewrite at that
-//! position, swapping the bool register from the false-holding register
-//! to the true-holding one (or vice versa).
+//! `Lcom/lgsi/config/LgsiFeatures.<clinit>` registers each feature with
+//! `new LgsiFeatureInfo(name, mIsRoot, mIsActive)`. Each registration is a
+//! `const-string` followed by `invoke-direct {v1, v2, vE, vF}`; the two
+//! booleans sit in the F|E nibble of the invoke opcode, so toggling a feature
+//! is a single-nibble rewrite.
 //!
-//! `--fuck-as` shipped this concept for a single hard-coded feature
-//! (`ZuiAntiCrossSell`). `--fuck-lgsi` generalises it: the OEM ships a
-//! human-readable manifest at `product.img/etc/lgsi_build_info.html`
-//! listing every feature with its current `Enabled` state. We extract
-//! that html, render its feature list as a tiny JSON object the user
-//! can hand-edit, then patch only the deltas back into the dex.
+//! The OEM ships the current state at `product.img:/etc/lgsi_build_info.html`.
+//! We extract that file, render its feature list as `lgsi_features.json` for
+//! the user to edit, then cross-reference the dex booleans against the HTML
+//! `enabled` column to find the "Enabled" nibble before patching only the
+//! deltas. A sample of at least 8 cross-referable features with 90 % agreement
+//! is required; anything weaker bails out.
 //!
-//! End-to-end (interactive mode):
-//!   1. ext4-walk `system.img` -> `/system/framework/framework.jar`.
-//!   2. ext4-walk `product.img` -> `/etc/lgsi_build_info.html`.
-//!   3. Parse the HTML's `featureData` JS array into
-//!      `[(name, enabled), ...]`.
-//!   4. Walk each `classes*.dex` inside the jar; locate the dex that
-//!      carries `Lcom/lgsi/config/LgsiFeatures;`, find its `<clinit>`,
-//!      and scan its bytecode for every
-//!      `invoke-direct {…}, LgsiFeatureInfo.<init>` site.
-//!   5. Walk `<clinit>` linearly with a register tracker that records
-//!      `const/4` / `const/16` / `const` writes producing 0 or 1, and
-//!      invalidates entries on any other write to a tracked register.
-//!      For every invoke-direct site, snapshot the E and F nibble
-//!      registers, the bool currently held in each, and one live
-//!      nibble-encodable register for each known boolean value.
-//!   6. Cross-reference the dex E-bool / F-bool against the HTML
-//!      `enabled` column for the same feature. The position where the
-//!      bool consistently matches the HTML state is the "Enabled" nibble.
-//!      Require ≥90 % match across ≥8 cross-referable features; smaller
-//!      or more ambiguous samples bail loud.
-//!   7. Write the workspace artifacts under `<out>`:
-//!        - `lgsi_features.json` — `{name -> enabled}` object map in
-//!          HTML order, generated from the HTML.
-//!        - `lgsi_build_info.html` — verbatim copy of the file pulled
-//!          from product.img, kept as the human-readable reference.
-//!   8. Ask the front-end (`EventSink::prompt`) to show the absolute
-//!      paths and "Edit JSON, then press Enter to continue (Ctrl-C to
-//!      abort)", and wait for the acknowledgement.
-//!   9. Re-read the JSON. JSON parse error -> print and re-prompt; loop
-//!      until valid.
-//!  10. Diff against the original HTML state. 0 changes -> return
-//!      `NotApplicable` (skip dex patch + verity regen).
-//!  11. For each changed feature, patch the F|E byte's "Enabled" nibble
-//!      from the current bool register's number to a register holding
-//!      the requested value, even when that register is outside the
-//!      feature's original E/F pair.
-//!  12. Recompute the dex header SHA-1 (covers bytes 32..) and Adler-32
-//!      (covers bytes 12..); recompute jar CRC32 (LFH + CD).
-//!  13. write_via_extents the patched jar back to system.img.
-//!  14. Regenerate dm-verity hash tree on system.img; patch the
-//!      Hashtree descriptor's `root_digest` on system.img and
-//!      vbmeta_system.img. Resign loop refreshes the vbmeta signature.
-//!  15. Optionally remove the workspace files (`--fuck-lgsi-cleanup`).
+//! Scripted mode (`--fuck-lgsi <JSON_PATH>`) reads the JSON from the given path
+//! instead of prompting. Patched dexes get new header sums and zip CRCs, the
+//! jar is written back through its extents, and system.img's dm-verity tree
+//! plus the Hashtree `root_digest` in the owning vbmeta are refreshed.
 //!
-//! Scripted mode (`--fuck-lgsi <JSON_PATH>`) skips steps 7–9: the
-//! caller-supplied JSON is read from the given path. Steps 1–6 still run
-//! so we know the dex layout + cross-ref. Steps 10–14 still run.
-//!
-//! FEC blocks on `system.img` are intentionally untouched — same
-//! trade-off as `vendor_spl` and the previous `--fuck-as`. dm-verity
-//! validates against `root_digest`; FEC is an optional recovery code
-//! and stale FEC does not break boot.
+//! FEC blocks are intentionally untouched: dm-verity validates against
+//! `root_digest` only, so a stale FEC region does not break boot.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

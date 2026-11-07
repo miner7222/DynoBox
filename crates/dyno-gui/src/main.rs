@@ -1316,8 +1316,8 @@ impl DynoGui {
                 ui.checkbox(&mut self.add_spoof_enabled, "--add-spoof")
                     .on_hover_text(
                         "Install the zygote preload (libspoof.so, the per-app config \
-                         from this JSON list, and the init.zygote64.rc preload line) \
-                         into system.img during resign",
+                         from this JSON list, and DT_NEEDED entries in app_process64 \
+                         and bootanimation) into system.img during resign",
                     );
                 if ui.button("📁").clicked()
                     && let Some(p) = file_dialog(self.add_spoof.as_deref())

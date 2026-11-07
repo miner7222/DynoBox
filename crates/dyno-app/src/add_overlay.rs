@@ -12,28 +12,21 @@
 //! hide, and the same safety argument applies: the partition is mounted
 //! read-only under dm-verity, the kernel never runs `e2fsck` on it, and the
 //! caller regenerates the dm-verity hash tree afterwards. Unlike debloat it
-//! must allocate: a free inode per file, contiguous data blocks (one inline
-//! extent per file) from the largest free run, an inode plus one directory
-//! block when the target directory itself has to be created, and — when a
-//! directory's trailing dirent spare is too small for the new names — one or
-//! more directory blocks appended to that directory's extent list.
+//! allocates: a free inode per file, data blocks from the largest free run, an
+//! inode plus a directory block when the target directory must be created, and
+//! extra directory blocks when the trailing dirent spare is too small.
 //!
-//! Metadata written: inode/block bitmaps, group-descriptor free counts,
-//! `used_dirs_count` and `uninit_bg` flags (plus the bitmap padding e2fsck
-//! expects), directory link counts (a new subdirectory adds one to its parent),
-//! the legacy `gdt_csum` group-descriptor checksum (crc16 over
-//! `uuid + u32le(group) + descriptor[..0x1E]`), and the superblock free
-//! counters. New inodes copy the inline-xattr block and timestamps of an
-//! existing regular file in the target directory — or of the target directory
-//! itself when it is freshly created — so inserted files and directories
+//! It also updates the inode/block bitmaps, group-descriptor free counts,
+//! `used_dirs_count`, directory link counts, the legacy `gdt_csum` checksum and
+//! the superblock free counters. New inodes copy the inline-xattr block and
+//! timestamps of an existing file in the target directory, so inserted files
 //! inherit that directory's SELinux label (for `/vendor/overlay` the existing
 //! OEM overlays supply the vendor label).
 //!
 //! Hard feature gate (unsupported layouts are rejected, never mutated):
-//! require `EXTENTS`; reject `metadata_csum` (inode, directory-block, bitmap
-//! and superblock crc32c would have to be recomputed), `encrypt`/`casefold`,
-//! indexed (htree) directories receiving entries, and directories that would
-//! need more than four extents.
+//! require `EXTENTS`; reject `metadata_csum` (every checksum would have to be
+//! recomputed), `encrypt`/`casefold`, indexed (htree) directories receiving
+//! entries, and directories that would need more than four extents.
 //!
 //! [`OverlayScanner::scanDir`]: https://cs.android.com/android/platform/superproject/main/+/main:frameworks/base/core/java/com/android/internal/content/om/OverlayScanner.java
 
