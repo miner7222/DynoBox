@@ -1334,6 +1334,9 @@ where
 /// [`ProgressEvent::ItemProgress`] events. Emits when the integer percentage
 /// changes (~100 events per partition) plus a final `done == total` event,
 /// so the CLI bar advances smoothly without spamming tracing output.
+// The payload API is positional; grouping these into a struct would only
+// duplicate the same argument list at both call sites.
+#[allow(clippy::too_many_arguments)]
 fn apply_payload_with_event_progress<S>(
     events: &mut S,
     stage: StageKind,
