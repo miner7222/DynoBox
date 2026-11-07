@@ -473,7 +473,6 @@ fn compute_hash_tree(
     let mut hash_ret = vec![0u8; tree_size_usize];
     let mut hash_src_size = usize::try_from(image_size)
         .map_err(|_| anyhow!("AVB image size {image_size} exceeds addressable memory"))?;
-    let mut level_num = 0usize;
 
     if hash_src_size == block_size_usize {
         let data = read_padded_block_local(&mut image, 0, block_size_usize, image_size)?;
@@ -484,68 +483,20 @@ fn compute_hash_tree(
         return Ok((digest, hash_ret));
     }
 
-    let mut last_level_output = Vec::new();
-    while hash_src_size > block_size_usize {
-        let block_count = hash_src_size.div_ceil(block_size_usize);
-        let mut level_output = Vec::with_capacity(block_count.saturating_mul(32 + digest_padding));
-        if level_num == 0 {
-            // Read the image in large batches. The original path issued a
-            // seek+read syscall per 4 KiB block, which dominated the walk on
-            // multi-GiB partitions; level 0 is ~all of the verity work.
-            const READ_BATCH_BYTES: usize = 4 * 1024 * 1024;
-            let buf_len = READ_BATCH_BYTES.min(hash_src_size.max(block_size_usize));
-            let mut buf = vec![0u8; buf_len];
-            let mut tail = vec![0u8; block_size_usize];
-            let mut offset = 0u64;
-            let mut remaining = hash_src_size as u64;
-            while remaining > 0 {
-                let chunk = usize::try_from(remaining.min(READ_BATCH_BYTES as u64))
-                    .map_err(|_| anyhow!("verity read batch exceeds addressable memory"))?;
-                image.seek(SeekFrom::Start(offset))?;
-                image.read_exact(&mut buf[..chunk])?;
-                let full_blocks = chunk / block_size_usize * block_size_usize;
-                for block in buf[..full_blocks].chunks_exact(block_size_usize) {
-                    let digest = sha256_with_salt_block(salt, block);
-                    level_output.extend_from_slice(&digest);
-                    if digest_padding > 0 {
-                        level_output.extend(std::iter::repeat_n(0u8, digest_padding));
-                    }
-                    if let Some(cb) = progress.as_deref_mut() {
-                        cb(block_size as u64);
-                    }
-                }
-                if chunk > full_blocks {
-                    tail.fill(0);
-                    tail[..chunk - full_blocks].copy_from_slice(&buf[full_blocks..chunk]);
-                    let digest = sha256_with_salt_block(salt, &tail);
-                    level_output.extend_from_slice(&digest);
-                    if digest_padding > 0 {
-                        level_output.extend(std::iter::repeat_n(0u8, digest_padding));
-                    }
-                    if let Some(cb) = progress.as_deref_mut() {
-                        cb(block_size as u64);
-                    }
-                }
-                offset += chunk as u64;
-                remaining -= chunk as u64;
-            }
-        } else {
-            let mut remaining = hash_src_size;
-            while remaining > 0 {
-                let offset = hash_level_offsets[level_num - 1] as usize + hash_src_size - remaining;
-                let end = (offset + block_size_usize).min(hash_ret.len());
-                let mut block = vec![0u8; block_size_usize];
-                let copy_len = end.saturating_sub(offset);
-                block[..copy_len].copy_from_slice(&hash_ret[offset..end]);
-                let digest = sha256_with_salt(salt, &block);
-                level_output.extend_from_slice(&digest);
-                if digest_padding > 0 {
-                    level_output.extend(std::iter::repeat_n(0u8, digest_padding));
-                }
-                remaining = remaining.saturating_sub(block_size_usize);
-            }
-        }
-
+    // Level 0 is the only I/O-heavy level and accounts for practically all of
+    // the walk; hash it with a bounded worker pool, then fold the upper levels
+    // sequentially.
+    let mut level_output = compute_level0_hashes(
+        image_path,
+        hash_src_size,
+        block_size_usize,
+        salt,
+        digest_padding,
+        progress,
+    )?;
+    let mut level_num = 0usize;
+    let mut last_level_output;
+    loop {
         let padded_len = level_output.len().div_ceil(block_size_usize) * block_size_usize;
         level_output.resize(padded_len, 0);
         let offset = hash_level_offsets
@@ -555,11 +506,155 @@ fn compute_hash_tree(
             as usize;
         hash_ret[offset..offset + level_output.len()].copy_from_slice(&level_output);
         hash_src_size = level_output.len();
-        level_num += 1;
         last_level_output = level_output;
+        level_num += 1;
+        if hash_src_size <= block_size_usize {
+            break;
+        }
+
+        let mut next = Vec::with_capacity(hash_src_size.div_ceil(block_size_usize) * 32);
+        let mut remaining = hash_src_size;
+        while remaining > 0 {
+            let offset = hash_level_offsets[level_num - 1] as usize + hash_src_size - remaining;
+            let end = (offset + block_size_usize).min(hash_ret.len());
+            let mut block = vec![0u8; block_size_usize];
+            let copy_len = end.saturating_sub(offset);
+            block[..copy_len].copy_from_slice(&hash_ret[offset..end]);
+            next.extend_from_slice(&sha256_with_salt_block(salt, &block));
+            if digest_padding > 0 {
+                next.extend(std::iter::repeat_n(0u8, digest_padding));
+            }
+            remaining = remaining.saturating_sub(block_size_usize);
+        }
+        level_output = next;
     }
 
     Ok((sha256_with_salt(salt, &last_level_output), hash_ret))
+}
+
+/// Hash every level-0 data block of an image. Blocks are read in 4 MiB
+/// batches; large images are split into contiguous block ranges hashed by a
+/// bounded worker pool. Each worker returns its digests in block order, which
+/// the caller stitches into one level-0 buffer.
+fn compute_level0_hashes(
+    image_path: &Path,
+    image_size: usize,
+    block_size: usize,
+    salt: &[u8],
+    digest_padding: usize,
+    mut progress: Option<&mut dyn FnMut(u64)>,
+) -> Result<Vec<u8>> {
+    let entry_size = 32 + digest_padding;
+    let block_count = image_size.div_ceil(block_size);
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, 8);
+    // Kept as a local so the `cfg!(test)` zero threshold does not become a
+    // constant comparison that clippy rejects.
+    let min_parallel_bytes = if cfg!(test) { 0 } else { 64 * 1024 * 1024 };
+
+    if workers == 1 || image_size < min_parallel_bytes {
+        let mut file = std::fs::File::open(image_path)
+            .with_context(|| format!("Failed to open {} for verity walk", image_path.display()))?;
+        return hash_level0_range(
+            &mut file,
+            0,
+            image_size,
+            block_size,
+            salt,
+            digest_padding,
+            &mut progress,
+        );
+    }
+
+    let blocks_per_worker = block_count.div_ceil(workers);
+    let mut assembled = vec![0u8; block_count.saturating_mul(entry_size)];
+    std::thread::scope(|scope| -> Result<()> {
+        let mut handles = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            let start_block = worker * blocks_per_worker;
+            if start_block >= block_count {
+                break;
+            }
+            let end_block = ((worker + 1) * blocks_per_worker).min(block_count);
+            let start_byte = start_block * block_size;
+            let end_byte = (end_block * block_size).min(image_size);
+            handles.push(scope.spawn(move || -> Result<(usize, Vec<u8>, u64)> {
+                let mut file = std::fs::File::open(image_path).with_context(|| {
+                    format!("Failed to open {} for verity walk", image_path.display())
+                })?;
+                let mut no_progress: Option<&mut dyn FnMut(u64)> = None;
+                let digests = hash_level0_range(
+                    &mut file,
+                    start_byte,
+                    end_byte,
+                    block_size,
+                    salt,
+                    digest_padding,
+                    &mut no_progress,
+                )?;
+                Ok((start_block, digests, (end_byte - start_byte) as u64))
+            }));
+        }
+        for handle in handles {
+            let (start_block, digests, hashed) = handle
+                .join()
+                .map_err(|_| anyhow!("verity hashing worker panicked"))??;
+            let offset = start_block.saturating_mul(entry_size);
+            assembled[offset..offset + digests.len()].copy_from_slice(&digests);
+            if let Some(cb) = progress.as_deref_mut() {
+                cb(hashed);
+            }
+        }
+        Ok(())
+    })?;
+    Ok(assembled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hash_level0_range(
+    file: &mut std::fs::File,
+    start_byte: usize,
+    end_byte: usize,
+    block_size: usize,
+    salt: &[u8],
+    digest_padding: usize,
+    progress: &mut Option<&mut dyn FnMut(u64)>,
+) -> Result<Vec<u8>> {
+    const READ_BATCH_BYTES: usize = 4 * 1024 * 1024;
+    let entry_size = 32 + digest_padding;
+    let mut out = Vec::with_capacity((end_byte - start_byte).div_ceil(block_size) * entry_size);
+    let buf_len = READ_BATCH_BYTES.min((end_byte - start_byte).max(block_size));
+    let mut buf = vec![0u8; buf_len];
+    let mut tail = vec![0u8; block_size];
+
+    file.seek(SeekFrom::Start(start_byte as u64))?;
+    let mut offset = start_byte;
+    while offset < end_byte {
+        let chunk = (end_byte - offset).min(READ_BATCH_BYTES);
+        file.read_exact(&mut buf[..chunk])?;
+        let full_blocks = chunk / block_size * block_size;
+        for block in buf[..full_blocks].chunks_exact(block_size) {
+            out.extend_from_slice(&sha256_with_salt_block(salt, block));
+            if digest_padding > 0 {
+                out.extend(std::iter::repeat_n(0u8, digest_padding));
+            }
+        }
+        if chunk > full_blocks {
+            tail.fill(0);
+            tail[..chunk - full_blocks].copy_from_slice(&buf[full_blocks..chunk]);
+            out.extend_from_slice(&sha256_with_salt_block(salt, &tail));
+            if digest_padding > 0 {
+                out.extend(std::iter::repeat_n(0u8, digest_padding));
+            }
+        }
+        if let Some(cb) = progress.as_deref_mut() {
+            cb(chunk as u64);
+        }
+        offset += chunk;
+    }
+    Ok(out)
 }
 
 fn sha256_with_salt(salt: &[u8], data: &[u8]) -> Vec<u8> {
