@@ -570,6 +570,68 @@ fn find_method_code_off(
     Ok(None)
 }
 
+/// Code items referenced by more than one encoded method, precomputed for the
+/// body-rewrite safety check. See [`build_shared_code_index`].
+pub struct SharedCodeIndex(std::collections::HashSet<usize>);
+
+impl SharedCodeIndex {
+    fn contains(&self, code_off: usize) -> bool {
+        self.0.contains(&code_off)
+    }
+}
+
+thread_local! {
+    /// Installed only while a caller applies several ops to one dex slice.
+    static ACTIVE_SHARED_CODE_INDEX: std::cell::RefCell<
+        Option<std::rc::Rc<SharedCodeIndex>>,
+    > = const { std::cell::RefCell::new(None) };
+}
+
+/// Walk `dex` once and record every `code_off` referenced by two or more
+/// encoded methods. `code_off_is_shared` uses the result instead of rescanning
+/// the whole class table for every op.
+pub fn build_shared_code_index(dex: &[u8]) -> Result<std::rc::Rc<SharedCodeIndex>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut shared = std::collections::HashSet::new();
+    if let Some(h) = read_dex_header(dex) {
+        for idx in 0..h.class_defs_size {
+            let entry_off = h.class_defs_off + idx * 32;
+            if entry_off + 32 > dex.len() {
+                break;
+            }
+            let class_data_off = read_u32_le(dex, entry_off + 24) as usize;
+            if class_data_off == 0 || class_data_off >= dex.len() {
+                continue;
+            }
+            let Ok(offs) = collect_method_code_offs(dex, class_data_off, h.method_ids_size) else {
+                continue;
+            };
+            for (_method_idx, code_off) in offs {
+                if !seen.insert(code_off) {
+                    shared.insert(code_off);
+                }
+            }
+        }
+    }
+    Ok(std::rc::Rc::new(SharedCodeIndex(shared)))
+}
+
+/// Run `apply` with `index` installed as the shared-code lookup for this
+/// thread. The index is removed even when `apply` returns an error.
+pub fn with_shared_code_index<R>(
+    index: &std::rc::Rc<SharedCodeIndex>,
+    apply: impl FnOnce() -> Result<R>,
+) -> Result<R> {
+    ACTIVE_SHARED_CODE_INDEX.with(|slot| {
+        *slot.borrow_mut() = Some(std::rc::Rc::clone(index));
+    });
+    let result = apply();
+    ACTIVE_SHARED_CODE_INDEX.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
+    result
+}
+
 /// Whether `code_off` is referenced by more than one method entry across the
 /// whole dex. R8/redex deduplicate identical code items — every trivial
 /// `return 0` / `return false` / `return-void` body can collapse onto a single
@@ -579,6 +641,15 @@ fn find_method_code_off(
 /// sharer (`ImmutableMap.isHashCodeFast`) into a `VerifyError`. Body-rewriting
 /// ops must refuse a shared item. Best-effort: unparseable class_data is skipped.
 fn code_off_is_shared(dex: &[u8], h: &DexHeader, code_off: usize) -> Result<bool> {
+    // A per-op full-dex walk is O(classes × methods); a `.dbp` file can run
+    // dozens of body rewrites over the same dex. The caller can precompute the
+    // reference counts once and install them here for the duration of the ops
+    // loop (see `with_shared_code_index`).
+    let cached = ACTIVE_SHARED_CODE_INDEX
+        .with(|slot| slot.borrow().as_ref().map(|index| index.contains(code_off)));
+    if let Some(shared) = cached {
+        return Ok(shared);
+    }
     let mut seen = 0usize;
     for idx in 0..h.class_defs_size {
         let entry_off = h.class_defs_off + idx * 32;

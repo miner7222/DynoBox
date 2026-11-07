@@ -1654,10 +1654,18 @@ fn apply_ops_to_apk(
             if dex.len() < 0x70 {
                 continue;
             }
+            let mut shared = crate::dex_patch::build_shared_code_index(dex)?;
             for (i, op) in ops.iter().enumerate() {
-                if apply_one_op(dex, op)? {
+                let landed =
+                    crate::dex_patch::with_shared_code_index(&shared, || apply_one_op(dex, op))?;
+                if landed {
                     op_landed[i] = true;
                     dex_modified = true;
+                }
+                // A redirect writes a new `code_off` into the target method,
+                // which changes the shared-code reference counts.
+                if landed && matches!(op, DbpOp::MethodCodeRedirect { .. }) {
+                    shared = crate::dex_patch::build_shared_code_index(dex)?;
                 }
             }
         }
@@ -1689,10 +1697,16 @@ fn apply_ops_to_apk(
             continue;
         }
         let mut dex_modified = false;
+        let mut shared = crate::dex_patch::build_shared_code_index(&dex)?;
         for (i, op) in ops.iter().enumerate() {
-            if apply_one_op(&mut dex, op)? {
+            let landed =
+                crate::dex_patch::with_shared_code_index(&shared, || apply_one_op(&mut dex, op))?;
+            if landed {
                 deflated_landed[i] = true;
                 dex_modified = true;
+            }
+            if landed && matches!(op, DbpOp::MethodCodeRedirect { .. }) {
+                shared = crate::dex_patch::build_shared_code_index(&dex)?;
             }
         }
         if dex_modified {
