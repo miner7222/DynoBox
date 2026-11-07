@@ -12,15 +12,7 @@ ignore = [
     # key work locally on the user's own machine; the attack needs an attacker
     # observing many timed signing operations, which this offline desktop flow
     # does not expose. Revisit when a fixed `rsa` ships.
-    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack: no upstream fix; DynoBox signs offline on the operator machine" },
-    # `quick-xml` <0.41 DoS/quadratic-parse advisories. Direct `dynobox-xml`
-    # dependency is on the fixed 0.41 line. The residual vulnerable line is
-    # ONLY quick-xml 0.39.x via `wayland-scanner` (Linux Wayland-protocol
-    # codegen at BUILD time) through winit/eframe. That codegen only reads
-    # fixed, trusted protocol XML and never sees untrusted input. Ignore
-    # narrowly for the build-time path; not a blanket vulnerability waiver.
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml quadratic duplicate-attr check — residual build-time wayland-scanner only" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml unbounded namespace alloc DoS — residual build-time wayland-scanner only" },
+    { id = "RUSTSEC-2023-0071", reason = "rsa Marvin attack: no upstream fix; DynoBox signs offline on the operator machine" }
 ]
 
 [bans]
