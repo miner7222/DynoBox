@@ -3230,6 +3230,11 @@ where
     // partition name (e.g. "system") to its image path in `out_dir`.
     let mut dirty_partitions: BTreeMap<String, PathBuf> = BTreeMap::new();
 
+    // Per-feature wall-clock timings, reported once at the end of the stage so
+    // a multi-minute resign can be attributed to a concrete feature block.
+    let mut feature_times: Vec<(String, f64)> = Vec::new();
+    let mut feature_mark = std::time::Instant::now();
+
     let vendor_spl_applied = match config.vendor_spl.as_deref() {
         Some(new_spl) => run_ext_spl_step(
             &VENDOR_SPL_STEP,
@@ -3267,6 +3272,8 @@ where
         )?,
         None => None,
     };
+    feature_times.push(("spl".to_string(), feature_mark.elapsed().as_secs_f64()));
+    feature_mark = std::time::Instant::now();
 
     let mut fuck_lgsi_applied: Option<(String, String)> = None;
     if let Some(lgsi_mode) = config.fuck_lgsi.as_ref() {
@@ -3375,6 +3382,8 @@ where
             ensure_image_in_resign_list(&mut images, out_dir, "vbmeta_system.img");
         }
     }
+    feature_times.push(("lgsi".to_string(), feature_mark.elapsed().as_secs_f64()));
+    feature_mark = std::time::Instant::now();
 
     if let Some(debloat_mode) = config.debloat.as_ref() {
         run_debloat(
@@ -3386,6 +3395,8 @@ where
             &mut report,
         )?;
     }
+    feature_times.push(("debloat".to_string(), feature_mark.elapsed().as_secs_f64()));
+    feature_mark = std::time::Instant::now();
 
     if !config.add_overlay.is_empty() {
         run_add_overlay(
@@ -3397,6 +3408,8 @@ where
             &mut report,
         )?;
     }
+    feature_times.push(("overlay".to_string(), feature_mark.elapsed().as_secs_f64()));
+    feature_mark = std::time::Instant::now();
 
     if let Some(json_path) = config.add_spoof.as_deref() {
         run_add_spoof(
@@ -3409,6 +3422,8 @@ where
             &mut report,
         )?;
     }
+    feature_times.push(("spoof".to_string(), feature_mark.elapsed().as_secs_f64()));
+    feature_mark = std::time::Instant::now();
 
     // --plus: apply external `.dbp` patches to files inside the partition
     // images. Mutation-only here; each touched partition's dm-verity is
@@ -3551,6 +3566,8 @@ where
             });
         }
     }
+    feature_times.push(("plus".to_string(), feature_mark.elapsed().as_secs_f64()));
+    feature_mark = std::time::Instant::now();
 
     // Deferred dm-verity: regenerate each mutated partition's hash tree exactly
     // once (coalescing --system-spl / --fuck-lgsi / --debloat that touched the
@@ -3559,10 +3576,15 @@ where
     // Signed owning VBMeta images are verified/re-signed before their first
     // descriptor write, then authenticated after all writes in the main loop.
     for (partition, image_path) in &dirty_partitions {
+        let partition_verity_started = std::time::Instant::now();
         let Some(finalized) = finalize_partition_verity(events, out_dir, partition, image_path)?
         else {
             continue;
         };
+        feature_times.push((
+            format!("verity:{partition}"),
+            partition_verity_started.elapsed().as_secs_f64(),
+        ));
         let FinalizedPartitionVerity {
             old_hex,
             new_hex,
@@ -3622,6 +3644,8 @@ where
             spoof.new_root_digest = new_hex.clone();
         }
     }
+    feature_times.push(("verity".to_string(), feature_mark.elapsed().as_secs_f64()));
+    feature_mark = std::time::Instant::now();
 
     let mut boot_spl_applied: Option<(String, String)> = None;
     if let Some(new_spl) = config.boot_spl.as_deref() {
@@ -3845,6 +3869,7 @@ where
             verify_ext_spl_after_resign(&SYSTEM_SPL_STEP, &filename, &out_path, expected_spl)?;
         }
     }
+    feature_times.push(("sign".to_string(), feature_mark.elapsed().as_secs_f64()));
 
     if !prepared_vbmeta.is_empty() {
         return Err(anyhow::anyhow!(
@@ -3928,6 +3953,18 @@ where
         }
     }
 
+    let feature_summary = feature_times
+        .iter()
+        .map(|(name, seconds)| format!("{name} {seconds:.1}s"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !feature_summary.is_empty() {
+        message(
+            events,
+            MessageLevel::Info,
+            format!("resign: breakdown: {feature_summary}"),
+        );
+    }
     message(
         events,
         MessageLevel::Info,
