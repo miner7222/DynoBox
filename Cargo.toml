@@ -104,5 +104,51 @@ strip = true
 [profile.dev.package.sha2]
 opt-level = 3
 
+# `.dbp` patching recompresses modified zip entries into their original
+# footprint. flate2's fallback levels and the final zopfli pass are pure Rust
+# and unoptimized dev builds made a single large APK patch take tens of
+# seconds; optimize just those codecs for debug/test builds.
+[profile.dev.package.zopfli]
+opt-level = 3
+
+[profile.dev.package.flate2]
+opt-level = 3
+
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.dev.package.adler2]
+opt-level = 3
+
+[profile.dev.package.crc32fast]
+opt-level = 3
+
+[profile.dev.package.lz4_flex]
+opt-level = 3
+
+[profile.dev.package.sha1]
+opt-level = 3
+
 [profile.test.package.sha2]
+opt-level = 3
+
+[profile.test.package.zopfli]
+opt-level = 3
+
+[profile.test.package.flate2]
+opt-level = 3
+
+[profile.test.package.miniz_oxide]
+opt-level = 3
+
+[profile.test.package.adler2]
+opt-level = 3
+
+[profile.test.package.crc32fast]
+opt-level = 3
+
+[profile.test.package.lz4_flex]
+opt-level = 3
+
+[profile.test.package.sha1]
 opt-level = 3
