@@ -4,16 +4,18 @@
 //! [`PipelineReport`] and writes it to `<out>/report.html` after the
 //! resign loop finishes. It remains marked as pending until the final
 //! pipeline verification succeeds. The report is a self-contained, no-JS,
-//! no-CDN
-//! HTML page summarising every state change the stage made: command
-//! line, timestamps, boot/vendor SPL bumps, rollback rewrites, LGSI
-//! feature toggles (applied + skipped), and any signing-key swap that
-//! triggered the abl.elf-rebuild warning.
+//! no-CDN HTML page summarising every state change the stage made.
+//!
+//! The layout is decision-first: status, action-required warnings, run
+//! metrics, and a collapsed command drawer come before the audit tables.
+//! Large tables use native `<details>` so the default document stays short
+//! while `Ctrl+F`, print-to-PDF, and the full audit trail keep working.
 //!
 //! Read-only stages (`info`, `verify`, `unpack`, `repack`, plus
 //! `apply` without resign) intentionally skip the report — there's
 //! nothing to summarise.
 
+use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -25,6 +27,8 @@ pub struct PipelineReport {
     pub command_kind: String,
     pub started_at: String,
     pub finished_at: String,
+    pub started_unix: u64,
+    pub finished_unix: u64,
     pub output_dir: String,
     pub resigned_images: Vec<String>,
     pub boot_spl: Option<SplRecord>,
@@ -195,7 +199,9 @@ impl PipelineReport {
             command_line,
             command_kind: command_kind.into(),
             started_at: now_iso8601(),
+            started_unix: now_unix(),
             finished_at: String::new(),
+            finished_unix: 0,
             output_dir: output_dir.display().to_string(),
             ..Default::default()
         }
@@ -203,6 +209,7 @@ impl PipelineReport {
 
     pub fn finish(&mut self) {
         self.finished_at = now_iso8601();
+        self.finished_unix = now_unix();
     }
 
     /// Whether the report contains anything worth writing to disk. Used
@@ -229,23 +236,19 @@ impl PipelineReport {
     }
 
     pub fn render_html(&self) -> String {
-        let mut out = String::with_capacity(8 * 1024);
+        let mut out = String::with_capacity(16 * 1024);
         out.push_str(HTML_HEADER);
+        out.push_str("<main id='top'>\n");
 
-        out.push_str("<main>\n<header class='report-header'>\n");
-        out.push_str("<div><p class='product'>DynoBox</p><h1>Pipeline report</h1></div>\n");
-        out.push_str(VERIFICATION_STATUS_PENDING);
-        out.push_str("\n</header>\n");
-        out.push_str("<section class='run-summary' aria-label='Run summary'>\n");
-        push_summary_item(
-            &mut out,
-            "Command",
-            &redact_command_line(&self.command_line),
-            true,
-        );
-        push_summary_item(&mut out, "Output", display_name(&self.output_dir), false);
-        push_summary_item(&mut out, "Finished", &self.finished_at, false);
-        out.push_str("</section>\n");
+        push_header(&mut out);
+
+        if let Some(signing_key) = &self.signing_key_change {
+            push_signing_key_callout(&mut out, signing_key);
+        }
+
+        push_kpi_strip(&mut out, self);
+        push_command_drawer(&mut out, &self.command_line);
+        push_section_nav(&mut out, self);
 
         let spl_records = [
             ("boot.img", self.boot_spl.as_ref()),
@@ -255,26 +258,23 @@ impl PipelineReport {
         if spl_records.iter().any(|(_, record)| record.is_some()) {
             push_spl_section(&mut out, &spl_records);
         }
-        if let Some(rb) = &self.rollback {
-            push_rollback_section(&mut out, rb);
+        if let Some(rollback) = &self.rollback {
+            push_rollback_section(&mut out, rollback);
         }
-        if let Some(l) = &self.lgsi {
-            push_lgsi_section(&mut out, l);
-        }
-        if let Some(sk) = &self.signing_key_change {
-            push_signing_key_section(&mut out, sk);
-        }
-        if let Some(db) = &self.debloat {
-            push_debloat_section(&mut out, db);
-        }
-        if let Some(ov) = &self.overlay {
-            push_overlay_section(&mut out, ov);
+        if let Some(debloat) = &self.debloat {
+            push_debloat_section(&mut out, debloat);
         }
         if let Some(spoof) = &self.spoof {
             push_spoof_section(&mut out, spoof);
         }
-        if let Some(pl) = &self.plus {
-            push_plus_section(&mut out, pl);
+        if let Some(plus) = &self.plus {
+            push_plus_section(&mut out, plus);
+        }
+        if let Some(lgsi) = &self.lgsi {
+            push_lgsi_section(&mut out, lgsi);
+        }
+        if let Some(overlay) = &self.overlay {
+            push_overlay_section(&mut out, overlay);
         }
         push_resigned_section(&mut out, &self.resigned_images);
 
@@ -291,41 +291,183 @@ const HTML_HEADER: &str = r#"<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>DynoBox pipeline report</title>
   <style>
-    :root { color-scheme: light; --ink: #172033; --muted: #5d6878; --line: #d8dee8; --surface: #ffffff; --canvas: #edf1f6; --accent: #165dcc; --success: #167447; --warning: #995d00; --danger: #b42318; }
+    :root {
+      color-scheme: light;
+      --ink: #172033;
+      --ink-2: #344054;
+      --muted: #5d6878;
+      --faint: #98a2b3;
+      --line: #d8dee8;
+      --line-2: #eaecf0;
+      --surface: #ffffff;
+      --surface-2: #f8fafc;
+      --canvas: #edf1f6;
+      --accent: #165dcc;
+      --accent-bg: #edf4ff;
+      --accent-line: #bfd6ff;
+      --ok: #116139;
+      --ok-bg: #e9f7ef;
+      --ok-line: #a6e0bd;
+      --warn: #7a4900;
+      --warn-bg: #fff6e0;
+      --warn-line: #e6b84d;
+      --danger: #b42318;
+      --danger-bg: #fef3f2;
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; padding: 32px 20px; background: var(--canvas); color: var(--ink); font: 15px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    main { max-width: 960px; margin: 0 auto; padding: 40px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
-    .report-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; padding-bottom: 28px; }
-    .product { margin: 0 0 4px; color: var(--accent); font-size: 0.84rem; font-weight: 700; letter-spacing: 0.04em; }
-    h1, h2 { margin: 0; color: var(--ink); text-wrap: balance; }
-    h1 { font-size: clamp(1.8rem, 4vw, 2.4rem); line-height: 1.15; letter-spacing: -0.025em; }
-    h2 { font-size: 1.05rem; line-height: 1.3; }
-    h3 { margin: 20px 0 8px; font-size: 0.9rem; color: var(--muted); }
-    .status { margin: 2px 0 0; padding: 4px 10px; color: var(--success); background: #e9f7ef; border-radius: 999px; font-size: 0.84rem; font-weight: 700; white-space: nowrap; }
-    .status.pending { color: var(--warning); background: #fff8e8; }
-    .run-summary { display: grid; grid-template-columns: minmax(0, 1fr) 180px 190px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-    .summary-item { min-width: 0; padding: 14px 16px; border-left: 1px solid var(--line); }
-    .summary-item:first-child { padding-left: 0; border-left: 0; }
-    .summary-label { display: block; margin-bottom: 3px; color: var(--muted); font-size: 0.78rem; font-weight: 700; }
-    .summary-value { overflow-wrap: anywhere; color: var(--ink); }
-    section:not(.run-summary) { padding-top: 28px; }
-    .section-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
-    .section-note { margin: 0; color: var(--muted); font-size: 0.88rem; }
-    .warning { padding: 18px; background: #fff8e8; border: 1px solid #e8ca85; border-radius: 8px; }
-    .warning p { margin: 8px 0 0; color: #654600; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
-    th, td { padding: 9px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-    th { color: var(--muted); background: #f7f9fc; font-size: 0.76rem; font-weight: 700; }
-    td:last-child, th:last-child { padding-right: 0; }
-    th:first-child, td:first-child { padding-left: 0; }
-    code, .mono { font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; font-size: 0.9em; overflow-wrap: anywhere; }
-    .from { color: var(--danger); }
-    .to, .applied { color: var(--success); font-weight: 700; }
-    .skipped { color: var(--warning); font-weight: 700; }
-    .not-applied, .empty { color: var(--muted); }
-    .signed-images { margin: 8px 0 0; color: var(--muted); }
-    .signed-images code { color: var(--ink); }
-    @media (max-width: 680px) { body { padding: 0; } main { border: 0; border-radius: 0; padding: 28px 20px; } .report-header { gap: 12px; } .run-summary { grid-template-columns: 1fr; } .summary-item, .summary-item:first-child { padding: 12px 0; border: 0; border-top: 1px solid var(--line); } .summary-item:first-child { border-top: 0; } .section-heading { display: block; } .section-note { margin-top: 4px; } table { display: block; overflow-x: auto; white-space: nowrap; } }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; padding: 24px 16px; background: var(--canvas); color: var(--ink); font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 1080px; margin: 0 auto; padding: 32px 36px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+    h1, h2, h3 { margin: 0; color: var(--ink); text-wrap: balance; }
+    h1 { font-size: clamp(1.5rem, 3vw, 2rem); line-height: 1.15; letter-spacing: -0.02em; }
+    h2 { font-size: 1rem; line-height: 1.3; font-weight: 700; }
+    p { margin: 0; }
+    a { color: var(--accent); }
+
+    .report-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+    .product { margin: 0 0 4px; color: var(--accent); font-size: 0.78rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+    .status { margin: 2px 0 0; padding: 5px 12px; color: var(--ok); background: var(--ok-bg); border: 1px solid var(--ok-line); border-radius: 999px; font-size: 0.8rem; font-weight: 700; white-space: nowrap; }
+    .status::before { content: "✓ "; }
+    .status.pending { color: var(--warn); background: var(--warn-bg); border-color: var(--warn-line); }
+    .status.pending::before { content: "! "; }
+
+    .callout-warning { margin-top: 16px; padding: 14px 16px; background: var(--warn-bg); border: 1px solid var(--warn-line); border-left: 4px solid #d9822b; border-radius: 8px; scroll-margin-top: 96px; }
+    .callout-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .callout-head h2 { color: var(--warn); }
+    .callout-body { margin-top: 6px; color: #5c3700; font-size: 0.9rem; }
+    .key-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+    .key-diff code { display: block; margin-top: 3px; font-size: 0.78rem; overflow-wrap: anywhere; }
+
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 16px; }
+    .kpi-card { min-width: 0; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; }
+    .kpi-label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+    .kpi-value { display: block; font-size: 1.02rem; font-weight: 700; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .kpi-sub { display: block; margin-top: 3px; color: var(--muted); font-size: 0.76rem; overflow-wrap: anywhere; }
+    .kpi-sub.num-warn { color: var(--warn); font-weight: 600; }
+
+    .cmd-drawer { margin-top: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+    .cmd-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 10px 14px; cursor: pointer; list-style: none; user-select: none; }
+    .cmd-summary::-webkit-details-marker { display: none; }
+    .cmd-chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+    .cmd-label { margin-right: 2px; color: var(--muted); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+    .cmd-chip { padding: 2px 7px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px; font-size: 0.76rem; overflow-wrap: anywhere; }
+    .cmd-chip-count { background: var(--accent-bg); border-color: var(--accent-line); color: var(--accent); font-weight: 600; }
+    .cmd-toggle-hint { margin-left: auto; color: var(--accent); font-size: 0.76rem; font-weight: 600; white-space: nowrap; }
+    .cmd-drawer[open] .when-closed, .cmd-drawer:not([open]) .when-open { display: none; }
+    .cmd-raw { margin: 0; padding: 12px 14px; border-top: 1px solid var(--line); background: #f4f6f9; max-height: 280px; overflow: auto; user-select: all; white-space: pre-wrap; word-break: break-all; font-size: 0.78rem; line-height: 1.45; }
+
+    .sec-nav { position: sticky; top: 0; z-index: 10; display: flex; flex-wrap: wrap; gap: 6px; margin-top: 16px; padding: 10px 0; background: rgba(255, 255, 255, 0.94); backdrop-filter: blur(6px); border-bottom: 1px solid var(--line); }
+    .nav-chip { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; color: var(--ink-2); text-decoration: none; font-size: 0.76rem; font-weight: 600; }
+    .nav-chip:hover, .nav-chip:focus-visible { border-color: var(--accent); color: var(--accent); }
+    .nav-chip.has-warn { background: var(--warn-bg); border-color: var(--warn-line); color: var(--warn); }
+    .chip-count { color: var(--muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+    .nav-chip.has-warn .chip-count { color: var(--warn); }
+
+    .sec-card { margin-top: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); scroll-margin-top: 96px; }
+    .sec-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; background: var(--surface-2); border-radius: 8px; cursor: pointer; list-style: none; user-select: none; }
+    .sec-header::-webkit-details-marker { display: none; }
+    .sec-card[open] > .sec-header { border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; }
+    .sec-title-group { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+    .sec-title { font-size: 1rem; }
+    .sec-sub { color: var(--muted); font-size: 0.8rem; }
+    .sec-caret { width: 14px; flex: none; color: var(--muted); }
+    .sec-caret::before { content: "▸"; display: inline-block; transition: transform 0.15s ease; }
+    .sec-card[open] > .sec-header .sec-caret::before { transform: rotate(90deg); }
+    details.sec-card:target > .sec-header .sec-caret::before { transform: rotate(90deg); }
+    .sec-badges { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
+    .sec-body { padding: 12px 16px 16px; }
+
+    .badge { padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .badge-neutral { background: #eef2f6; color: var(--ink-2); }
+    .badge-ok { background: var(--ok-bg); color: var(--ok); }
+    .badge-warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-line); }
+    .badge-info { background: var(--accent-bg); color: var(--accent); }
+
+    .tbl-wrap { width: 100%; overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    th, td { padding: 6px 10px; border-bottom: 1px solid var(--line-2); text-align: left; vertical-align: middle; }
+    th { color: var(--muted); background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; }
+    th:first-child, td:first-child { padding-left: 4px; }
+    th:last-child, td:last-child { padding-right: 4px; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: #f8fafd; }
+    tr.row-warn, tr.row-warn:hover { background: #fffcf2; }
+    .col-num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .col-hash { font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; font-size: 0.72rem; letter-spacing: -0.01em; white-space: nowrap; user-select: all; color: var(--ink-2); }
+    .col-path { min-width: 180px; word-break: break-word; overflow-wrap: break-word; }
+    .fs-meta { color: var(--muted); font-size: 0.76rem; white-space: nowrap; }
+    .group-row th { padding: 10px 6px 6px; background: #f1f5f9; color: var(--ink); font-size: 0.84rem; border-top: 1px solid var(--line); text-transform: none; letter-spacing: 0; }
+    .group-row:first-child th { border-top: 0; }
+    .group-row th .badge { margin-left: 6px; background: var(--surface); border: 1px solid var(--line); }
+
+    code, .mono { font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; font-size: 0.9em; }
+    .val-before { color: var(--muted); }
+    .val-after { color: var(--ink); font-weight: 600; }
+    .change-pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace; font-size: 0.78rem; white-space: nowrap; }
+    .change-pill.is-enabled { background: var(--accent-bg); color: var(--accent); border: 1px solid var(--accent-line); }
+    .change-pill.is-disabled { background: #f2f4f7; color: var(--ink-2); }
+    .num-applied { color: var(--ok); font-weight: 700; }
+    .num-warn { color: var(--warn); font-weight: 700; }
+    .num-zero, .empty { color: var(--faint); font-weight: 400; }
+    .muted { color: var(--muted); }
+
+    .meta-list { display: grid; gap: 6px; margin-bottom: 10px; }
+    .meta-row { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+    .meta-label { color: var(--muted); font-size: 0.72rem; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase; }
+    .meta-value { min-width: 0; overflow-wrap: anywhere; font-size: 0.86rem; }
+    .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin: 10px 0; }
+    .meta-grid > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+    .file-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .file-chip { padding: 2px 8px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px; font-size: 0.8rem; }
+    .cli-block { margin: 10px 0 0; padding: 10px 12px; background: #f4f6f9; border: 1px solid var(--line); border-radius: 6px; font-size: 0.82rem; overflow-x: auto; }
+    .section-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+    #output-integrity { margin-top: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); scroll-margin-top: 96px; }
+    .empty-state { color: var(--muted); font-size: 0.86rem; }
+
+    summary:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+    /* No-JS anchor navigation: reveal a collapsed section when it is targeted. */
+    details.sec-card:target > *:not(summary) { display: block; }
+    details.sec-card:target::details-content { content-visibility: visible; }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .sec-caret::before { transition: none; }
+    }
+
+    @media (max-width: 768px) {
+      body { padding: 0; }
+      main { border: 0; border-radius: 0; padding: 20px 16px; }
+      .report-header { gap: 10px; }
+      .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .kpi-card:first-child { grid-column: 1 / -1; }
+      .kpi-value, .kpi-sub { white-space: normal; overflow-wrap: anywhere; }
+      .sec-header { flex-wrap: wrap; }
+      .sec-badges { justify-content: flex-start; }
+      .sec-nav { flex-wrap: nowrap; overflow-x: auto; }
+      .nav-chip { flex: none; }
+      .key-diff { grid-template-columns: 1fr; }
+      .meta-row { grid-template-columns: 1fr; gap: 2px; }
+      .cmd-summary { align-items: flex-start; }
+      .cmd-toggle-hint { margin-left: 0; }
+      table { min-width: 100%; }
+    }
+
+    @media print {
+      html { scroll-behavior: auto; }
+      body { padding: 0; background: #fff; font-size: 11px; }
+      main { max-width: 100%; border: 0; border-radius: 0; padding: 0; }
+      .sec-nav, .cmd-toggle-hint { display: none !important; }
+      details::details-content { content-visibility: visible !important; }
+      details > *:not(summary) { display: block !important; }
+      .sec-card { break-inside: auto; }
+      .callout-warning, .kpi-grid, .cmd-drawer { break-inside: avoid; }
+      thead { display: table-header-group; }
+      tr { break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+      .sec-header { cursor: default; }
+      .cmd-raw { max-height: none; }
+    }
   </style>
 </head>
 <body>
@@ -341,12 +483,20 @@ const VERIFICATION_STATUS_PENDING: &str =
     "<p class='status pending' data-report-verification>Pending verification</p>";
 const VERIFICATION_STATUS_VERIFIED_PREFIX: &str =
     "<p class='status' data-report-verification data-verified-at='";
+
 fn output_integrity_section() -> String {
     let generator = esc(&crate::integrity::dynobox_generator_version());
     format!(
         r#"<section id='output-integrity' data-integrity-schema='dynobox.output_manifest' data-hash-algorithm='sha-256' data-generator='{generator}'>
-<div class='section-heading'><h2>Output integrity</h2></div>
-<p class='section-note'>Produced by <code>DynoBox {generator}</code>. A successful pipeline seals every tracked final output file, including this report, in <code>dynobox-manifest.json</code>. When the pipeline includes resign, the root <code>abl.elf</code> is intentionally excluded and the manifest records that policy. When a dedicated integrity key is configured, <code>dynobox-manifest.sig</code> authenticates those exact manifest bytes. Run <code>dynobox verify --input &lt;output&gt;</code> to detect modified, missing, or unexpected artifacts.</p>
+<div class="section-heading"><h2>Output integrity</h2><span class="badge badge-ok">SHA-256 sealed</span></div>
+<div class="meta-grid">
+<div><span class="meta-label">Generator</span><span class="meta-value"><code>DynoBox {generator}</code></span></div>
+<div><span class="meta-label">Manifest</span><span class="meta-value"><code>dynobox-manifest.json</code></span></div>
+<div><span class="meta-label">Signature</span><span class="meta-value"><code>dynobox-manifest.sig</code></span></div>
+<div><span class="meta-label">Policy</span><span class="meta-value"><code>abl.elf</code> excluded when resign runs</span></div>
+</div>
+<p class="empty-state">A successful pipeline seals every tracked final output file, including this report, in <code>dynobox-manifest.json</code>. When a dedicated integrity key is configured, <code>dynobox-manifest.sig</code> authenticates those exact manifest bytes.</p>
+<pre class="cli-block"><code>dynobox verify --input &lt;output&gt;</code></pre>
 </section>
 "#
     )
@@ -410,165 +560,639 @@ pub(crate) fn rewrite_report_output_dir(html: &str, output_dir: &Path) -> String
     rewritten
 }
 
-fn push_summary_item(out: &mut String, label: &str, value: &str, is_command: bool) {
-    out.push_str("<div class='summary-item'><span class='summary-label'>");
-    out.push_str(label);
-    out.push_str("</span><span class='summary-value");
-    if is_command {
-        out.push_str(" mono");
-    }
-    out.push_str("'>");
-    if label == "Output" {
-        out.push_str(OUTPUT_DIR_MARKER_START);
-    }
-    out.push_str(&esc(value));
-    if label == "Output" {
-        out.push_str(OUTPUT_DIR_MARKER_END);
+fn push_header(out: &mut String) {
+    out.push_str("<header class='report-header'>\n");
+    out.push_str("<div><p class='product'>DynoBox</p><h1>Pipeline report</h1></div>\n");
+    out.push_str(VERIFICATION_STATUS_PENDING);
+    out.push_str("\n</header>\n");
+}
+
+fn push_signing_key_callout(out: &mut String, change: &SigningKeyChange) {
+    out.push_str("<section class=\"callout-warning\" id=\"sec-signing-key\" aria-labelledby=\"signing-key-title\">\n");
+    out.push_str("<div class=\"callout-head\"><h2 id=\"signing-key-title\">Signing key changed</h2><span class=\"badge badge-warn\">! Action required</span></div>\n");
+    out.push_str(
+        "<p class=\"callout-body\">Use an <code>abl.elf</code> that trusts the new key.</p>\n",
+    );
+    out.push_str("<div class=\"key-diff\">\n");
+    out.push_str("<div><span class=\"meta-label\">OEM key</span><code class=\"val-before\">");
+    out.push_str(&esc(&change.old_pubkey_sha1));
+    out.push_str("</code></div>\n");
+    out.push_str("<div><span class=\"meta-label\">New key</span><code class=\"val-after\">");
+    out.push_str(&esc(&change.new_pubkey_sha1));
+    out.push_str("</code></div>\n");
+    out.push_str("</div>\n</section>\n");
+}
+
+fn push_kpi_strip(out: &mut String, report: &PipelineReport) {
+    out.push_str("<section class=\"kpi-grid\" aria-label=\"Run summary\">\n");
+
+    let stage = if report.command_kind.is_empty() {
+        "resign".to_string()
+    } else {
+        report.command_kind.clone()
+    };
+
+    out.push_str("<div class=\"kpi-card\"><span class=\"kpi-label\">Output</span><span class=\"kpi-value mono\">");
+    out.push_str(OUTPUT_DIR_MARKER_START);
+    out.push_str(&esc(display_name(&report.output_dir)));
+    out.push_str(OUTPUT_DIR_MARKER_END);
+    out.push_str("</span><span class=\"kpi-sub\">Stage: ");
+    out.push_str(&esc(&stage));
+    out.push_str("</span></div>\n");
+
+    let finished = if report.finished_at.is_empty() {
+        "—".to_string()
+    } else {
+        report.finished_at.replace('T', " ")
+    };
+    let duration = if report.started_unix > 0 && report.finished_unix >= report.started_unix {
+        Some(report.finished_unix - report.started_unix)
+    } else {
+        None
+    };
+    out.push_str("<div class=\"kpi-card\"><span class=\"kpi-label\">Completed</span><span class=\"kpi-value\">");
+    out.push_str(&esc(&finished));
+    out.push_str("</span><span class=\"kpi-sub\">");
+    if let Some(seconds) = duration {
+        out.push_str("Resign stage · ");
+        out.push_str(&esc(&format_duration(seconds)));
+    } else {
+        out.push_str("Resign stage");
     }
     out.push_str("</span></div>\n");
+
+    let lgsi_applied = report.lgsi.as_ref().map_or(0, |l| l.applied.len());
+    let debloat_hidden = report
+        .debloat
+        .as_ref()
+        .map_or(0, |d| d.partitions.iter().map(|p| p.removed).sum());
+    let overlays = report.overlay.as_ref().map_or(0, |o| o.files.len());
+    let spoof_files = report.spoof.as_ref().map_or(0, |s| s.files.len());
+    let system_changes = lgsi_applied + debloat_hidden + overlays + spoof_files;
+    out.push_str("<div class=\"kpi-card\"><span class=\"kpi-label\">System changes</span><span class=\"kpi-value\">");
+    let _ = write!(out, "{system_changes} items");
+    out.push_str("</span><span class=\"kpi-sub\">");
+    let mut parts = Vec::new();
+    if lgsi_applied > 0 {
+        parts.push(format!("{lgsi_applied}\u{00A0}LGSI"));
+    }
+    if debloat_hidden > 0 {
+        parts.push(format!("{debloat_hidden}\u{00A0}debloat"));
+    }
+    if overlays > 0 {
+        parts.push(format!("{overlays}\u{00A0}overlays"));
+    }
+    if spoof_files > 0 {
+        parts.push(format!("{spoof_files}\u{00A0}spoof"));
+    }
+    if parts.is_empty() {
+        out.push_str("No system changes");
+    } else {
+        out.push_str(&esc(&parts.join(" · ")));
+    }
+    out.push_str("</span></div>\n");
+
+    let (plus_applied, plus_skipped, plus_packages) = plus_totals(report.plus.as_ref());
+    out.push_str("<div class=\"kpi-card\"><span class=\"kpi-label\">Plus patches</span><span class=\"kpi-value\">");
+    if report.plus.is_some() {
+        let _ = write!(out, "{plus_applied} applied");
+    } else {
+        out.push('—');
+    }
+    out.push_str("</span><span class=\"kpi-sub");
+    if plus_skipped > 0 {
+        out.push_str(" num-warn");
+    }
+    out.push_str("\">");
+    if report.plus.is_some() {
+        let _ = write!(out, "{plus_packages} packages · {plus_skipped} skipped");
+    } else {
+        out.push_str("No .dbp patches");
+    }
+    out.push_str("</span></div>\n");
+
+    let key_changed = report.signing_key_change.is_some();
+    out.push_str("<div class=\"kpi-card\"><span class=\"kpi-label\">Signed &amp; integrity</span><span class=\"kpi-value\">");
+    if report.resigned_images.is_empty() {
+        out.push('—');
+    } else {
+        let _ = write!(out, "{} images", report.resigned_images.len());
+    }
+    out.push_str("</span><span class=\"kpi-sub");
+    if key_changed {
+        out.push_str(" num-warn");
+    }
+    out.push_str("\">");
+    if key_changed {
+        out.push_str("! Key changed · sealed");
+    } else if report.resigned_images.is_empty() {
+        out.push_str("No resigned images");
+    } else {
+        out.push_str("Manifest sealed");
+    }
+    out.push_str("</span></div>\n");
+
+    out.push_str("</section>\n");
+}
+
+fn plus_totals(plus: Option<&PlusRecord>) -> (usize, usize, usize) {
+    let Some(plus) = plus else {
+        return (0, 0, 0);
+    };
+    let applied = plus
+        .patches
+        .iter()
+        .flat_map(|patch| &patch.files)
+        .map(|file| file.ops_applied)
+        .sum();
+    let skipped = plus
+        .patches
+        .iter()
+        .flat_map(|patch| &patch.files)
+        .map(|file| file.ops_skipped)
+        .sum();
+    (applied, skipped, plus.patches.len())
+}
+
+fn push_command_drawer(out: &mut String, command_line: &str) {
+    let redacted = redact_command_line(command_line);
+    let summary = summarize_command(&redacted);
+    out.push_str("<details class=\"cmd-drawer\">\n<summary class=\"cmd-summary\">\n<div class=\"cmd-chips\">\n");
+    out.push_str("<span class=\"cmd-label\">Command</span>\n");
+
+    let mut chips = 0usize;
+    if !summary.program.is_empty() {
+        out.push_str("<code class=\"cmd-chip\">");
+        out.push_str(&esc(&summary.program));
+        if let Some(subcommand) = &summary.subcommand {
+            out.push(' ');
+            out.push_str(&esc(subcommand));
+        }
+        out.push_str("</code>\n");
+        chips += 1;
+    }
+    for positional in &summary.positionals {
+        if chips >= COMMAND_CHIP_LIMIT {
+            break;
+        }
+        out.push_str("<code class=\"cmd-chip\">");
+        out.push_str(&esc(positional));
+        out.push_str("</code>\n");
+        chips += 1;
+    }
+    for flag in &summary.flags {
+        if chips >= COMMAND_CHIP_LIMIT {
+            break;
+        }
+        if flag.count > 1 {
+            out.push_str("<span class=\"cmd-chip cmd-chip-count\">");
+            out.push_str(&esc(&flag.name));
+            let _ = write!(out, " ×{}", flag.count);
+            out.push_str("</span>\n");
+        } else {
+            out.push_str("<code class=\"cmd-chip\">");
+            out.push_str(&esc(&flag.name));
+            if let Some(value) = &flag.value {
+                out.push(' ');
+                out.push_str(&esc(value));
+            }
+            out.push_str("</code>\n");
+        }
+        chips += 1;
+    }
+    let hidden = summary.chip_count().saturating_sub(chips);
+    if hidden > 0 {
+        let _ = writeln!(out, "<span class=\"cmd-chip\">+{hidden} more</span>");
+    }
+
+    out.push_str("</div>\n<span class=\"cmd-toggle-hint\"><span class=\"when-closed\">Show full command</span><span class=\"when-open\">Hide full command</span> (");
+    let _ = write!(out, "{}", summary.chars);
+    out.push_str(" chars)</span>\n</summary>\n<pre class=\"cmd-raw mono\"><code>");
+    out.push_str(&esc(&redacted));
+    out.push_str("</code></pre>\n</details>\n");
+}
+
+const COMMAND_CHIP_LIMIT: usize = 14;
+
+struct CommandSummary {
+    program: String,
+    subcommand: Option<String>,
+    flags: Vec<CommandFlag>,
+    positionals: Vec<String>,
+    chars: usize,
+}
+
+impl CommandSummary {
+    fn chip_count(&self) -> usize {
+        let program = usize::from(!self.program.is_empty());
+        program + self.positionals.len() + self.flags.len()
+    }
+}
+
+struct CommandFlag {
+    name: String,
+    value: Option<String>,
+    count: usize,
+}
+
+fn summarize_command(command_line: &str) -> CommandSummary {
+    let tokens: Vec<&str> = command_line.split_whitespace().collect();
+    let mut program = String::new();
+    let mut subcommand = None;
+    let mut flags: Vec<CommandFlag> = Vec::new();
+    let mut positionals = Vec::new();
+    let mut index = 0usize;
+
+    if let Some(first) = tokens.first() {
+        program = (*first).to_string();
+        index = 1;
+    }
+    if index < tokens.len() && !tokens[index].starts_with('-') {
+        subcommand = Some(tokens[index].to_string());
+        index += 1;
+    }
+
+    while index < tokens.len() {
+        let token = tokens[index];
+        if token.starts_with('-') {
+            let (name, value) = if let Some(rest) = token.strip_prefix("--") {
+                match rest.split_once('=') {
+                    Some((name, value)) => (format!("--{name}"), Some(value.to_string())),
+                    None => {
+                        let next = tokens.get(index + 1).copied();
+                        if let Some(next) = next.filter(|next| !next.starts_with('-')) {
+                            index += 1;
+                            (format!("--{rest}"), Some(next.to_string()))
+                        } else {
+                            (format!("--{rest}"), None)
+                        }
+                    }
+                }
+            } else {
+                (token.to_string(), None)
+            };
+
+            if let Some(existing) = flags.iter_mut().find(|flag| flag.name == name) {
+                existing.count += 1;
+                if existing.value.is_none() {
+                    existing.value = value;
+                }
+            } else {
+                flags.push(CommandFlag {
+                    name,
+                    value,
+                    count: 1,
+                });
+            }
+        } else {
+            positionals.push(token.to_string());
+        }
+        index += 1;
+    }
+
+    CommandSummary {
+        program,
+        subcommand,
+        flags,
+        positionals,
+        chars: command_line.chars().count(),
+    }
+}
+
+struct NavChip {
+    id: &'static str,
+    label: &'static str,
+    count: Option<String>,
+    warn: bool,
+}
+
+fn push_section_nav(out: &mut String, report: &PipelineReport) {
+    let mut chips: Vec<NavChip> = Vec::new();
+
+    if report.signing_key_change.is_some() {
+        chips.push(NavChip {
+            id: "sec-signing-key",
+            label: "Signing key",
+            count: Some("changed".to_string()),
+            warn: true,
+        });
+    }
+
+    let spl_count = [
+        report.boot_spl.as_ref(),
+        report.vendor_spl.as_ref(),
+        report.system_spl.as_ref(),
+    ]
+    .iter()
+    .filter(|record| record.is_some())
+    .count();
+    if spl_count > 0 {
+        chips.push(NavChip {
+            id: "sec-spl",
+            label: "Security patch",
+            count: Some(spl_count.to_string()),
+            warn: false,
+        });
+    }
+    if report.rollback.is_some() {
+        chips.push(NavChip {
+            id: "sec-rollback",
+            label: "Rollback index",
+            count: Some("1".to_string()),
+            warn: false,
+        });
+    }
+    if let Some(debloat) = &report.debloat {
+        let hidden: usize = debloat.partitions.iter().map(|p| p.removed).sum();
+        let not_found: usize = debloat.partitions.iter().map(|p| p.not_found).sum();
+        chips.push(NavChip {
+            id: "sec-debloat",
+            label: "Debloat",
+            count: Some(if not_found > 0 {
+                format!("{hidden} hidden · {not_found} missing")
+            } else {
+                format!("{hidden} hidden")
+            }),
+            warn: not_found > 0,
+        });
+    }
+    if let Some(spoof) = &report.spoof {
+        chips.push(NavChip {
+            id: "sec-spoof",
+            label: "Per-app spoof",
+            count: Some(format!("{} files", spoof.files.len())),
+            warn: false,
+        });
+    }
+    if let Some(plus) = &report.plus {
+        let (_, skipped, packages) = plus_totals(Some(plus));
+        chips.push(NavChip {
+            id: "sec-plus",
+            label: "Plus patches",
+            count: Some(if skipped > 0 {
+                format!("{packages} pkgs · {skipped} skipped")
+            } else {
+                format!("{packages} pkgs")
+            }),
+            warn: skipped > 0,
+        });
+    }
+    if let Some(lgsi) = &report.lgsi {
+        chips.push(NavChip {
+            id: "sec-lgsi",
+            label: "LGSI features",
+            count: Some(if lgsi.skipped.is_empty() {
+                lgsi.applied.len().to_string()
+            } else {
+                format!("{} · {} skipped", lgsi.applied.len(), lgsi.skipped.len())
+            }),
+            warn: !lgsi.skipped.is_empty(),
+        });
+    }
+    if let Some(overlay) = &report.overlay {
+        chips.push(NavChip {
+            id: "sec-overlays",
+            label: "Added overlays",
+            count: Some(overlay.files.len().to_string()),
+            warn: false,
+        });
+    }
+    if !report.resigned_images.is_empty() {
+        chips.push(NavChip {
+            id: "sec-signed",
+            label: "Signed images",
+            count: Some(report.resigned_images.len().to_string()),
+            warn: false,
+        });
+    }
+    chips.push(NavChip {
+        id: "output-integrity",
+        label: "Integrity",
+        count: None,
+        warn: false,
+    });
+
+    out.push_str("<nav class=\"sec-nav\" aria-label=\"Report sections\">\n");
+    for chip in &chips {
+        out.push_str("<a class=\"nav-chip");
+        if chip.warn {
+            out.push_str(" has-warn");
+        }
+        out.push_str("\" href=\"#");
+        out.push_str(chip.id);
+        out.push_str("\">");
+        out.push_str(&esc(chip.label));
+        if let Some(count) = &chip.count {
+            out.push_str(" <span class=\"chip-count\">");
+            out.push_str(&esc(count));
+            out.push_str("</span>");
+        }
+        out.push_str("</a>\n");
+    }
+    out.push_str("<a class=\"nav-chip\" href=\"#top\">Top</a>\n</nav>\n");
+}
+
+struct SectionShell {
+    id: &'static str,
+    title: &'static str,
+    subtitle: Option<String>,
+    badges: Vec<(String, &'static str)>,
+    open: bool,
+}
+
+fn push_section_open(out: &mut String, shell: &SectionShell) {
+    out.push_str("<details class=\"sec-card\" id=\"");
+    out.push_str(shell.id);
+    out.push('"');
+    if shell.open {
+        out.push_str(" open");
+    }
+    out.push_str(">\n<summary class=\"sec-header\">\n<div class=\"sec-title-group\">\n<span class=\"sec-caret\" aria-hidden=\"true\"></span>\n<h2 class=\"sec-title\">");
+    out.push_str(&esc(shell.title));
+    out.push_str("</h2>\n");
+    if let Some(subtitle) = &shell.subtitle {
+        out.push_str("<span class=\"sec-sub\">");
+        out.push_str(&esc(subtitle));
+        out.push_str("</span>\n");
+    }
+    out.push_str("</div>\n<div class=\"sec-badges\">\n");
+    for (text, class) in &shell.badges {
+        out.push_str("<span class=\"badge ");
+        out.push_str(class);
+        out.push_str("\">");
+        out.push_str(&esc(text));
+        out.push_str("</span>\n");
+    }
+    out.push_str("</div>\n</summary>\n<div class=\"sec-body\">\n");
+}
+
+fn push_section_close(out: &mut String) {
+    out.push_str("</div>\n</details>\n");
 }
 
 fn push_spl_section(out: &mut String, records: &[(&str, Option<&SplRecord>)]) {
-    out.push_str("<section><div class='section-heading'><h2>Security patch</h2></div>\n");
-    out.push_str("<table><tr><th>Image</th><th>From</th><th>To</th><th>Result</th></tr>\n");
-    for (image, record) in records {
-        let Some(spl) = record else {
-            continue;
-        };
+    let present: Vec<_> = records
+        .iter()
+        .filter_map(|(image, record)| record.map(|record| (*image, record)))
+        .collect();
+    let applied = present.iter().filter(|(_, record)| record.applied).count();
+    let skipped = present.len() - applied;
+    let mut badges = Vec::new();
+    if applied > 0 {
+        badges.push((format!("✓ {applied} applied"), "badge-ok"));
+    }
+    if skipped > 0 {
+        badges.push((format!("! {skipped} skipped"), "badge-warn"));
+    }
+    push_section_open(
+        out,
+        &SectionShell {
+            id: "sec-spl",
+            title: "Security patch",
+            subtitle: Some("Security patch level per image".to_string()),
+            badges,
+            open: true,
+        },
+    );
+    out.push_str("<div class=\"tbl-wrap\"><table>\n<thead><tr><th scope=\"col\">Image</th><th scope=\"col\">From</th><th scope=\"col\">To</th><th scope=\"col\">Result</th></tr></thead>\n<tbody>\n");
+    for (image, record) in present {
         out.push_str("<tr><td><code>");
-        out.push_str(image);
-        out.push_str("</code></td><td class='from'>");
-        out.push_str(&esc(spl.from.as_deref().unwrap_or("(unknown)")));
-        out.push_str("</td><td class='to'>");
-        out.push_str(&esc(&spl.to));
-        out.push_str("</td><td class='");
-        out.push_str(if spl.applied {
-            "applied'>Applied"
+        out.push_str(&esc(image));
+        out.push_str("</code></td><td class=\"val-before\">");
+        out.push_str(&esc(record.from.as_deref().unwrap_or("(unknown)")));
+        out.push_str("</td><td class=\"val-after\">");
+        out.push_str(&esc(&record.to));
+        out.push_str("</td><td class=\"");
+        out.push_str(if record.applied {
+            "num-applied\">Applied"
         } else {
-            "not-applied'>Skipped"
+            "num-warn\">Skipped"
         });
         out.push_str("</td></tr>\n");
     }
-    out.push_str("</table></section>\n");
+    out.push_str("</tbody>\n</table></div>\n");
+    push_section_close(out);
 }
 
-fn push_rollback_section(out: &mut String, rb: &RollbackRecord) {
-    out.push_str("<section><div class='section-heading'><h2>Rollback index</h2></div>\n");
-    out.push_str("<table><tr><th>From</th><th>To</th><th>Result</th></tr><tr>");
-    out.push_str("<td class='from'>");
-    out.push_str(&esc(&rb.from_iso));
-    out.push_str(" <span class='mono'>");
-    out.push_str(&rb.from_unix.to_string());
-    out.push_str("</span></td><td class='to'>");
-    out.push_str(&esc(&rb.to_iso));
-    out.push_str(" <span class='mono'>");
-    out.push_str(&rb.to_unix.to_string());
-    out.push_str("</span></td><td class='");
-    out.push_str(if rb.applied {
-        "applied'>Applied"
+fn push_rollback_section(out: &mut String, rollback: &RollbackRecord) {
+    let mut badges = Vec::new();
+    if rollback.applied {
+        badges.push(("✓ applied".to_string(), "badge-ok"));
     } else {
-        "not-applied'>Skipped"
+        badges.push(("! skipped".to_string(), "badge-warn"));
+    }
+    push_section_open(
+        out,
+        &SectionShell {
+            id: "sec-rollback",
+            title: "Rollback index",
+            subtitle: Some("AVB rollback index change".to_string()),
+            badges,
+            open: true,
+        },
+    );
+    out.push_str("<div class=\"tbl-wrap\"><table>\n<thead><tr><th scope=\"col\">From</th><th scope=\"col\">To</th><th scope=\"col\">Result</th></tr></thead>\n<tbody><tr><td>");
+    out.push_str(&esc(&rollback.from_iso));
+    out.push_str(" <span class=\"mono muted\">");
+    let _ = write!(out, "{}", rollback.from_unix);
+    out.push_str("</span></td><td>");
+    out.push_str(&esc(&rollback.to_iso));
+    out.push_str(" <span class=\"mono muted\">");
+    let _ = write!(out, "{}", rollback.to_unix);
+    out.push_str("</span></td><td class=\"");
+    out.push_str(if rollback.applied {
+        "num-applied\">Applied"
+    } else {
+        "num-warn\">Skipped"
     });
-    out.push_str("</td></tr></table></section>\n");
+    out.push_str("</td></tr></tbody>\n</table></div>\n");
+    push_section_close(out);
 }
 
-fn push_lgsi_section(out: &mut String, l: &LgsiRecord) {
-    if l.applied.is_empty() && l.skipped.is_empty() {
+fn push_debloat_section(out: &mut String, debloat: &DebloatRecord) {
+    if debloat.partitions.is_empty() {
         return;
     }
-    out.push_str("<section><div class='section-heading'><h2>LGSI features</h2></div>\n");
-    out.push_str("<table><tr><th>Feature</th><th>Change</th><th>Result</th><th>Note</th></tr>\n");
-    for change in &l.applied {
-        out.push_str("<tr><td><code>");
-        out.push_str(&esc(&change.name));
-        out.push_str("</code></td><td><span class='from'>");
-        out.push_str(if change.from { "true" } else { "false" });
-        out.push_str("</span> &rarr; <span class='to'>");
-        out.push_str(if change.to { "true" } else { "false" });
-        out.push_str("</span></td><td class='applied'>Applied</td><td></td></tr>\n");
+    let hidden: usize = debloat.partitions.iter().map(|p| p.removed).sum();
+    let not_found: usize = debloat.partitions.iter().map(|p| p.not_found).sum();
+    let mut badges = Vec::new();
+    if hidden > 0 {
+        badges.push((format!("✓ {hidden} hidden"), "badge-ok"));
     }
-    for skipped in &l.skipped {
-        out.push_str("<tr><td><code>");
-        out.push_str(&esc(&skipped.name));
-        out.push_str("</code></td><td>&mdash;</td><td class='skipped'>Skipped</td><td>");
-        out.push_str(&esc(&skipped.reason));
-        out.push_str("</td></tr>\n");
+    if not_found > 0 {
+        badges.push((format!("! {not_found} not found"), "badge-warn"));
     }
-    out.push_str("</table></section>\n");
-}
-
-fn push_signing_key_section(out: &mut String, sk: &SigningKeyChange) {
-    out.push_str("<section class='warning'><h2>Signing key changed</h2>");
-    out.push_str("<p>Use an <code>abl.elf</code> that trusts the new key.</p>");
-    out.push_str("<table><tr><th>OEM key</th><th>New key</th></tr><tr><td class='from'><code>");
-    out.push_str(&esc(&sk.old_pubkey_sha1));
-    out.push_str("</code></td><td class='to'><code>");
-    out.push_str(&esc(&sk.new_pubkey_sha1));
-    out.push_str("</code></td></tr></table></section>\n");
-}
-
-fn push_debloat_section(out: &mut String, db: &DebloatRecord) {
-    out.push_str("<section><div class='section-heading'><h2>Debloat</h2></div>\n");
-    out.push_str("<table><tr><th>Partition</th><th>Hidden</th><th>Not found</th></tr>\n");
-    for p in &db.partitions {
-        out.push_str("<tr><td><code>");
-        out.push_str(&esc(&p.partition));
-        out.push_str("</code></td><td class='to'>");
-        out.push_str(&p.removed.to_string());
-        out.push_str("</td><td class='skipped'>");
-        out.push_str(&p.not_found.to_string());
-        out.push_str("</td></tr>\n");
-    }
-    out.push_str("</table></section>\n");
-}
-
-fn push_overlay_section(out: &mut String, ov: &OverlayRecord) {
-    out.push_str("<section><div class='section-heading'><h2>Added overlays</h2></div>\n");
-    out.push_str(
-        "<table><tr><th>File</th><th>Size</th><th>SHA-256</th><th>Inode</th><th>Blocks</th></tr>\n",
+    push_section_open(
+        out,
+        &SectionShell {
+            id: "sec-debloat",
+            title: "Debloat",
+            subtitle: Some(format!("{} partitions", debloat.partitions.len())),
+            badges,
+            open: true,
+        },
     );
-    for f in &ov.files {
+    out.push_str("<div class=\"tbl-wrap\"><table>\n<thead><tr><th scope=\"col\">Partition</th><th scope=\"col\" class=\"col-num\">Hidden</th><th scope=\"col\" class=\"col-num\">Not found</th></tr></thead>\n<tbody>\n");
+    for partition in &debloat.partitions {
         out.push_str("<tr><td><code>");
-        out.push_str(&esc(&f.name));
-        out.push_str("</code></td><td class='to'>");
-        out.push_str(&f.size.to_string());
-        out.push_str("</td><td class='mono'>");
-        out.push_str(&esc(&f.sha256));
-        out.push_str("</td><td>");
-        out.push_str(&f.inode.to_string());
-        out.push_str("</td><td>");
-        out.push_str(&f.blocks.to_string());
+        out.push_str(&esc(&partition.partition));
+        out.push_str("</code></td><td class=\"col-num ");
+        out.push_str(if partition.removed > 0 {
+            "num-applied\">"
+        } else {
+            "num-zero\">—"
+        });
+        if partition.removed > 0 {
+            let _ = write!(out, "{}", partition.removed);
+        }
+        out.push_str("</td><td class=\"col-num ");
+        out.push_str(if partition.not_found > 0 {
+            "num-warn\">"
+        } else {
+            "num-zero\">—"
+        });
+        if partition.not_found > 0 {
+            let _ = write!(out, "{}", partition.not_found);
+        }
         out.push_str("</td></tr>\n");
     }
-    out.push_str("</table></section>\n");
+    out.push_str("</tbody>\n</table></div>\n");
+    push_section_close(out);
 }
 
 fn push_spoof_section(out: &mut String, spoof: &SpoofRecord) {
-    out.push_str("<section><div class='section-heading'><h2>Per-app spoof</h2></div>\n");
-    out.push_str("<p class='section-note'>Zygote-loaded payload installed into ");
-    out.push_str(&esc(&spoof.partition));
-    out.push_str(". Only the listed app processes see the override values.</p>\n");
-    out.push_str(
-        "<table><tr><th>Path</th><th>Size</th><th>SHA-256</th><th>Inode</th><th>Blocks</th></tr>\n",
-    );
-    for f in &spoof.files {
-        out.push_str("<tr><td><code>");
-        out.push_str(&esc(&f.path));
-        out.push_str("</code></td><td class='to'>");
-        out.push_str(&f.size.to_string());
-        out.push_str("</td><td class='mono'>");
-        out.push_str(&esc(&f.sha256));
-        out.push_str("</td><td>");
-        out.push_str(&f.inode.to_string());
-        out.push_str("</td><td>");
-        out.push_str(&f.blocks.to_string());
-        out.push_str("</td></tr>\n");
+    let mut badges = vec![(format!("{} files", spoof.files.len()), "badge-neutral")];
+    if spoof.apps > 0 || spoof.props > 0 {
+        badges.push((
+            format!("{} app · {} props", spoof.apps, spoof.props),
+            "badge-info",
+        ));
     }
-    out.push_str("</table><p class='section-note'>");
-    out.push_str(&spoof.apps.to_string());
-    out.push_str(" app(s), ");
-    out.push_str(&spoof.props.to_string());
-    out.push_str(" prop(s). Loaders: ");
+    push_section_open(
+        out,
+        &SectionShell {
+            id: "sec-spoof",
+            title: "Per-app spoof",
+            subtitle: Some(format!(
+                "Zygote-loaded payload in {}",
+                display_name(&spoof.partition)
+            )),
+            badges,
+            open: true,
+        },
+    );
+
+    out.push_str("<div class=\"meta-list\">\n");
+    if spoof.apps > 0 || spoof.props > 0 {
+        out.push_str("<div class=\"meta-row\"><span class=\"meta-label\">Coverage</span><span class=\"meta-value\">");
+        let _ = write!(
+            out,
+            "{} app(s) · {} prop(s). Only the listed app processes see the override values.",
+            spoof.apps, spoof.props
+        );
+        out.push_str("</span></div>\n");
+    }
+    out.push_str("<div class=\"meta-row\"><span class=\"meta-label\">Loaders</span><span class=\"meta-value\">");
     if spoof.loaders.is_empty() {
         out.push_str("(none)");
     } else {
@@ -583,81 +1207,327 @@ fn push_spoof_section(out: &mut String, spoof: &SpoofRecord) {
             out.push(')');
         }
     }
-    out.push_str(". Legacy init: <code>");
+    out.push_str("</span></div>\n");
+    out.push_str("<div class=\"meta-row\"><span class=\"meta-label\">Legacy init</span><span class=\"meta-value\"><code>");
     out.push_str(&esc(&spoof.init_path));
     out.push_str("</code> (");
     out.push_str(&esc(&spoof.init_outcome));
-    out.push_str(")</p>\n");
+    out.push_str(")</span></div>\n");
     if !spoof.old_root_digest.is_empty() || !spoof.new_root_digest.is_empty() {
-        out.push_str("<p class='section-note'>dm-verity root digest: <code>");
+        out.push_str("<div class=\"meta-row\"><span class=\"meta-label\">dm-verity</span><span class=\"meta-value mono\">");
         out.push_str(&esc(&spoof.old_root_digest));
-        out.push_str("</code> &rarr; <code>");
+        out.push_str(" &rarr; ");
         out.push_str(&esc(&spoof.new_root_digest));
-        out.push_str("</code></p>\n");
+        out.push_str("</span></div>\n");
     }
-    out.push_str("</section>\n");
+    out.push_str("</div>\n");
+
+    if spoof.files.is_empty() {
+        out.push_str("<p class=\"empty-state\">No spoof payload files.</p>\n");
+    } else {
+        out.push_str("<div class=\"tbl-wrap\"><table>\n<thead><tr><th scope=\"col\">Path</th><th scope=\"col\" class=\"col-num\">Size (B)</th><th scope=\"col\">SHA-256</th><th scope=\"col\" class=\"col-num\">Fs meta</th></tr></thead>\n<tbody>\n");
+        for file in &spoof.files {
+            out.push_str("<tr><td class=\"col-path\"><code>");
+            out.push_str(&esc(&file.path));
+            out.push_str("</code></td><td class=\"col-num\">");
+            out.push_str(&format_u64(file.size));
+            out.push_str("</td><td class=\"col-hash\">");
+            out.push_str(&esc(&file.sha256));
+            out.push_str("</td><td class=\"col-num fs-meta\">");
+            let _ = write!(
+                out,
+                "{} · {} blk",
+                format_u64(u64::from(file.inode)),
+                format_u64(u64::from(file.blocks))
+            );
+            out.push_str("</td></tr>\n");
+        }
+        out.push_str("</tbody>\n</table></div>\n");
+    }
+    push_section_close(out);
 }
 
-fn push_plus_section(out: &mut String, pl: &PlusRecord) {
-    if pl.patches.is_empty() {
+fn push_plus_section(out: &mut String, plus: &PlusRecord) {
+    if plus.patches.is_empty() {
         return;
     }
-    out.push_str("<section><div class='section-heading'><h2>Plus patches</h2></div>\n");
-    out.push_str("<table><tr><th>Patch</th><th>Target</th><th>Applied</th><th>Skipped</th></tr>\n");
-    for patch in &pl.patches {
+    let (applied, skipped, packages) = plus_totals(Some(plus));
+    let skipped_targets = plus
+        .patches
+        .iter()
+        .flat_map(|patch| &patch.files)
+        .filter(|file| file.ops_skipped > 0)
+        .count();
+    let mut badges = vec![(format!("{packages} packages"), "badge-neutral")];
+    if applied > 0 {
+        badges.push((format!("✓ {applied} applied"), "badge-ok"));
+    }
+    if skipped > 0 {
+        badges.push((format!("! {skipped} skipped"), "badge-warn"));
+    }
+    push_section_open(
+        out,
+        &SectionShell {
+            id: "sec-plus",
+            title: "Plus patches",
+            subtitle: Some(format!("{skipped_targets} targets with skips")),
+            badges,
+            open: false,
+        },
+    );
+    out.push_str("<div class=\"tbl-wrap\"><table>\n<thead><tr><th scope=\"col\">Target</th><th scope=\"col\" class=\"col-num\">Applied</th><th scope=\"col\" class=\"col-num\">Skipped</th></tr></thead>\n<tbody>\n");
+    for patch in &plus.patches {
+        let patch_applied: usize = patch.files.iter().map(|file| file.ops_applied).sum();
+        let patch_skipped: usize = patch.files.iter().map(|file| file.ops_skipped).sum();
+        out.push_str("<tr class=\"group-row\"><th colspan=\"3\" scope=\"colgroup\"><code>");
+        out.push_str(&esc(&patch.name));
+        out.push_str("</code> <span class=\"badge badge-neutral\">");
+        out.push_str(&esc(display_name(&patch.source)));
+        out.push_str("</span> ");
         if patch.files.is_empty() {
-            out.push_str("<tr><td><code>");
-            out.push_str(&esc(&patch.name));
-            out.push_str("</code> <span class='mono'>");
-            out.push_str(&esc(display_name(&patch.source)));
-            out.push_str(
-                "</span></td><td class='empty'>No matching files</td><td>0</td><td>0</td></tr>\n",
+            out.push_str("<span class=\"badge badge-neutral\">No matching files</span>");
+        } else {
+            out.push_str("<span class=\"badge badge-neutral\">");
+            let _ = write!(
+                out,
+                "{} targets · {} applied · {} skipped",
+                patch.files.len(),
+                patch_applied,
+                patch_skipped
             );
-            continue;
+            out.push_str("</span>");
         }
-        for f in &patch.files {
-            out.push_str("<tr><td><code>");
-            out.push_str(&esc(&patch.name));
-            out.push_str("</code> <span class='mono'>");
-            out.push_str(&esc(display_name(&patch.source)));
-            out.push_str("</span></td><td><code>");
-            out.push_str(&esc(&f.partition));
-            out.push_str(" / ");
-            out.push_str(&esc(display_name(&f.file)));
-            out.push_str("</code>");
-            if f.ops_applied == 0 && f.ops_skipped > 0 {
-                out.push_str("<br><span class='empty'>Target found; no operations applied</span>");
+        out.push_str("</th></tr>\n");
+
+        for file in &patch.files {
+            let warn = file.ops_skipped > 0;
+            out.push_str("<tr");
+            if warn {
+                out.push_str(" class=\"row-warn\"");
             }
-            out.push_str("</td><td class='");
-            out.push_str(if f.ops_applied > 0 { "to'>" } else { "empty'>" });
-            out.push_str(&f.ops_applied.to_string());
-            out.push_str("</td><td class='");
-            out.push_str(if f.ops_skipped > 0 { "skipped'>" } else { "'>" });
-            out.push_str(&f.ops_skipped.to_string());
+            out.push('>');
+            out.push_str("<td class=\"col-path\"><code>");
+            out.push_str(&esc(&file.partition));
+            out.push_str(" / ");
+            out.push_str(&esc(display_name(&file.file)));
+            out.push_str("</code>");
+            if file.ops_applied == 0 && file.ops_skipped > 0 {
+                out.push_str(
+                    "<br><span class=\"empty\">Target found; no operations applied</span>",
+                );
+            }
+            out.push_str("</td><td class=\"col-num ");
+            if file.ops_applied > 0 {
+                out.push_str("num-applied\">");
+                let _ = write!(out, "{}", file.ops_applied);
+            } else if file.ops_skipped > 0 {
+                out.push_str("num-warn\">");
+                let _ = write!(out, "{}", file.ops_applied);
+            } else {
+                out.push_str("num-zero\">—");
+            }
+            out.push_str("</td><td class=\"col-num ");
+            if file.ops_skipped > 0 {
+                out.push_str("num-warn\">");
+                let _ = write!(out, "{}", file.ops_skipped);
+            } else {
+                out.push_str("num-zero\">—");
+            }
             out.push_str("</td></tr>\n");
         }
     }
-    out.push_str("</table></section>\n");
+    out.push_str("</tbody>\n</table></div>\n");
+    push_section_close(out);
+}
+
+fn push_lgsi_section(out: &mut String, lgsi: &LgsiRecord) {
+    if lgsi.applied.is_empty() && lgsi.skipped.is_empty() {
+        return;
+    }
+    let enabled = lgsi
+        .applied
+        .iter()
+        .filter(|change| !change.from && change.to)
+        .count();
+    let disabled = lgsi
+        .applied
+        .iter()
+        .filter(|change| change.from && !change.to)
+        .count();
+    let skipped = lgsi.skipped.len();
+    let has_reason = skipped > 0;
+    let mut badges = vec![(format!("✓ {} applied", lgsi.applied.len()), "badge-ok")];
+    if enabled > 0 {
+        badges.push((format!("{enabled} enabled"), "badge-info"));
+    }
+    if skipped > 0 {
+        badges.push((format!("! {skipped} skipped"), "badge-warn"));
+    }
+    push_section_open(
+        out,
+        &SectionShell {
+            id: "sec-lgsi",
+            title: "LGSI features",
+            subtitle: Some(format!("{disabled} disabled · {enabled} enabled")),
+            badges,
+            open: false,
+        },
+    );
+    out.push_str("<div class=\"tbl-wrap\"><table>\n<thead><tr><th scope=\"col\">Feature</th><th scope=\"col\">Change</th><th scope=\"col\">Result</th>");
+    if has_reason {
+        out.push_str("<th scope=\"col\">Reason</th>");
+    }
+    out.push_str("</tr></thead>\n<tbody>\n");
+
+    for skipped in &lgsi.skipped {
+        out.push_str("<tr><td><code>");
+        out.push_str(&esc(&skipped.name));
+        out.push_str("</code></td><td class=\"empty\">—</td><td class=\"num-warn\">Skipped</td>");
+        if has_reason {
+            out.push_str("<td>");
+            out.push_str(&esc(&skipped.reason));
+            out.push_str("</td>");
+        }
+        out.push_str("</tr>\n");
+    }
+    for change in &lgsi.applied {
+        out.push_str("<tr><td><code>");
+        out.push_str(&esc(&change.name));
+        out.push_str("</code></td><td>");
+        push_lgsi_change(out, change);
+        out.push_str("</td><td class=\"num-applied\">Applied</td>");
+        if has_reason {
+            out.push_str("<td class=\"empty\">—</td>");
+        }
+        out.push_str("</tr>\n");
+    }
+
+    out.push_str("</tbody>\n</table></div>\n");
+    push_section_close(out);
+}
+
+fn push_lgsi_change(out: &mut String, change: &LgsiChange) {
+    let from = if change.from { "true" } else { "false" };
+    let to = if change.to { "true" } else { "false" };
+    out.push_str("<span class=\"change-pill");
+    if !change.from && change.to {
+        out.push_str(" is-enabled");
+    } else if change.from && !change.to {
+        out.push_str(" is-disabled");
+    }
+    out.push_str("\">");
+    out.push_str(from);
+    out.push_str(" &rarr; <strong>");
+    out.push_str(to);
+    out.push_str("</strong></span>");
+}
+
+fn push_overlay_section(out: &mut String, overlay: &OverlayRecord) {
+    let total: u64 = overlay.files.iter().map(|file| file.size).sum();
+    let mut badges = vec![(format!("{} files", overlay.files.len()), "badge-neutral")];
+    if total > 0 {
+        badges.push((format_bytes(total), "badge-neutral"));
+    }
+    push_section_open(
+        out,
+        &SectionShell {
+            id: "sec-overlays",
+            title: "Added overlays",
+            subtitle: Some(format!(
+                "Static RRO APKs in {}",
+                display_name(&overlay.partition)
+            )),
+            badges,
+            open: false,
+        },
+    );
+    if overlay.files.is_empty() {
+        out.push_str("<p class=\"empty-state\">No overlay files.</p>\n");
+    } else {
+        out.push_str("<div class=\"tbl-wrap\"><table>\n<thead><tr><th scope=\"col\">File</th><th scope=\"col\" class=\"col-num\">Size (B)</th><th scope=\"col\">SHA-256</th><th scope=\"col\" class=\"col-num\">Fs meta</th></tr></thead>\n<tbody>\n");
+        for file in &overlay.files {
+            out.push_str("<tr><td><code>");
+            out.push_str(&esc(&file.name));
+            out.push_str("</code></td><td class=\"col-num\">");
+            out.push_str(&format_u64(file.size));
+            out.push_str("</td><td class=\"col-hash\">");
+            out.push_str(&esc(&file.sha256));
+            out.push_str("</td><td class=\"col-num fs-meta\">");
+            let _ = write!(
+                out,
+                "{} · {} blk",
+                format_u64(u64::from(file.inode)),
+                format_u64(u64::from(file.blocks))
+            );
+            out.push_str("</td></tr>\n");
+        }
+        out.push_str("</tbody>\n</table></div>\n");
+    }
+    push_section_close(out);
 }
 
 fn push_resigned_section(out: &mut String, images: &[String]) {
     if images.is_empty() {
         return;
     }
-    out.push_str(
-        "<section><div class='section-heading'><h2>Signed images</h2><p class='section-note'>",
+    push_section_open(
+        out,
+        &SectionShell {
+            id: "sec-signed",
+            title: "Signed images",
+            subtitle: Some("Re-signed AVB images".to_string()),
+            badges: vec![(format!("{} images", images.len()), "badge-neutral")],
+            open: true,
+        },
     );
-    out.push_str(&images.len().to_string());
-    out.push_str(" images</p></div><p class='signed-images'>");
-    for (index, image) in images.iter().enumerate() {
-        if index > 0 {
-            out.push_str(" &middot; ");
-        }
-        out.push_str("<code>");
+    out.push_str("<div class=\"file-chips\">\n");
+    for image in images {
+        out.push_str("<code class=\"file-chip\">");
         out.push_str(&esc(display_name(image)));
-        out.push_str("</code>");
+        out.push_str("</code>\n");
     }
-    out.push_str("</p></section>\n");
+    out.push_str("</div>\n");
+    push_section_close(out);
+}
+
+fn format_u64(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let value = bytes as f64;
+    if value >= KIB * KIB * KIB {
+        format!("{:.2} GiB", value / (KIB * KIB * KIB))
+    } else if value >= KIB * KIB {
+        format!("{:.2} MiB", value / (KIB * KIB))
+    } else if value >= KIB {
+        format!("{:.1} KiB", value / KIB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_duration(total_seconds: u64) -> String {
+    if total_seconds < 60 {
+        format!("{total_seconds}s")
+    } else if total_seconds < 3600 {
+        format!("{}m {:02}s", total_seconds / 60, total_seconds % 60)
+    } else {
+        format!(
+            "{}h {:02}m",
+            total_seconds / 3600,
+            (total_seconds % 3600) / 60
+        )
+    }
 }
 
 fn display_name(value: &str) -> &str {
@@ -712,12 +1582,15 @@ fn esc(input: &str) -> String {
 /// `time`. Falls back to a Unix epoch seconds string if SystemTime
 /// dips below UNIX_EPOCH (e.g. clock-skewed embedded test rigs).
 pub(crate) fn now_iso8601() -> String {
-    let now = SystemTime::now()
+    format_unix_to_iso8601_utc(now_unix())
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format_unix_to_iso8601_utc(now)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn format_unix_to_iso8601_utc(unix_secs: u64) -> String {
@@ -758,6 +1631,25 @@ mod tests {
             format_unix_to_iso8601_utc(1777735845),
             "2026-05-02T15:30:45Z"
         );
+    }
+
+    #[test]
+    fn duration_formatting() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(59), "59s");
+        assert_eq!(format_duration(60), "1m 00s");
+        assert_eq!(format_duration(3599), "59m 59s");
+        assert_eq!(format_duration(3661), "1h 01m");
+    }
+
+    #[test]
+    fn number_formatting() {
+        assert_eq!(format_u64(0), "0");
+        assert_eq!(format_u64(999), "999");
+        assert_eq!(format_u64(1000), "1,000");
+        assert_eq!(format_u64(4_637_990), "4,637,990");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(4_637_990), "4.42 MiB");
     }
 
     #[test]
@@ -868,6 +1760,171 @@ mod tests {
         assert_eq!(html.matches("No matching files").count(), 1);
         assert!(html.contains("system / ZuiLauncher.apk"));
         assert!(html.contains("Target found; no operations applied"));
+    }
+
+    #[test]
+    fn lgsi_reason_column_only_when_skips_exist() {
+        let mut r = PipelineReport {
+            lgsi: Some(LgsiRecord {
+                applied: vec![LgsiChange {
+                    name: "A".to_string(),
+                    from: true,
+                    to: false,
+                }],
+                skipped: Vec::new(),
+                old_root_digest: String::new(),
+                new_root_digest: String::new(),
+            }),
+            ..Default::default()
+        };
+        let html = r.render_html();
+        assert!(!html.contains(">Reason</th>"));
+        assert!(html.contains("change-pill is-disabled"));
+
+        r.lgsi.as_mut().unwrap().skipped.push(LgsiSkip {
+            name: "B".to_string(),
+            reason: "missing".to_string(),
+        });
+        let html = r.render_html();
+        assert!(html.contains(">Reason</th>"));
+        assert!(html.contains("missing"));
+    }
+
+    #[test]
+    fn plus_patch_names_are_grouped_once() {
+        let r = PipelineReport {
+            plus: Some(PlusRecord {
+                patches: vec![PlusPatchRecord {
+                    name: "unlock-common".to_string(),
+                    source: "unlock-common.dbp".to_string(),
+                    files: vec![
+                        PlusFileRecord {
+                            partition: "system".to_string(),
+                            file: "a.apk".to_string(),
+                            ops_applied: 3,
+                            ops_skipped: 0,
+                            patched_entries: Vec::new(),
+                        },
+                        PlusFileRecord {
+                            partition: "system".to_string(),
+                            file: "b.apk".to_string(),
+                            ops_applied: 1,
+                            ops_skipped: 2,
+                            patched_entries: Vec::new(),
+                        },
+                    ],
+                }],
+                verity: Vec::new(),
+            }),
+            ..Default::default()
+        };
+        let html = r.render_html();
+        assert!(!html.contains(">Patch</th>"));
+        assert!(html.contains("group-row"));
+        assert!(html.contains("2 targets"));
+        assert_eq!(html.matches("unlock-common").count(), 2);
+        assert!(html.contains("row-warn"));
+        assert!(html.contains("col-num num-warn\">2"));
+    }
+
+    #[test]
+    fn zero_counters_use_muted_style() {
+        let r = PipelineReport {
+            debloat: Some(DebloatRecord {
+                partitions: vec![DebloatPartition {
+                    partition: "vendor".to_string(),
+                    removed: 4,
+                    not_found: 0,
+                    old_root_digest: String::new(),
+                    new_root_digest: String::new(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let html = r.render_html();
+        assert!(html.contains("col-num num-zero\">—"));
+        assert!(!html.contains("col-num num-warn\">0"));
+    }
+
+    #[test]
+    fn command_drawer_is_collapsed_and_preserves_full_command() {
+        let command = "dynobox apply --input image --add-overlay=a.apk --add-overlay=b.apk";
+        let r = PipelineReport {
+            command_line: command.to_string(),
+            ..Default::default()
+        };
+        let html = r.render_html();
+        assert!(html.contains("<details class=\"cmd-drawer\">"));
+        assert!(html.contains("--add-overlay ×2"));
+        assert!(html.contains(command));
+        assert!(!html.contains("<details class=\"cmd-drawer\" open>"));
+    }
+
+    #[test]
+    fn large_sections_start_collapsed() {
+        let r = PipelineReport {
+            lgsi: Some(LgsiRecord {
+                applied: vec![LgsiChange {
+                    name: "A".to_string(),
+                    from: true,
+                    to: false,
+                }],
+                skipped: Vec::new(),
+                old_root_digest: String::new(),
+                new_root_digest: String::new(),
+            }),
+            overlay: Some(OverlayRecord {
+                partition: "system".to_string(),
+                files: vec![OverlayFileRecord {
+                    name: "a.apk".to_string(),
+                    size: 1,
+                    sha256: "a".repeat(64),
+                    inode: 1,
+                    blocks: 1,
+                }],
+                old_root_digest: String::new(),
+                new_root_digest: String::new(),
+            }),
+            plus: Some(PlusRecord {
+                patches: vec![PlusPatchRecord {
+                    name: "p".to_string(),
+                    source: "p.dbp".to_string(),
+                    files: vec![PlusFileRecord {
+                        partition: "system".to_string(),
+                        file: "a".to_string(),
+                        ops_applied: 1,
+                        ops_skipped: 0,
+                        patched_entries: Vec::new(),
+                    }],
+                }],
+                verity: Vec::new(),
+            }),
+            debloat: Some(DebloatRecord {
+                partitions: vec![DebloatPartition {
+                    partition: "vendor".to_string(),
+                    removed: 1,
+                    not_found: 0,
+                    old_root_digest: String::new(),
+                    new_root_digest: String::new(),
+                }],
+            }),
+            ..Default::default()
+        };
+        let html = r.render_html();
+        assert!(html.contains("<details class=\"sec-card\" id=\"sec-lgsi\">"));
+        assert!(html.contains("<details class=\"sec-card\" id=\"sec-overlays\">"));
+        assert!(html.contains("<details class=\"sec-card\" id=\"sec-plus\">"));
+        assert!(html.contains("<details class=\"sec-card\" id=\"sec-debloat\" open>"));
+    }
+
+    #[test]
+    fn output_marker_survives_redesign() {
+        let r = PipelineReport {
+            output_dir: "/tmp/out".to_string(),
+            ..Default::default()
+        };
+        let html = r.render_html();
+        assert!(html.contains("<span data-report-output>out</span>"));
     }
 
     #[test]
