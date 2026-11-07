@@ -104,20 +104,27 @@ pub struct OverlayFileRecord {
     pub blocks: u32,
 }
 
-/// `--add-spoof` summary: the payload inserted into system.img, the
-/// `app_process64` dependency that loads it, and the legacy init cleanup.
+/// `--add-spoof` summary: the payload inserted into system.img, the executable
+/// dependencies that load it, and the legacy init cleanup.
 #[derive(Debug, Clone, Default)]
 pub struct SpoofRecord {
     pub partition: String,
     pub files: Vec<SpoofFileRecord>,
     pub apps: usize,
     pub props: usize,
-    pub app_process_path: String,
-    pub app_process_outcome: String,
+    pub loaders: Vec<SpoofLoaderRecord>,
     pub init_path: String,
     pub init_outcome: String,
     pub old_root_digest: String,
     pub new_root_digest: String,
+}
+
+/// One executable that maps the preload through its own `DT_NEEDED` list.
+#[derive(Debug, Clone)]
+pub struct SpoofLoaderRecord {
+    /// Path inside the partition image, e.g. `system/bin/app_process64`.
+    pub path: String,
+    pub outcome: String,
 }
 
 #[derive(Debug, Clone)]
@@ -561,11 +568,22 @@ fn push_spoof_section(out: &mut String, spoof: &SpoofRecord) {
     out.push_str(&spoof.apps.to_string());
     out.push_str(" app(s), ");
     out.push_str(&spoof.props.to_string());
-    out.push_str(" prop(s). Loader: <code>");
-    out.push_str(&esc(&spoof.app_process_path));
-    out.push_str("</code> (");
-    out.push_str(&esc(&spoof.app_process_outcome));
-    out.push_str("). Legacy init: <code>");
+    out.push_str(" prop(s). Loaders: ");
+    if spoof.loaders.is_empty() {
+        out.push_str("(none)");
+    } else {
+        for (index, loader) in spoof.loaders.iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            out.push_str("<code>");
+            out.push_str(&esc(&loader.path));
+            out.push_str("</code> (");
+            out.push_str(&esc(&loader.outcome));
+            out.push(')');
+        }
+    }
+    out.push_str(". Legacy init: <code>");
     out.push_str(&esc(&spoof.init_path));
     out.push_str("</code> (");
     out.push_str(&esc(&spoof.init_outcome));

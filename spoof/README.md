@@ -27,6 +27,7 @@ taken from the same directory.
 | `libspoof.so` | `system/lib64/libspoof.so` |
 | generated from the JSON | `system/etc/spoof/spoof.prop` |
 | `app_process64` edit | `libspoof.so` as the first `DT_NEEDED` entry of `system/bin/app_process64` |
+| `bootanimation` edit | `libspoof.so` as the first `DT_NEEDED` entry of `system/bin/bootanimation`, when the image has it |
 | `init.zygote64.rc` cleanup | removes a legacy `LD_PRELOAD /system/lib64/libspoof.so` line from the `service zygote /system/bin/app_process64` block |
 
 `app_process64` is executed in a secure-exec context (`AT_SECURE=1`) on user
@@ -35,6 +36,10 @@ payload is therefore listed in the executable's own `DT_NEEDED` array, before
 `libandroid_runtime.so`, and the linker maps it regardless of `AT_SECURE`. The
 patch copies the dynamic and string tables into the writable `PT_LOAD` tail and
 keeps the file length unchanged, so no ext4 blocks are allocated.
+
+`bootanimation` is an init-native service, not a zygote child, and it resolves
+the hidden edition token itself to choose `bootanimation_mc.zip`. It gets the
+same dependency so the edition toggle reaches it too.
 
 The init cleanup removes the old line in place (padded with spaces) when an
 image still has one. Only the 64-bit zygote service is touched; an image without
@@ -75,6 +80,9 @@ ro.product.model=PLK110
   entry, before `libandroid_runtime.so`. The library then replaces
   `AndroidRuntime::startReg` and registers a replacement for
   `ZygoteInit.nativeZygoteInit`, which runs in every app process after fork.
+- `bootanimation` carries the same `DT_NEEDED` entry. It is started by init
+  rather than forked from zygote, so it is the only way the edition alias
+  reaches the boot animation selection.
 - It reads `/proc/self/cmdline`, matches the entry, mirrors the matching
   `ro.*` values onto `android.os.Build` fields, and answers
   `__system_property_get` / `__system_property_read_callback` from the same map
@@ -83,6 +91,11 @@ ro.product.model=PLK110
   `persist.sys.config.model_cust` is `1`; any other value returns the real
   factory token, which is what the developer-options "device compatibility
   test mode" toggle writes (`patches/unlock-wuji.dbp` surfaces the row).
+  No prop file defines that token on A17, and `android.os.SystemProperties`
+  resolves a key with `__system_property_find` before it reads a value, so the
+  library interposes `__system_property_find` as well and reports a synthetic
+  `prop_info` for the token. Interposing only the read functions never fires
+  for a property that does not exist.
 
 ## Build
 

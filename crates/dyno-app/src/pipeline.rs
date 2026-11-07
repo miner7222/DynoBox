@@ -27,7 +27,8 @@ use crate::report::{
     PlusPatchRecord as ReportPlusPatchRecord, PlusRecord as ReportPlusRecord,
     RollbackRecord as ReportRollbackRecord, SigningKeyChange as ReportSigningKeyChange,
     SplRecord as ReportSplRecord, SpoofFileRecord as ReportSpoofFileRecord,
-    SpoofRecord as ReportSpoofRecord, format_unix_to_iso8601_utc,
+    SpoofLoaderRecord as ReportSpoofLoaderRecord, SpoofRecord as ReportSpoofRecord,
+    format_unix_to_iso8601_utc,
 };
 use crate::spl_patch::SplMutationOutcome;
 use crate::system_spl::{
@@ -2929,10 +2930,11 @@ where
 
 /// `--add-spoof`: install the preload into `system.img` - the `libspoof.so`
 /// library, the per-app config generated from the JSON list, and the
-/// `libspoof.so` `DT_NEEDED` entry in `system/bin/app_process64`. Legacy
-/// `LD_PRELOAD` lines in the 64-bit zygote service are removed because the
-/// secure-exec linker ignores them. The deferred verity pass regenerates
-/// system.img once and the resign loop re-signs vbmeta_system.img.
+/// `libspoof.so` `DT_NEEDED` entry in `system/bin/app_process64` and
+/// `system/bin/bootanimation`. Legacy `LD_PRELOAD` lines in the 64-bit zygote
+/// service are removed because the secure-exec linker ignores them. The
+/// deferred verity pass regenerates system.img once and the resign loop
+/// re-signs vbmeta_system.img.
 fn run_add_spoof<S>(
     out_dir: &Path,
     json_path: &Path,
@@ -2961,12 +2963,15 @@ where
     }
     if result.inserted.is_empty()
         && result.init.outcome == InitPatchOutcome::AlreadyClean
-        && result.app_process.outcome == AppProcessPatchOutcome::AlreadyPatched
+        && result
+            .executables
+            .iter()
+            .all(|entry| entry.outcome == AppProcessPatchOutcome::AlreadyPatched)
     {
         message(
             events,
             MessageLevel::Info,
-            "spoof: payload, app_process64 dependency and init cleanup already present; nothing to do"
+            "spoof: payload, loader dependencies and init cleanup already present; nothing to do"
                 .to_string(),
         );
         return Ok(());
@@ -2993,23 +2998,19 @@ where
         });
     }
 
-    match result.app_process.outcome {
-        AppProcessPatchOutcome::Patched => message(
-            events,
-            MessageLevel::Info,
-            format!(
-                "spoof: added {LIB_NAME} to {} (DT_NEEDED)",
-                result.app_process.path
+    for executable in &result.executables {
+        match executable.outcome {
+            AppProcessPatchOutcome::Patched => message(
+                events,
+                MessageLevel::Info,
+                format!("spoof: added {LIB_NAME} to {} (DT_NEEDED)", executable.path),
             ),
-        ),
-        AppProcessPatchOutcome::AlreadyPatched => message(
-            events,
-            MessageLevel::Info,
-            format!(
-                "spoof: {} already depends on {LIB_NAME}",
-                result.app_process.path
+            AppProcessPatchOutcome::AlreadyPatched => message(
+                events,
+                MessageLevel::Info,
+                format!("spoof: {} already depends on {LIB_NAME}", executable.path),
             ),
-        ),
+        }
     }
 
     match result.init.outcome {
@@ -3032,8 +3033,14 @@ where
         files,
         apps: payload.apps,
         props: payload.props,
-        app_process_path: result.app_process.path,
-        app_process_outcome: result.app_process.outcome.label().to_string(),
+        loaders: result
+            .executables
+            .iter()
+            .map(|entry| ReportSpoofLoaderRecord {
+                path: entry.path.clone(),
+                outcome: entry.outcome.label().to_string(),
+            })
+            .collect(),
         init_path: result.init.path,
         init_outcome: result.init.outcome.label().to_string(),
         old_root_digest: String::new(),

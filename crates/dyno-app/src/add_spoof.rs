@@ -26,10 +26,13 @@
 //! The preload library (`libspoof.so`, taken from the JSON file's directory)
 //! reads this file once in zygote, and only the matching app process applies
 //! the overrides. Installation inserts the library into `system/lib64/`, adds
-//! it as the first `DT_NEEDED` entry of `system/bin/app_process64`, and removes
-//! any legacy `LD_PRELOAD` line from the 64-bit zygote service. The dynamic
-//! linker ignores `LD_PRELOAD` when the zygote runs with `AT_SECURE=1`, which
-//! is why the executable's own dependency list is the load path.
+//! it as the first `DT_NEEDED` entry of `system/bin/app_process64` and
+//! `system/bin/bootanimation`, and removes any legacy `LD_PRELOAD` line from
+//! the 64-bit zygote service. The dynamic linker ignores `LD_PRELOAD` when the
+//! zygote runs with `AT_SECURE=1`, which is why the executable's own dependency
+//! list is the load path. `bootanimation` is an init-native service rather than
+//! a zygote child, and it resolves the hidden edition token itself, so it needs
+//! its own dependency to see the alias.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -49,6 +52,15 @@ pub const SPOOF_NAME: &str = "spoof.prop";
 pub const SPOOF_DIR: &str = "system/etc/spoof";
 pub const SPOOF_PATH: &str = "system/etc/spoof/spoof.prop";
 pub const APP_PROCESS_PATH: &str = "system/bin/app_process64";
+
+/// The boot animation runs as an init-native service, so it is not a zygote
+/// child and never loads the preload through `app_process64`. It resolves the
+/// hidden edition token itself to pick `bootanimation_mc.zip`.
+pub const BOOTANIMATION_PATH: &str = "system/bin/bootanimation";
+
+/// Executables that receive `libspoof.so` as their first `DT_NEEDED` entry.
+/// The first entry is required; the rest are patched when the image has them.
+pub const SPOOF_EXECUTABLES: &[&str] = &[APP_PROCESS_PATH, BOOTANIMATION_PATH];
 
 const MAX_JSON_BYTES: u64 = 1024 * 1024;
 const MAX_LIB_BYTES: u64 = 32 * 1024 * 1024;
@@ -101,7 +113,7 @@ pub struct SpoofApplyResult {
     pub inserted: Vec<InsertedFile>,
     pub skipped: Vec<String>,
     pub init: InitPatchResult,
-    pub app_process: AppProcessPatchResult,
+    pub executables: Vec<AppProcessPatchResult>,
 }
 
 pub fn load(path: &Path) -> Result<SpoofPayload> {
@@ -223,8 +235,12 @@ pub fn load_lib(json_path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Install the library, its config and the `app_process64` dependency into
+/// Install the library, its config and the loader dependencies into
 /// `system.img`.
+///
+/// [`SPOOF_EXECUTABLES`] receive `libspoof.so` as their first `DT_NEEDED`
+/// entry. The first one is required; the others are patched when the image
+/// carries them, so an image without a boot animation still installs.
 ///
 /// Existing payload files are compared with the requested bytes; an identical
 /// file is skipped so a second run against an already-patched image is a
@@ -238,26 +254,50 @@ pub fn apply(system_image: &Path, payload: &SpoofPayload, lib: &[u8]) -> Result<
         &["system", "etc", "spoof", SPOOF_NAME],
         "--add-spoof",
     )?;
-
-    let Some(app_process) = lookup_inode_at_path(&mut volume, &["system", "bin", "app_process64"])?
-    else {
-        bail!(
-            "--add-spoof: {APP_PROCESS_PATH} is missing; the 64-bit zygote executable is required"
-        );
-    };
-    if !app_process.is_file() {
-        bail!("--add-spoof: {APP_PROCESS_PATH} is not a regular file");
-    }
-    let (app_process_bytes, app_process_extents) = app_process
-        .open_read_with_extents(&mut volume)
-        .with_context(|| format!("--add-spoof: reading {APP_PROCESS_PATH}"))?;
     let block_size = volume.block_size;
-    let app_process_patched = elf_needed::add_needed(&app_process_bytes, LIB_NAME)
-        .with_context(|| format!("--add-spoof: patching {APP_PROCESS_PATH}"))?;
+
+    let mut skipped = Vec::new();
+    let mut executables = Vec::new();
+    let mut patched = Vec::new();
+    for (index, path) in SPOOF_EXECUTABLES.iter().enumerate() {
+        let components: Vec<&str> = path.split('/').collect();
+        let Some(inode) = lookup_inode_at_path(&mut volume, &components)? else {
+            if index == 0 {
+                bail!(
+                    "--add-spoof: {APP_PROCESS_PATH} is missing; the 64-bit zygote executable is required"
+                );
+            }
+            skipped.push(format!("{path} (not in this image)"));
+            continue;
+        };
+        if !inode.is_file() {
+            bail!("--add-spoof: {path} is not a regular file");
+        }
+        let (bytes, extents) = inode
+            .open_read_with_extents(&mut volume)
+            .with_context(|| format!("--add-spoof: reading {path}"))?;
+        match elf_needed::add_needed(&bytes, LIB_NAME)
+            .with_context(|| format!("--add-spoof: patching {path}"))?
+        {
+            Some(bytes) => {
+                patched.push((path.to_string(), bytes, extents));
+                executables.push(AppProcessPatchResult {
+                    path: path.to_string(),
+                    outcome: AppProcessPatchOutcome::Patched,
+                });
+            }
+            None => {
+                skipped.push(format!("{path} ({LIB_NAME} already present)"));
+                executables.push(AppProcessPatchResult {
+                    path: path.to_string(),
+                    outcome: AppProcessPatchOutcome::AlreadyPatched,
+                });
+            }
+        }
+    }
     drop(volume);
 
     let mut inserted = Vec::new();
-    let mut skipped = Vec::new();
 
     if let Some(existing) = lib_existing {
         if existing != lib {
@@ -297,27 +337,17 @@ pub fn apply(system_image: &Path, payload: &SpoofPayload, lib: &[u8]) -> Result<
         );
     }
 
-    let app_process = if let Some(patched) = app_process_patched {
-        write_via_extents(system_image, &patched, &app_process_extents, block_size)
-            .with_context(|| format!("--add-spoof: writing {APP_PROCESS_PATH}"))?;
-        AppProcessPatchResult {
-            path: APP_PROCESS_PATH.to_string(),
-            outcome: AppProcessPatchOutcome::Patched,
-        }
-    } else {
-        skipped.push(format!("{APP_PROCESS_PATH} ({LIB_NAME} already present)"));
-        AppProcessPatchResult {
-            path: APP_PROCESS_PATH.to_string(),
-            outcome: AppProcessPatchOutcome::AlreadyPatched,
-        }
-    };
+    for (path, bytes, extents) in &patched {
+        write_via_extents(system_image, bytes, extents, block_size)
+            .with_context(|| format!("--add-spoof: writing {path}"))?;
+    }
 
     let init = patch_init_scripts(system_image)?;
     Ok(SpoofApplyResult {
         inserted,
         skipped,
         init,
-        app_process,
+        executables,
     })
 }
 
@@ -510,12 +540,16 @@ mod tests {
         let lib = load_lib(&json).unwrap();
         let first = apply(&image, &payload, &lib).unwrap();
         assert_eq!(first.inserted.len(), 2);
-        assert!(first.skipped.is_empty());
+        let app_process = first
+            .executables
+            .iter()
+            .find(|entry| entry.path == APP_PROCESS_PATH)
+            .expect("app_process64 entry");
+        assert_eq!(app_process.outcome, AppProcessPatchOutcome::Patched);
         assert_eq!(
             first.init.outcome,
             crate::zygote::InitPatchOutcome::AlreadyClean
         );
-        assert_eq!(first.app_process.outcome, AppProcessPatchOutcome::Patched);
 
         let mut volume = open_ext4_volume(&image).unwrap();
         let rc = crate::ext4_helpers::lookup_inode_at_path(
@@ -540,15 +574,37 @@ mod tests {
                 .is_none()
         );
 
+        if let Some(bootanimation) = first
+            .executables
+            .iter()
+            .find(|entry| entry.path == BOOTANIMATION_PATH)
+        {
+            assert_eq!(bootanimation.outcome, AppProcessPatchOutcome::Patched);
+            let binary = crate::ext4_helpers::lookup_inode_at_path(
+                &mut volume,
+                &["system", "bin", "bootanimation"],
+            )
+            .unwrap()
+            .expect("bootanimation");
+            let bytes = binary.open_read(&mut volume).unwrap();
+            assert!(
+                crate::elf_needed::add_needed(&bytes, LIB_NAME)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
         let second = apply(&image, &payload, &lib).unwrap();
         assert!(second.inserted.is_empty());
         assert_eq!(
             second.init.outcome,
             crate::zygote::InitPatchOutcome::AlreadyClean
         );
-        assert_eq!(
-            second.app_process.outcome,
-            AppProcessPatchOutcome::AlreadyPatched
+        assert!(
+            second
+                .executables
+                .iter()
+                .all(|entry| entry.outcome == AppProcessPatchOutcome::AlreadyPatched)
         );
     }
 

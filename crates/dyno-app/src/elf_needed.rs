@@ -4,6 +4,8 @@
 //! dynamic linker ignores the `LD_PRELOAD` that the zygote service sets. Adding
 //! the preload library to the executable's own `DT_NEEDED` list makes the
 //! linker map it before `libandroid_runtime.so`, independent of `AT_SECURE`.
+//! The same in-place patch gives init-native executables such as
+//! `bootanimation`, which never runs through the zygote, the preload too.
 //!
 //! The patch keeps the file length unchanged. It copies the dynamic table and
 //! the string table into the zero-filled tail of the writable `PT_LOAD` that
@@ -740,6 +742,21 @@ mod tests {
     fn patches_real_app_process64_when_env_set() {
         let input = crate::test_fixtures::env("DYNOBOX_TEST_APP_PROCESS64");
         let output = crate::test_fixtures::env("DYNOBOX_TEST_APP_PROCESS64_OUT");
+        let bytes = std::fs::read(&input).unwrap();
+        let patched = add_needed(&bytes, NEEDED).unwrap().expect("patched");
+        assert_eq!(patched.len(), bytes.len());
+        assert!(add_needed(&patched, NEEDED).unwrap().is_none());
+        std::fs::write(&output, patched).unwrap();
+    }
+
+    /// `bootanimation` is a small executable whose only writable `PT_LOAD`
+    /// carries the dynamic table plus a zero-filled tail; the same in-place
+    /// patch has to fit there.
+    #[test]
+    #[ignore = "fixture: set DYNOBOX_TEST_BOOTANIMATION and DYNOBOX_TEST_BOOTANIMATION_OUT"]
+    fn patches_real_bootanimation_when_env_set() {
+        let input = crate::test_fixtures::env("DYNOBOX_TEST_BOOTANIMATION");
+        let output = crate::test_fixtures::env("DYNOBOX_TEST_BOOTANIMATION_OUT");
         let bytes = std::fs::read(&input).unwrap();
         let patched = add_needed(&bytes, NEEDED).unwrap().expect("patched");
         assert_eq!(patched.len(), bytes.len());

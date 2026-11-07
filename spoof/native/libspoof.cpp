@@ -16,7 +16,9 @@
 //
 // The library also answers reads of ro.vendor.config.lgsi.customize.usage from
 // persist.sys.config.model_cust, which is how the developer-options edition
-// toggle switches the factory customize token without touching persist.
+// toggle switches the factory customize token without touching persist. That
+// token has no entry in any prop file, so `__system_property_find` is
+// interposed as well: lookups must succeed for the read hooks to be reached.
 //
 // Build with the Android NDK:
 //   ./build.sh
@@ -45,7 +47,8 @@ constexpr const char* kSpoofPath = "/system/etc/spoof/spoof.prop";
 constexpr size_t kMaxSpoofBytes = 1024 * 1024;
 constexpr const char* kStartRegSymbol =
         "_ZN7android14AndroidRuntime8startRegEP7_JNIEnv";
-constexpr const char* kEditionProp = "ro.vendor.config.lgsi.customize.usage";
+constexpr char kEditionProp[] = "ro.vendor.config.lgsi.customize.usage";
+constexpr char kEditionAlias[] = "MINGCHAO";
 constexpr const char* kEditionSwitch = "persist.sys.config.model_cust";
 
 using PropMap = std::unordered_map<std::string, std::string>;
@@ -299,15 +302,43 @@ int raw_property_get(const char* name, char* value) {
 // persist.sys.config.model_cust is "1", reads of the factory customize token
 // answer "MINGCHAO". Any other value (including unset) returns the real
 // factory value, so turning the toggle off restores the factory edition.
-const char* edition_alias(const char* name) {
+bool edition_active(const char* name) {
     if (name == nullptr || strcmp(name, kEditionProp) != 0) {
-        return nullptr;
+        return false;
     }
     char value[PROP_VALUE_MAX] = {};
-    if (raw_property_get(kEditionSwitch, value) != 1 || value[0] != '1') {
-        return nullptr;
-    }
-    return "MINGCHAO";
+    return raw_property_get(kEditionSwitch, value) == 1 && value[0] == '1';
+}
+
+const char* edition_alias(const char* name) {
+    return edition_active(name) ? kEditionAlias : nullptr;
+}
+
+// A stand-in `prop_info` for the edition token. No prop file defines that
+// name on this platform, and Android's SystemProperties.get resolves a key
+// with `__system_property_find` *before* it ever reads a value: a null lookup
+// returns the caller's default without invoking
+// `__system_property_read_callback`. Interposing only the read path therefore
+// never fires for a property that does not exist, so `find` has to report it.
+// The layout mirrors bionic's `prop_info` (`PropInfoLayout` above), which keeps
+// the returned pointer safe for callers that read the serial or value inline.
+struct EditionPropInfo {
+    uint32_t serial;
+    char value[PROP_VALUE_MAX];
+    char name[sizeof(kEditionProp)];
+};
+
+const EditionPropInfo& edition_prop_info() {
+    // Serial value bits: bit 0 means "being updated", bit 1 marks a long
+    // property; keep both clear so the record looks like a settled short one.
+    static const EditionPropInfo info = [] {
+        EditionPropInfo prop = {};
+        prop.serial = 4;
+        std::strncpy(prop.value, kEditionAlias, sizeof(prop.value) - 1);
+        std::strncpy(prop.name, kEditionProp, sizeof(prop.name) - 1);
+        return prop;
+    }();
+    return info;
 }
 
 }  // namespace
@@ -355,6 +386,23 @@ _ZN7android14AndroidRuntime8startRegEP7_JNIEnv(JNIEnv* env) {
         LOGE("RegisterNatives(nativeZygoteInit) failed");
     }
     env->DeleteLocalRef(zygote);
+}
+
+extern "C" __attribute__((visibility("default"))) const prop_info*
+__system_property_find(const char* name) {
+    using RealFn = const prop_info* (*)(const char*);
+    static RealFn real = reinterpret_cast<RealFn>(
+            resolve_real("__system_property_find", "libc.so"));
+    // Report the edition token even though no prop file defines it; the
+    // aliased value itself comes from __system_property_read_callback below.
+    if (edition_active(name)) {
+        return reinterpret_cast<const prop_info*>(&edition_prop_info());
+    }
+    if (real == nullptr) {
+        LOGE("__system_property_find original not found");
+        return nullptr;
+    }
+    return real(name);
 }
 
 extern "C" __attribute__((visibility("default"))) int
