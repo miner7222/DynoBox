@@ -315,25 +315,6 @@ fn select_partitions<'a>(
         .collect())
 }
 
-/// A delta whose operations only copy source blocks can be left out of the
-/// payload when the whole partition is unchanged. This is the same contract as
-/// an explicit `--exclude`: the updated slot keeps its current image. Dynamic
-/// partitions are never skipped because their target slot is created from the
-/// dynamic partition metadata.
-fn should_skip_unchanged_partition(
-    old_size: u64,
-    new_size: u64,
-    old_hash: Option<[u8; 32]>,
-    new_hash: [u8; 32],
-    dynamic: bool,
-    operations: &[InstallOperation],
-) -> bool {
-    !dynamic
-        && old_size == new_size
-        && old_hash == Some(new_hash)
-        && operations.iter().all(|op| op.data_length.unwrap_or(0) == 0)
-}
-
 /// Worst-case Virtual A/B compression (VABC) COW footprint of one partition
 /// update, for `PartitionUpdate::estimate_cow_size`.
 ///
@@ -521,7 +502,6 @@ where
         );
     }
     let included = select_partitions(&reference.manifest, &request.exclude)?;
-    let dynamic = dynamic_partition_names(&reference.manifest);
     if !request.exclude.is_empty() {
         message(
             events,
@@ -651,23 +631,11 @@ where
                     },
                 )
                 .with_context(|| format!("diffing partition `{name}`"))?;
-                if should_skip_unchanged_partition(
-                    old_size,
-                    size,
-                    delta.old_hash,
-                    delta.new_hash,
-                    dynamic.contains(name.as_str()),
-                    &delta.operations,
-                ) {
-                    message(
-                        events,
-                        &format!(
-                            "ota {name}: source and target are identical; leaving it out \
-                             (the updated slot keeps its current image)"
-                        ),
-                    );
-                    continue;
-                }
+                // Always emit the partition, even when the source and target
+                // images are byte-identical. The payload installs into the
+                // inactive slot, which may still hold a different build; an
+                // omitted partition keeps that slot's older copy, and for the
+                // boot chain that hybrid is refused by the bootloader.
                 delta_totals.add(&delta.stats);
                 PartitionUpdate {
                     partition_name: name.clone(),
@@ -908,56 +876,26 @@ mod tests {
     }
 
     #[test]
-    fn skips_only_unchanged_non_dynamic_partitions() {
-        let copy = InstallOperation {
-            data_length: None,
+    fn delta_keeps_partitions_that_match_the_source() {
+        // `select_partitions` is the only filter an incremental payload
+        // applies. Matching the source build must not drop a partition: the
+        // payload installs into the inactive slot, which may still hold a
+        // different build, so an omitted boot partition would leave the older
+        // boot chain in place.
+        let partition = |name: &str| PartitionUpdate {
+            partition_name: name.into(),
             ..Default::default()
         };
-        let data = InstallOperation {
-            data_length: Some(1),
+        let manifest = DeltaArchiveManifest {
+            partitions: vec![partition("boot"), partition("init_boot"), partition("abl")],
             ..Default::default()
         };
-
-        assert!(should_skip_unchanged_partition(
-            8 << 20,
-            8 << 20,
-            Some([1u8; 32]),
-            [1u8; 32],
-            false,
-            std::slice::from_ref(&copy),
-        ));
-        assert!(!should_skip_unchanged_partition(
-            8 << 20,
-            8 << 20,
-            Some([1u8; 32]),
-            [1u8; 32],
-            true,
-            std::slice::from_ref(&copy),
-        ));
-        assert!(!should_skip_unchanged_partition(
-            8 << 20,
-            8 << 20,
-            Some([1u8; 32]),
-            [2u8; 32],
-            false,
-            std::slice::from_ref(&copy),
-        ));
-        assert!(!should_skip_unchanged_partition(
-            8 << 20,
-            4 << 20,
-            Some([1u8; 32]),
-            [1u8; 32],
-            false,
-            &[copy],
-        ));
-        assert!(!should_skip_unchanged_partition(
-            8 << 20,
-            8 << 20,
-            Some([1u8; 32]),
-            [1u8; 32],
-            false,
-            &[data],
-        ));
+        let names: Vec<String> = select_partitions(&manifest, &[])
+            .unwrap()
+            .into_iter()
+            .map(|p| p.partition_name.clone())
+            .collect();
+        assert_eq!(names, ["boot", "init_boot", "abl"]);
     }
 
     #[test]
