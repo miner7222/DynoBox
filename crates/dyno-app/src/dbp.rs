@@ -1406,59 +1406,120 @@ pub struct DbpFileResult {
 /// written back once. Returns one result per declared target so callers can
 /// distinguish a missing image path from a present file whose size-preserving
 /// operations did not land.
-pub fn apply_partition_ops(
+/// Apply every document's ops for `partition_name`, reading each target file
+/// once and writing it back once. Documents are still applied in order, so a
+/// later `.dbp` sees the bytes produced by the earlier ones; only the ext4
+/// read/write passes are shared. Returns one result list per document (same
+/// order as `docs`), each in the document's first-seen file order for this
+/// partition.
+pub fn apply_partition_ops<'a>(
     image_path: &Path,
     partition_name: &str,
-    docs: &[DbpDocument],
-) -> Result<Vec<DbpFileResult>> {
-    // Group ops by target file (preserving first-seen order).
+    docs: impl IntoIterator<Item = &'a DbpDocument>,
+) -> Result<Vec<Vec<DbpFileResult>>> {
+    let docs: Vec<&DbpDocument> = docs.into_iter().collect();
+    // Files in first-seen order across all documents, plus the per-document
+    // order the report expects.
     let mut files: Vec<String> = Vec::new();
-    for doc in docs {
+    let mut doc_files: Vec<Vec<String>> = docs.iter().map(|_| Vec::new()).collect();
+
+    for (doc_idx, doc) in docs.iter().enumerate() {
         for op in &doc.ops {
-            if op.partition() == partition_name && !files.iter().any(|f| f == op.file()) {
+            if op.partition() != partition_name {
+                continue;
+            }
+            if !files.iter().any(|f| f == op.file()) {
                 files.push(op.file().to_string());
+            }
+            if !doc_files[doc_idx].iter().any(|f| f == op.file()) {
+                doc_files[doc_idx].push(op.file().to_string());
             }
         }
     }
 
-    let mut results = Vec::new();
+    let mut by_doc_file: Vec<std::collections::BTreeMap<String, DbpFileResult>> = docs
+        .iter()
+        .map(|_| std::collections::BTreeMap::new())
+        .collect();
+    let boot_image = crate::bootimg::is_boot_image(image_path)?;
+
     for file in files {
-        let ops: Vec<&DbpOp> = docs
+        let docs_with_ops: Vec<(usize, Vec<&DbpOp>)> = docs
             .iter()
-            .flat_map(|d| d.ops.iter())
-            .filter(|op| op.partition() == partition_name && op.file() == file)
+            .enumerate()
+            .filter_map(|(doc_idx, doc)| {
+                let ops: Vec<&DbpOp> = doc
+                    .ops
+                    .iter()
+                    .filter(|op| op.partition() == partition_name && op.file() == file)
+                    .collect();
+                (!ops.is_empty()).then_some((doc_idx, ops))
+            })
             .collect();
-        let result = apply_ops_to_file(image_path, &file, &ops)?.unwrap_or(DbpFileResult {
-            file,
-            target_found: false,
-            ops_applied: 0,
-            ops_skipped: ops.len(),
-            patched_entries: Vec::new(),
-        });
-        results.push(result);
+
+        if boot_image {
+            for (doc_idx, ops) in docs_with_ops {
+                let result = apply_boot_image_ops(image_path, &file, &ops)?
+                    .unwrap_or_else(|| not_found_result(&file, ops.len()));
+                by_doc_file[doc_idx].insert(file.clone(), result);
+            }
+            continue;
+        }
+
+        let Some((mut bytes, extents, block_size)) = read_file_from_ext4(image_path, &file)? else {
+            for (doc_idx, ops) in docs_with_ops {
+                by_doc_file[doc_idx].insert(file.clone(), not_found_result(&file, ops.len()));
+            }
+            continue;
+        };
+        if extents.is_empty() {
+            for (doc_idx, ops) in docs_with_ops {
+                by_doc_file[doc_idx].insert(file.clone(), not_found_result(&file, ops.len()));
+            }
+            continue;
+        }
+
+        let mut any_applied = false;
+        for (doc_idx, ops) in docs_with_ops {
+            let has_raw_ops = ops.iter().any(|op| op.is_raw_file_op());
+            if has_raw_ops && !ops.iter().all(|op| op.is_raw_file_op()) {
+                return Err(anyhow!(
+                    "{file} mixes raw-file ops (text_replace, ota_cert) with archive patch ops; \
+                     split them into separate files"
+                ));
+            }
+            let result = if has_raw_ops {
+                apply_raw_bytes(&mut bytes, &file, &ops)?
+            } else {
+                apply_apk_bytes(&mut bytes, &file, &ops)?
+            };
+            any_applied |= result.ops_applied > 0;
+            by_doc_file[doc_idx].insert(file.clone(), result);
+        }
+        if any_applied {
+            write_via_extents(image_path, &bytes, &extents, block_size)?;
+        }
     }
-    Ok(results)
+
+    Ok(doc_files
+        .into_iter()
+        .zip(by_doc_file)
+        .map(|(order, mut by_file)| {
+            order
+                .into_iter()
+                .filter_map(|file| by_file.remove(&file))
+                .collect()
+        })
+        .collect())
 }
 
-fn apply_ops_to_file(
-    image_path: &Path,
-    file: &str,
-    ops: &[&DbpOp],
-) -> Result<Option<DbpFileResult>> {
-    if crate::bootimg::is_boot_image(image_path)? {
-        return apply_boot_image_ops(image_path, file, ops);
-    }
-    let has_raw_ops = ops.iter().any(|op| op.is_raw_file_op());
-    if has_raw_ops && !ops.iter().all(|op| op.is_raw_file_op()) {
-        return Err(anyhow!(
-            "{file} mixes raw-file ops (text_replace, ota_cert) with archive patch ops; \
-             split them into separate files"
-        ));
-    }
-    if has_raw_ops {
-        apply_raw_file_ops(image_path, file, ops)
-    } else {
-        apply_ops_to_apk(image_path, file, ops)
+fn not_found_result(file: &str, op_count: usize) -> DbpFileResult {
+    DbpFileResult {
+        file: file.to_string(),
+        target_found: false,
+        ops_applied: 0,
+        ops_skipped: op_count,
+        patched_entries: Vec::new(),
     }
 }
 
@@ -1485,27 +1546,15 @@ fn read_file_from_ext4(image_path: &Path, file: &str) -> Result<Option<Ext4FileC
     Ok(Some((bytes, extents, block_size)))
 }
 
-fn apply_raw_file_ops(
-    image_path: &Path,
-    file: &str,
-    ops: &[&DbpOp],
-) -> Result<Option<DbpFileResult>> {
-    let Some((mut bytes, extents, block_size)) = read_file_from_ext4(image_path, file)? else {
-        return Ok(None);
-    };
-    if extents.is_empty() {
-        return Ok(None);
-    }
-
-    let original = bytes.clone();
+fn apply_raw_bytes(bytes: &mut Vec<u8>, file: &str, ops: &[&DbpOp]) -> Result<DbpFileResult> {
     let mut op_landed = vec![false; ops.len()];
     for (i, op) in ops.iter().enumerate() {
         op_landed[i] = match op {
             DbpOp::TextReplace { from, to, all, .. } => {
-                patch_text_replacement(&mut bytes, from.as_bytes(), to.as_bytes(), *all) > 0
+                patch_text_replacement(bytes, from.as_bytes(), to.as_bytes(), *all) > 0
             }
             DbpOp::OtaCert { cert, .. } => {
-                replace_otacerts(&mut bytes, Path::new(cert))
+                replace_otacerts(bytes, Path::new(cert))
                     .with_context(|| format!("ota_cert on {file}"))?;
                 true
             }
@@ -1514,10 +1563,7 @@ fn apply_raw_file_ops(
     }
 
     let ops_applied = op_landed.iter().filter(|&&b| b).count();
-    if bytes != original {
-        write_via_extents(image_path, &bytes, &extents, block_size)?;
-    }
-    Ok(Some(DbpFileResult {
+    Ok(DbpFileResult {
         file: file.to_string(),
         target_found: true,
         ops_applied,
@@ -1527,7 +1573,7 @@ fn apply_raw_file_ops(
         } else {
             Vec::new()
         },
-    }))
+    })
 }
 
 /// `ota_cert` on a boot image (e.g. `recovery`): rewrite the bundle inside
@@ -1597,24 +1643,11 @@ fn patch_text_replacement(bytes: &mut [u8], from: &[u8], to: &[u8], all: bool) -
     count
 }
 
-/// Open `file` inside `image_path`, apply `ops` to supported STORED APK
-/// entries in place, recompute dex sums / zip CRCs as needed, and write the APK
-/// back over its ext4 extents. Returns `None` when the file is absent or no op
-/// landed.
-fn apply_ops_to_apk(
-    image_path: &Path,
-    file: &str,
-    ops: &[&DbpOp],
-) -> Result<Option<DbpFileResult>> {
-    let Some((mut apk_bytes, apk_extents, block_size)) = read_file_from_ext4(image_path, file)?
-    else {
-        return Ok(None);
-    };
-    if apk_extents.is_empty() {
-        return Ok(None);
-    }
-
-    let zip = parse_zip_central_directory(&apk_bytes)?;
+/// Apply `ops` to a target file already read from the partition image,
+/// recomputing dex sums / zip CRCs as needed. The caller writes the buffer
+/// back once after every document has run.
+fn apply_apk_bytes(apk_bytes: &mut [u8], file: &str, ops: &[&DbpOp]) -> Result<DbpFileResult> {
+    let zip = parse_zip_central_directory(apk_bytes)?;
     let dex_entries: Vec<_> = zip
         .entries
         .iter()
@@ -1675,8 +1708,8 @@ fn apply_ops_to_apk(
                 recompute_dex_header_sums(dex);
             }
             let new_crc = crc32_ieee(&apk_bytes[dex_off..dex_end]);
-            write_u32_le(&mut apk_bytes, entry.local_header_crc_offset, new_crc);
-            write_u32_le(&mut apk_bytes, entry.cd_crc_offset, new_crc);
+            write_u32_le(apk_bytes, entry.local_header_crc_offset, new_crc);
+            write_u32_le(apk_bytes, entry.cd_crc_offset, new_crc);
             patched_entries.push(entry.name.clone());
         }
     }
@@ -1687,7 +1720,7 @@ fn apply_ops_to_apk(
     for &entry_idx in &deflated_dex {
         let entry = &zip.entries[entry_idx];
         let data_end = entry.data_start + entry.compressed_size;
-        let Ok(descriptor) = crate::dex_patch::data_descriptor_offsets(&apk_bytes, entry, data_end)
+        let Ok(descriptor) = crate::dex_patch::data_descriptor_offsets(apk_bytes, entry, data_end)
         else {
             continue;
         };
@@ -1722,9 +1755,7 @@ fn apply_ops_to_apk(
     }
     // A patched dex that no longer compresses into its entry leaves every
     // deflated dex of the APK untouched, and those ops count as skipped.
-    if !rewrites.is_empty()
-        && crate::dex_patch::commit_entry_rewrites(&mut apk_bytes, &zip, rewrites)?
-    {
+    if !rewrites.is_empty() && crate::dex_patch::commit_entry_rewrites(apk_bytes, &zip, rewrites)? {
         for (landed, deflated) in op_landed.iter_mut().zip(deflated_landed) {
             *landed |= deflated;
         }
@@ -1755,8 +1786,8 @@ fn apply_ops_to_apk(
         }
         if arsc_modified {
             let new_crc = crc32_ieee(&apk_bytes[arsc_off..arsc_end]);
-            write_u32_le(&mut apk_bytes, entry.local_header_crc_offset, new_crc);
-            write_u32_le(&mut apk_bytes, entry.cd_crc_offset, new_crc);
+            write_u32_le(apk_bytes, entry.local_header_crc_offset, new_crc);
+            write_u32_le(apk_bytes, entry.cd_crc_offset, new_crc);
             patched_entries.push(entry.name.clone());
         }
     }
@@ -1772,7 +1803,7 @@ fn apply_ops_to_apk(
         };
         let template = parse_code_template(payload)
             .map_err(|message| anyhow!("zip_entry_replace `payload`: {message}"))?;
-        if force_zip_entry_replace(&mut apk_bytes, entries, &template.bytes)? {
+        if force_zip_entry_replace(apk_bytes, entries, &template.bytes)? {
             op_landed[i] = true;
             patched_entries.extend(entries.iter().cloned());
         }
@@ -1784,7 +1815,7 @@ fn apply_ops_to_apk(
             DbpOp::LayoutCollapse {
                 node_id, expected, ..
             } => (
-                force_axml_collapse(&mut apk_bytes, *node_id as u32, *expected)?,
+                force_axml_collapse(apk_bytes, *node_id as u32, *expected)?,
                 format!("axml-collapse:{node_id:#x}"),
             ),
             DbpOp::LayoutBackground {
@@ -1793,12 +1824,7 @@ fn apply_ops_to_apk(
                 expected,
                 ..
             } => (
-                force_axml_background(
-                    &mut apk_bytes,
-                    *node_id as u32,
-                    *drawable as u32,
-                    *expected,
-                )?,
+                force_axml_background(apk_bytes, *node_id as u32, *drawable as u32, *expected)?,
                 format!("axml-background:{node_id:#x}"),
             ),
             DbpOp::LayoutIntAttribute {
@@ -1809,7 +1835,7 @@ fn apply_ops_to_apk(
                 ..
             } => (
                 force_axml_int_attribute(
-                    &mut apk_bytes,
+                    apk_bytes,
                     *node_id as u32,
                     attribute,
                     *value as u32,
@@ -1822,7 +1848,7 @@ fn apply_ops_to_apk(
                 protection_level,
                 ..
             } => (
-                force_axml_permission_protection(&mut apk_bytes, permission, *protection_level)?,
+                force_axml_permission_protection(apk_bytes, permission, *protection_level)?,
                 format!("axml-permission:{permission}"),
             ),
             _ => (false, String::new()),
@@ -1834,16 +1860,13 @@ fn apply_ops_to_apk(
     }
 
     let ops_applied = op_landed.iter().filter(|&&b| b).count();
-    if ops_applied > 0 {
-        write_via_extents(image_path, &apk_bytes, &apk_extents, block_size)?;
-    }
-    Ok(Some(DbpFileResult {
+    Ok(DbpFileResult {
         file: file.to_string(),
         target_found: true,
         ops_applied,
         ops_skipped: ops.len() - ops_applied,
         patched_entries,
-    }))
+    })
 }
 
 /// Apply one op to one dex slice. Returns whether it landed at least one site.

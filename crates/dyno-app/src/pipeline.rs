@@ -3445,46 +3445,69 @@ where
             docs.push((source, doc));
         }
 
+        // Apply every document's ops per partition in one pass. Grouping by
+        // target file keeps each APK read/unzip/recompress to a single pass
+        // even when several `.dbp` files touch the same file; per-document
+        // op counts are reconstructed from the landed flags.
+        let mut results_by_partition: BTreeMap<String, Vec<Vec<crate::dbp::DbpFileResult>>> =
+            BTreeMap::new();
+        let mut boot_partitions: BTreeMap<String, bool> = BTreeMap::new();
+        let doc_refs: Vec<&crate::dbp::DbpDocument> = docs.iter().map(|(_, doc)| doc).collect();
+        for partition in crate::dbp::referenced_partitions(doc_refs.iter().copied()) {
+            let img_name = format!("{partition}.img");
+            if !out_dir.join(&img_name).exists() {
+                continue;
+            }
+            ensure_images_local(&mut local_inode_cache, out_dir, &[&img_name])?;
+            let img_path = out_dir.join(&img_name);
+            // A boot image ramdisk edit rewrites the image's own AVB hash
+            // descriptor, so verify and re-sign its still-valid VBMeta first;
+            // the resign loop re-authenticates it after.
+            let boot_image = crate::bootimg::is_boot_image(&img_path)?;
+            if boot_image {
+                prepare_vbmeta_mutation(
+                    &img_name,
+                    out_dir,
+                    config,
+                    effective_rollback,
+                    &mut local_inode_cache,
+                    &mut images,
+                    &mut prepared_vbmeta,
+                )?;
+            }
+            let per_doc =
+                crate::dbp::apply_partition_ops(&img_path, &partition, doc_refs.iter().copied())?;
+            let modified = per_doc.iter().flatten().any(|r| r.ops_applied > 0);
+            // Hash-footer images (a boot image ramdisk edit) already carry
+            // their new digest; only hashtree images need the deferred pass.
+            if modified
+                && crate::avb_descriptor::read_hashtree_params(&img_path, &partition)?.is_some()
+            {
+                dirty_partitions.insert(partition.clone(), img_path);
+            }
+            results_by_partition.insert(partition.clone(), per_doc);
+            boot_partitions.insert(partition, boot_image);
+        }
+
         let mut plus_patches: Vec<ReportPlusPatchRecord> = Vec::new();
-        for (source, doc) in &docs {
+        for (doc_idx, (source, doc)) in docs.iter().enumerate() {
             let mut file_records: Vec<ReportPlusFileRecord> = Vec::new();
             let mut target_files_found = 0usize;
             for partition in crate::dbp::referenced_partitions([doc]) {
                 let img_name = format!("{partition}.img");
-                if !out_dir.join(&img_name).exists() {
+                let Some(per_doc) = results_by_partition.get(&partition) else {
                     message(
                         events,
                         MessageLevel::Warning,
                         format!("patch {source}: {img_name} not found; skipped its ops"),
                     );
                     continue;
-                }
-                ensure_images_local(&mut local_inode_cache, out_dir, &[&img_name])?;
-                let img_path = out_dir.join(&img_name);
-                // A boot image ramdisk edit rewrites the image's own AVB
-                // hash descriptor, so verify and re-sign its still-valid
-                // VBMeta first; the resign loop re-authenticates it after.
-                let boot_image = crate::bootimg::is_boot_image(&img_path)?;
-                if boot_image {
-                    prepare_vbmeta_mutation(
-                        &img_name,
-                        out_dir,
-                        config,
-                        effective_rollback,
-                        &mut local_inode_cache,
-                        &mut images,
-                        &mut prepared_vbmeta,
-                    )?;
-                }
-                let results = crate::dbp::apply_partition_ops(
-                    &img_path,
-                    &partition,
-                    std::slice::from_ref(doc),
-                )?;
+                };
+                let results = &per_doc[doc_idx];
                 if results.is_empty() {
                     continue;
                 }
-                let mut partition_modified = false;
+                let boot_image = boot_partitions.get(&partition).copied().unwrap_or(false);
                 for r in results {
                     if !r.target_found {
                         message(
@@ -3521,23 +3544,14 @@ where
                                 r.file, r.ops_applied, r.ops_skipped
                             ),
                         );
-                        partition_modified = true;
                     }
                     file_records.push(ReportPlusFileRecord {
                         partition: partition.clone(),
-                        file: r.file,
+                        file: r.file.clone(),
                         ops_applied: r.ops_applied,
                         ops_skipped: r.ops_skipped,
-                        patched_entries: r.patched_entries,
+                        patched_entries: r.patched_entries.clone(),
                     });
-                }
-                // Hash-footer images (a boot image ramdisk edit) already
-                // carry their new digest; only hashtree images need the
-                // deferred dm-verity pass.
-                if partition_modified
-                    && crate::avb_descriptor::read_hashtree_params(&img_path, &partition)?.is_some()
-                {
-                    dirty_partitions.insert(partition.clone(), img_path);
                 }
             }
             if file_records.iter().all(|file| file.ops_applied == 0) {
