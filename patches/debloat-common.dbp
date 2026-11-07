@@ -680,6 +680,67 @@ proto = "(Landroid/content/Context;)Ljava/util/List;"
 from = "12 f4"
 to = "12 14"
 
+# Settings keeps two more copies of the subscription list. The ZUI
+# DualCardPrefsFragment builds the default-card selector from
+# getActiveSubscriptionInfoList() and gives slot 1 the "built-in data SIM"
+# label before adding it to mOptionList/mSubIdList. Skip that add for slot 1
+# (the physical SIM in slot 0 still takes the normal path); the selector then
+# only offers the real SIM.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/lenovo/settings/sim/DualCardPrefsFragment;"
+method = "initOptionList"
+proto = "()V"
+
+[[op.symbol]]
+name = "inner_data_card"
+kind = "field"
+class = "Lcom/zui/simsettings/R$string;"
+field = "inner_data_card"
+ty = "I"
+
+[[op.replacement]]
+from = "60 04 ${inner_data_card:u16}"
+to = "28 20 00 00"
+expected = 1
+
+# The AOSP network pages in the same APK gate their lists through
+# SubscriptionUtil.isSubscriptionVisible(). Its first check calls
+# isEmbeddedSubscriptionVisible(); the built-in data SIM is a non-embedded
+# LOCAL_SIM, so that gate returns true. Feed getSimSlotIndex() into the
+# existing boolean check instead: slot 0 (physical) stays visible, any
+# non-zero slot (the built-in slot 1) returns false. This covers
+# SubscriptionRepository.getSelectableSubscriptionInfoList() and the Compose
+# SimsSection without touching the telephony service.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiSettings/ZuiSettings.apk"
+class = "Lcom/android/settings/network/SubscriptionUtil;"
+method = "isSubscriptionVisible"
+proto = "(Landroid/telephony/SubscriptionManager;Landroid/content/Context;Landroid/telephony/SubscriptionInfo;)Z"
+
+[[op.symbol]]
+name = "is_embedded_visible"
+kind = "method"
+class = "Lcom/android/settings/network/SubscriptionUtil;"
+method = "isEmbeddedSubscriptionVisible"
+proto = "(Landroid/telephony/SubscriptionInfo;)Z"
+
+[[op.symbol]]
+name = "get_sim_slot_index"
+kind = "method"
+class = "Landroid/telephony/SubscriptionInfo;"
+method = "getSimSlotIndex"
+proto = "()I"
+
+[[op.replacement]]
+from = "71 10 ${is_embedded_visible:u16} 05 00 0a 01"
+to = "6e 10 ${get_sim_slot_index:u16} 05 00 0a 01"
+expected = 1
+
 # Call Settings keeps its own "Mark unknown number" switch (pref_mark_number),
 # shown unconditionally by both the regular and compat fragments. Its checked
 # state reads OperatorFunctionUtil.isEnableMarkNumber (setting

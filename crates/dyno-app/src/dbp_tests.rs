@@ -994,7 +994,7 @@ fn patches_dir() -> std::path::PathBuf {
 fn bundled_dbp_files_inventory() {
     let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
     assert_eq!(dc.name, "debloat-common");
-    assert_eq!(dc.ops.len(), 95);
+    assert_eq!(dc.ops.len(), 97);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
     assert_eq!(uc.ops.len(), 85);
@@ -1016,6 +1016,58 @@ fn bundled_dbp_files_inventory() {
     let fw = load_dbp(&patches_dir().join("fix-wuji.dbp")).expect("fix-wuji.dbp");
     assert_eq!(fw.name, "fix-wuji");
     assert_eq!(fw.ops.len(), 1);
+}
+
+/// The built-in data SIM is a non-embedded `LOCAL_SIM` on slot 1, so the
+/// embedded-only gate in AOSP Settings does not hide it. Both the ZUI card
+/// selector and the AOSP subscription repository must drop slot 1 while the
+/// physical SIM in slot 0 keeps working. Set `DYNOBOX_ZUISETTINGS_APK` to the
+/// pulled `com.android.settings` APK.
+#[test]
+#[ignore = "fixture: set DYNOBOX_ZUISETTINGS_APK"]
+fn bundled_debloat_builtin_sim_land_on_real_settings() {
+    fn land(apk: &[u8], zip: &crate::zip_util::ZipLayout, op: &DbpOp) -> usize {
+        let mut hits = 0usize;
+        for entry in zip.entries.iter().filter(|entry| {
+            entry.name.ends_with(".dex")
+                && entry.compression_method == 0
+                && !entry.uses_data_descriptor
+                && !entry.is_zip64
+                && entry.data_start + entry.compressed_size <= apk.len()
+        }) {
+            let mut dex = apk[entry.data_start..entry.data_start + entry.compressed_size].to_vec();
+            if apply_one_op(&mut dex, op).unwrap() {
+                hits += 1;
+            }
+        }
+        hits
+    }
+
+    let apk_path = crate::test_fixtures::env("DYNOBOX_ZUISETTINGS_APK");
+    let apk = std::fs::read(&apk_path).expect("read apk");
+    let zip = crate::zip_util::parse_zip_central_directory(&apk).expect("zip");
+    let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).unwrap();
+    let zui = dc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                if class == "Lcom/lenovo/settings/sim/DualCardPrefsFragment;"
+                    && method == "initOptionList")
+        })
+        .expect("ZUI card selector op");
+    let aosp = dc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                if class == "Lcom/android/settings/network/SubscriptionUtil;"
+                    && method == "isSubscriptionVisible")
+        })
+        .expect("AOSP visibility op");
+
+    assert_eq!(land(&apk, &zip, zui), 1, "ZUI card selector patch");
+    assert_eq!(land(&apk, &zip, aosp), 1, "AOSP visibility patch");
 }
 
 /// The qsap QAPE service is killed with SIGSYS when its seccomp policy omits lseek; reuse a comment line to add it without growing the file.
