@@ -1000,7 +1000,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(uc.ops.len(), 85);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 32);
+    assert_eq!(fc.ops.len(), 35);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 5);
@@ -1044,6 +1044,62 @@ fn bundled_fix_common_qsap_seccomp_repair() {
             assert!(to.starts_with("lseek: 1\n"));
         }
         other => panic!("unexpected qsap op: {other:?}"),
+    }
+}
+
+/// The older vendor policy misses two file reads the newer HAL clients use and labels the camera status property as vendor_default_prop, which coredomains cannot set.
+#[test]
+fn bundled_fix_common_vendor_sepolicy_repairs() {
+    let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+
+    let cil: Vec<_> = fc
+        .ops
+        .iter()
+        .filter(|op| {
+            matches!(op, DbpOp::TextReplace { file, .. }
+                if file == "etc/selinux/vendor_sepolicy.cil")
+        })
+        .collect();
+    assert_eq!(cil.len(), 2);
+    for op in cil {
+        match op {
+            DbpOp::TextReplace {
+                partition,
+                from,
+                to,
+                ..
+            } => {
+                assert_eq!(partition, "vendor");
+                assert_eq!(from.len(), to.len(), "size-preserving CIL edit");
+                assert!(to.starts_with("(allow "));
+                assert!(to.contains(" ;"));
+            }
+            other => panic!("unexpected vendor CIL op: {other:?}"),
+        }
+    }
+
+    let prop = fc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::TextReplace { file, .. }
+                if file == "etc/selinux/vendor_property_contexts")
+        })
+        .expect("camera status property context");
+    match prop {
+        DbpOp::TextReplace {
+            partition,
+            from,
+            to,
+            ..
+        } => {
+            assert_eq!(partition, "vendor");
+            assert_eq!(from.len(), to.len(), "size-preserving property edit");
+            assert!(
+                to.starts_with("vendor.lenovocamera.frontcamera.status u:object_r:system_prop:s0")
+            );
+        }
+        other => panic!("unexpected camera property op: {other:?}"),
     }
 }
 

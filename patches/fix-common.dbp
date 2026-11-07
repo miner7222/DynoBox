@@ -1564,3 +1564,37 @@ partition = "vendor"
 file = "etc/seccomp_policy/qsap_qapeservice.policy"
 from = "# added for atoll\n"
 to = "lseek: 1\n########\n"
+
+# The vendor policy predates two HAL accesses the newer framework expects:
+# - hal_lenovoperformance_default polls max_gpuclk as vendor_sysfs_kgsl, but
+#   the policy only grants read/write/open on vendor_sysfs_kgsl_gpuclk.
+# - vendor_hal_poweroptservice_qti reads DRM connector `enabled` nodes that
+#   are still labelled generic sysfs.
+# The generated CIL has no comment anchor, so replace two copies of a
+# six-times-repeated allow rule with the missing allow plus a `;` comment tail;
+# one duplicate of the original rule remains in the policy.
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "etc/selinux/vendor_sepolicy.cil"
+from = "(allow netutils_wrapper_202504 netutils_wrapper_exec_202504 (file (read getattr map execute open entrypoint)))\n"
+to = "(allow hal_lenovoperformance_default vendor_sysfs_kgsl (file (read open getattr))) ;xxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "etc/selinux/vendor_sepolicy.cil"
+from = "(allow netutils_wrapper_202504 netutils_wrapper_exec_202504 (file (read getattr map execute open entrypoint)))\n"
+to = "(allow vendor_hal_poweroptservice_qti sysfs_202504 (file (read open getattr))) ;xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n"
+
+# system_server sets vendor.lenovocamera.frontcamera.status, but the A16
+# vendor policy maps unmatched vendor.* properties to vendor_default_prop and
+# the platform neverallow forbids coredomains from setting that type. Map this
+# one status property to system_prop (which system_server may set) by
+# replacing the first 128-byte generated #line anchor.
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "etc/selinux/vendor_property_contexts"
+from = "#line 1 \"out/soong/.intermediates/system/sepolicy/contexts/vendor_property_contexts/android_common/wuji_prc_consumer_5G/newline\"\n"
+to = "vendor.lenovocamera.frontcamera.status u:object_r:system_prop:s0                                                                \n"
