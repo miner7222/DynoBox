@@ -1000,7 +1000,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(uc.ops.len(), 85);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 35);
+    assert_eq!(fc.ops.len(), 37);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 5);
@@ -1100,6 +1100,63 @@ fn bundled_fix_common_vendor_sepolicy_repairs() {
             );
         }
         other => panic!("unexpected camera property op: {other:?}"),
+    }
+}
+
+/// SystemUI inserts into the absent UE provider and queries the absent uhealth provider; the two ops drop those calls.
+#[test]
+fn bundled_fix_common_systemui_provider_repairs() {
+    let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+
+    let ue = fc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodNop { class, method, .. }
+                if class
+                    == "Lcom/android/wm/shell/guide/FreeFormDataCollection$$ExternalSyntheticLambda0;"
+                    && method == "run")
+        })
+        .expect("UE provider lambda nop");
+    match ue {
+        DbpOp::MethodNop {
+            partition,
+            file,
+            proto,
+            ..
+        } => {
+            assert_eq!(partition, "system_ext");
+            assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
+            assert_eq!(proto, "()V");
+        }
+        other => panic!("unexpected UE provider op: {other:?}"),
+    }
+
+    let aod = fc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                if class == "Lcom/android/systemui/aod/doze/view/LenovoViewClock$15;"
+                    && method == "doInBackground")
+        })
+        .expect("AOD uhealth call patch");
+    match aod {
+        DbpOp::MethodCodePatch {
+            partition,
+            file,
+            proto,
+            replacements,
+            ..
+        } => {
+            assert_eq!(partition, "system_ext");
+            assert_eq!(file, "priv-app/ZuiSystemUI/ZuiSystemUI.apk");
+            assert_eq!(proto, "([Ljava/lang/Object;)Ljava/lang/Object;");
+            assert_eq!(replacements.len(), 1);
+            assert_eq!(replacements[0].from.len(), replacements[0].to.len());
+            assert!(replacements[0].from.starts_with("6e 54 0f 04"));
+        }
+        other => panic!("unexpected AOD op: {other:?}"),
     }
 }
 
@@ -6216,8 +6273,8 @@ fn bundled_fix_common_aod_date_lands_on_real_apk() {
         .ops
         .iter()
         .find(|op| {
-            matches!(op, DbpOp::MethodCodePatch { class, .. }
-                    if class.contains("LenovoViewClock"))
+            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class.contains("LenovoViewClock") && method == "updateTime")
         })
         .expect("AOD date op");
     let apk = std::fs::read(&path).expect("read apk");
