@@ -486,30 +486,64 @@ fn compute_hash_tree(
 
     let mut last_level_output = Vec::new();
     while hash_src_size > block_size_usize {
-        let mut level_output = Vec::new();
-        let mut remaining = hash_src_size;
-        while remaining > 0 {
-            let data = if level_num == 0 {
-                let read_offset = (hash_src_size - remaining) as u64;
-                let block =
-                    read_padded_block_local(&mut image, read_offset, block_size_usize, image_size)?;
-                if let Some(cb) = progress.as_deref_mut() {
-                    cb(block_size as u64);
+        let block_count = hash_src_size.div_ceil(block_size_usize);
+        let mut level_output = Vec::with_capacity(block_count.saturating_mul(32 + digest_padding));
+        if level_num == 0 {
+            // Read the image in large batches. The original path issued a
+            // seek+read syscall per 4 KiB block, which dominated the walk on
+            // multi-GiB partitions; level 0 is ~all of the verity work.
+            const READ_BATCH_BYTES: usize = 4 * 1024 * 1024;
+            let buf_len = READ_BATCH_BYTES.min(hash_src_size.max(block_size_usize));
+            let mut buf = vec![0u8; buf_len];
+            let mut tail = vec![0u8; block_size_usize];
+            let mut offset = 0u64;
+            let mut remaining = hash_src_size as u64;
+            while remaining > 0 {
+                let chunk = usize::try_from(remaining.min(READ_BATCH_BYTES as u64))
+                    .map_err(|_| anyhow!("verity read batch exceeds addressable memory"))?;
+                image.seek(SeekFrom::Start(offset))?;
+                image.read_exact(&mut buf[..chunk])?;
+                let full_blocks = chunk / block_size_usize * block_size_usize;
+                for block in buf[..full_blocks].chunks_exact(block_size_usize) {
+                    let digest = sha256_with_salt_block(salt, block);
+                    level_output.extend_from_slice(&digest);
+                    if digest_padding > 0 {
+                        level_output.extend(std::iter::repeat_n(0u8, digest_padding));
+                    }
+                    if let Some(cb) = progress.as_deref_mut() {
+                        cb(block_size as u64);
+                    }
                 }
-                block
-            } else {
+                if chunk > full_blocks {
+                    tail.fill(0);
+                    tail[..chunk - full_blocks].copy_from_slice(&buf[full_blocks..chunk]);
+                    let digest = sha256_with_salt_block(salt, &tail);
+                    level_output.extend_from_slice(&digest);
+                    if digest_padding > 0 {
+                        level_output.extend(std::iter::repeat_n(0u8, digest_padding));
+                    }
+                    if let Some(cb) = progress.as_deref_mut() {
+                        cb(block_size as u64);
+                    }
+                }
+                offset += chunk as u64;
+                remaining -= chunk as u64;
+            }
+        } else {
+            let mut remaining = hash_src_size;
+            while remaining > 0 {
                 let offset = hash_level_offsets[level_num - 1] as usize + hash_src_size - remaining;
                 let end = (offset + block_size_usize).min(hash_ret.len());
-                let mut block = hash_ret[offset..end].to_vec();
-                block.resize(block_size_usize, 0);
-                block
-            };
-            let digest = sha256_with_salt(salt, &data);
-            level_output.extend_from_slice(&digest);
-            if digest_padding > 0 {
-                level_output.extend(std::iter::repeat_n(0u8, digest_padding));
+                let mut block = vec![0u8; block_size_usize];
+                let copy_len = end.saturating_sub(offset);
+                block[..copy_len].copy_from_slice(&hash_ret[offset..end]);
+                let digest = sha256_with_salt(salt, &block);
+                level_output.extend_from_slice(&digest);
+                if digest_padding > 0 {
+                    level_output.extend(std::iter::repeat_n(0u8, digest_padding));
+                }
+                remaining = remaining.saturating_sub(block_size_usize);
             }
-            remaining = remaining.saturating_sub(block_size_usize);
         }
 
         let padded_len = level_output.len().div_ceil(block_size_usize) * block_size_usize;
@@ -534,6 +568,17 @@ fn sha256_with_salt(salt: &[u8], data: &[u8]) -> Vec<u8> {
     h.update(salt);
     h.update(data);
     h.finalize().to_vec()
+}
+
+/// Allocation-free variant used by the level-0 batch walk.
+fn sha256_with_salt_block(salt: &[u8], data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(salt);
+    h.update(data);
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(&h.finalize());
+    digest
 }
 
 fn read_padded_block_local(
