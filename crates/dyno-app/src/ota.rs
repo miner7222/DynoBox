@@ -1,7 +1,7 @@
 //! Custom OTA support: signing keys and OTA generation from DynoBox image
 //! directories.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufWriter, Read};
 use std::path::{Path, PathBuf};
@@ -10,7 +10,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use dynobox_ota::metadata::{DeviceState, OtaMetadata, OtaType};
 use dynobox_ota::package::{ExtraEntry, PackageSpec};
 use dynobox_ota::{Certificate, OtaSigningKey};
-use dynobox_payload::payload::proto::{DeltaArchiveManifest, PartitionInfo, PartitionUpdate};
+use dynobox_payload::payload::proto::{
+    DeltaArchiveManifest, InstallOperation, PartitionInfo, PartitionUpdate,
+};
 use sha2::{Digest, Sha256};
 
 use crate::events::{CommandKind, EventSink, MessageLevel, ProgressEvent, ProgressUnit, StageKind};
@@ -269,6 +271,19 @@ pub use crate::ota_rebase::RebaseStats;
 /// bsdiff, supported by every Virtual A/B device.
 const DELTA_MINOR_VERSION: u32 = 8;
 
+/// Names of the logical partitions that live in `super`; the updated slot
+/// recreates these from dynamic partition metadata, so they can never be
+/// omitted from the payload.
+fn dynamic_partition_names(manifest: &DeltaArchiveManifest) -> BTreeSet<&str> {
+    manifest
+        .dynamic_partition_metadata
+        .iter()
+        .flat_map(|d| &d.groups)
+        .flat_map(|g| &g.partition_names)
+        .map(String::as_str)
+        .collect()
+}
+
 /// The reference's partitions minus `exclude`. Each excluded name must be
 /// one of them, and a dynamic partition cannot be excluded: its dynamic
 /// partition metadata would still create it, empty, in the updated slot.
@@ -276,13 +291,7 @@ fn select_partitions<'a>(
     manifest: &'a DeltaArchiveManifest,
     exclude: &[String],
 ) -> Result<Vec<&'a PartitionUpdate>> {
-    let dynamic: std::collections::BTreeSet<&str> = manifest
-        .dynamic_partition_metadata
-        .iter()
-        .flat_map(|d| &d.groups)
-        .flat_map(|g| &g.partition_names)
-        .map(String::as_str)
-        .collect();
+    let dynamic = dynamic_partition_names(manifest);
     for name in exclude {
         if !manifest
             .partitions
@@ -303,6 +312,25 @@ fn select_partitions<'a>(
         .iter()
         .filter(|p| !exclude.contains(&p.partition_name))
         .collect())
+}
+
+/// A delta whose operations only copy source blocks can be left out of the
+/// payload when the whole partition is unchanged. This is the same contract as
+/// an explicit `--exclude`: the updated slot keeps its current image. Dynamic
+/// partitions are never skipped because their target slot is created from the
+/// dynamic partition metadata.
+fn should_skip_unchanged_partition(
+    old_size: u64,
+    new_size: u64,
+    old_hash: Option<[u8; 32]>,
+    new_hash: [u8; 32],
+    dynamic: bool,
+    operations: &[InstallOperation],
+) -> bool {
+    !dynamic
+        && old_size == new_size
+        && old_hash == Some(new_hash)
+        && operations.iter().all(|op| op.data_length.unwrap_or(0) == 0)
 }
 
 /// Parse an Android `build.prop` into key/value pairs. Quoted values lose
@@ -443,6 +471,7 @@ where
         );
     }
     let included = select_partitions(&reference.manifest, &request.exclude)?;
+    let dynamic = dynamic_partition_names(&reference.manifest);
     if !request.exclude.is_empty() {
         message(
             events,
@@ -481,6 +510,7 @@ where
     let blob_path = scratch.path().join("blobs.bin");
     let mut blobs = BufWriter::new(File::create(&blob_path)?);
     let total = included.len();
+    let mut emitted = 0usize;
     let mut partitions = Vec::with_capacity(total);
     let mut totals = RebaseStats::default();
     for (index, reference_partition) in included.into_iter().enumerate() {
@@ -571,6 +601,23 @@ where
                     },
                 )
                 .with_context(|| format!("diffing partition `{name}`"))?;
+                if should_skip_unchanged_partition(
+                    old_size,
+                    size,
+                    delta.old_hash,
+                    delta.new_hash,
+                    dynamic.contains(name.as_str()),
+                    &delta.operations,
+                ) {
+                    message(
+                        events,
+                        &format!(
+                            "ota {name}: source and target are identical; leaving it out \
+                             (the updated slot keeps its current image)"
+                        ),
+                    );
+                    continue;
+                }
                 delta_totals.add(&delta.stats);
                 PartitionUpdate {
                     partition_name: name.clone(),
@@ -654,6 +701,7 @@ where
                 }
             }
         };
+        emitted += 1;
         partitions.push(partition);
     }
     drop(blobs);
@@ -735,7 +783,7 @@ where
         stage: StageKind::Ota,
     });
     Ok(GeneratedOta {
-        partitions: total,
+        partitions: emitted,
         size: fs::metadata(&request.output)?.len(),
         incremental: rebase.then_some(totals),
         delta: delta.then_some(delta_totals),
@@ -823,6 +871,59 @@ mod tests {
         assert!(typo.contains("no such partition"), "{typo}");
         let dynamic = names(&["system"]).unwrap_err().to_string();
         assert!(dynamic.contains("dynamic partition"), "{dynamic}");
+    }
+
+    #[test]
+    fn skips_only_unchanged_non_dynamic_partitions() {
+        let copy = InstallOperation {
+            data_length: None,
+            ..Default::default()
+        };
+        let data = InstallOperation {
+            data_length: Some(1),
+            ..Default::default()
+        };
+
+        assert!(should_skip_unchanged_partition(
+            8 << 20,
+            8 << 20,
+            Some([1u8; 32]),
+            [1u8; 32],
+            false,
+            std::slice::from_ref(&copy),
+        ));
+        assert!(!should_skip_unchanged_partition(
+            8 << 20,
+            8 << 20,
+            Some([1u8; 32]),
+            [1u8; 32],
+            true,
+            std::slice::from_ref(&copy),
+        ));
+        assert!(!should_skip_unchanged_partition(
+            8 << 20,
+            8 << 20,
+            Some([1u8; 32]),
+            [2u8; 32],
+            false,
+            std::slice::from_ref(&copy),
+        ));
+        assert!(!should_skip_unchanged_partition(
+            8 << 20,
+            4 << 20,
+            Some([1u8; 32]),
+            [1u8; 32],
+            false,
+            &[copy],
+        ));
+        assert!(!should_skip_unchanged_partition(
+            8 << 20,
+            8 << 20,
+            Some([1u8; 32]),
+            [1u8; 32],
+            false,
+            &[data],
+        ));
     }
 
     #[test]
