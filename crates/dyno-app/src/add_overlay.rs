@@ -1,7 +1,7 @@
 //! `--add-overlay`: insert static RRO APKs into an ext4 partition image
-//! (default `product.img:/overlay/`) **without mounting** it.
+//! (default `vendor.img:/overlay/`) **without mounting** it.
 //!
-//! Android scans `/product/overlay/**` at boot — [`OverlayScanner::scanDir`]
+//! Android scans `/vendor/overlay/**` at boot — [`OverlayScanner::scanDir`]
 //! recurses into subdirectories — and enables static
 //! (`<overlay android:isStatic="true">`) overlays automatically. A preinstalled
 //! overlay needs no signature match unless the target package declares an
@@ -26,8 +26,8 @@
 //! counters. New inodes copy the inline-xattr block and timestamps of an
 //! existing regular file in the target directory — or of the target directory
 //! itself when it is freshly created — so inserted files and directories
-//! inherit the SELinux label (`u:object_r:system_file:s0` for
-//! `/product/overlay`).
+//! inherit that directory's SELinux label (for `/vendor/overlay` the existing
+//! OEM overlays supply the vendor label).
 //!
 //! Hard feature gate (unsupported layouts are rejected, never mutated):
 //! require `EXTENTS`; reject `metadata_csum` (inode, directory-block, bitmap
@@ -1370,5 +1370,41 @@ mod tests {
             assert_eq!(data.len(), payload.len());
             assert_eq!(data, *payload);
         }
+    }
+
+    #[test]
+    #[ignore = "fixture: set DYNOBOX_TEST_VENDOR_IMG and DYNOBOX_TEST_ADD_OVERLAY_DIR"]
+    fn insert_translation_overlays_into_vendor_when_env_set() {
+        let src = crate::test_fixtures::env("DYNOBOX_TEST_VENDOR_IMG");
+        let overlay_dir = crate::test_fixtures::env("DYNOBOX_TEST_ADD_OVERLAY_DIR");
+        let work = tempfile::tempdir().unwrap();
+        let img = work.path().join("vendor.img");
+        std::fs::copy(&src, &img).expect("copy vendor image");
+
+        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&overlay_dir)
+            .expect("read overlay dir")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "apk"))
+            .collect();
+        paths.sort();
+        assert!(!paths.is_empty(), "no overlay APKs in {overlay_dir}");
+
+        let payloads: Vec<(String, Vec<u8>)> = paths
+            .iter()
+            .map(|path| {
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(path).expect("read overlay APK"),
+                )
+            })
+            .collect();
+        let files: Vec<OverlayFile<'_>> = payloads
+            .iter()
+            .map(|(name, bytes)| OverlayFile { name, bytes })
+            .collect();
+
+        let inserted = insert_files(&img, DEFAULT_OVERLAY_DIR, &files)
+            .expect("insert all translation overlays into vendor");
+        assert_eq!(inserted.len(), paths.len());
     }
 }

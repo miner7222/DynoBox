@@ -121,7 +121,7 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "", requires = "resign")]
         debloat: Option<String>,
 
-        /// Insert static RRO APK(s) into `product.img:/overlay/` during
+        /// Insert static RRO APK(s) into `vendor.img:/overlay/` during
         /// resign (no mount).
         /// Repeat the flag for several overlays. Requires --resign.
         #[arg(long, value_name = "APK", requires = "resign")]
@@ -243,7 +243,7 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
-        /// Insert static RRO APK(s) into `product.img:/overlay/` during
+        /// Insert static RRO APK(s) into `vendor.img:/overlay/` during
         /// resign (no mount).
         /// Repeat the flag for several overlays. Requires `resign`
         /// or `--resign`; `report.html` records each file by name and SHA-256.
@@ -361,7 +361,7 @@ enum Commands {
         #[arg(long, value_name = "LIST_FILE", num_args = 0..=1, default_missing_value = "")]
         debloat: Option<String>,
 
-        /// Insert static RRO APK(s) into `product.img:/overlay/` during
+        /// Insert static RRO APK(s) into `vendor.img:/overlay/` during
         /// resign (no mount).
         /// Repeat the flag for several overlays; `report.html`
         /// records each file by name and SHA-256.

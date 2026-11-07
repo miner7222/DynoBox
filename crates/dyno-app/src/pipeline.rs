@@ -95,8 +95,8 @@ pub struct ResignConfig {
     /// caller-provided path list to `debloat.txt`) removal input. The generated
     /// `blobs.txt` catalog is removed once input is collected.
     pub debloat: Option<crate::debloat::DebloatMode>,
-    /// Static RRO APKs to insert into `product.img:/overlay/` during
-    /// resign. Android scans `/product/overlay/**` at boot (recursively) and
+    /// Static RRO APKs to insert into `vendor.img:/overlay/` during
+    /// resign. Android scans `/vendor/overlay/**` at boot (recursively) and
     /// enables static overlays automatically; a preinstalled overlay needs no
     /// signature match unless the target declares an `<overlayable>`. The APK
     /// bytes are written into freshly allocated ext4 inodes/blocks/directory
@@ -2821,7 +2821,7 @@ where
     Ok(())
 }
 
-/// `--add-overlay`: insert static RRO APKs into `product.img:/overlay/`
+/// `--add-overlay`: insert static RRO APKs into `vendor.img:/overlay/`
 /// (creating the directory when needed).
 ///
 /// The APK bytes are written into freshly allocated inodes, data blocks and
@@ -2841,7 +2841,7 @@ where
 {
     use sha2::{Digest, Sha256};
 
-    const PARTITION: &str = "product";
+    const PARTITION: &str = "vendor";
     let img_name = format!("{PARTITION}.img");
     let img_path = out_dir.join(&img_name);
     if !img_path.exists() {

@@ -1303,7 +1303,7 @@ impl DynoGui {
                     .link(overlay_text)
                     .on_hover_text(
                         "Manage the --add-overlay list: static RRO APKs inserted into \
-                         product.img:/overlay/ during resign (no mount). The \
+                         vendor.img:/overlay/ during resign (no mount). The \
                          partition's dm-verity is regenerated and re-signed.",
                     )
                     .clicked()
