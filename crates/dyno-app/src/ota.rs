@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use dynobox_ota::metadata::{DeviceState, OtaMetadata, OtaType};
 use dynobox_ota::package::{ExtraEntry, PackageSpec};
 use dynobox_ota::{Certificate, OtaSigningKey};
+use dynobox_payload::payload::proto::install_operation::Type;
 use dynobox_payload::payload::proto::{
     DeltaArchiveManifest, InstallOperation, PartitionInfo, PartitionUpdate,
 };
@@ -333,6 +334,55 @@ fn should_skip_unchanged_partition(
         && operations.iter().all(|op| op.data_length.unwrap_or(0) == 0)
 }
 
+/// Worst-case Virtual A/B compression (VABC) COW footprint of one partition
+/// update, for `PartitionUpdate::estimate_cow_size`.
+///
+/// With `ro.virtual_ab.compression.enabled` the device does not store the
+/// payload blobs in the COW image as-is: update_engine decompresses every
+/// destination block and writes it back as an lz4-compressed
+/// `kCowReplaceOp`, plus one COW operation header per block. Sizing the COW
+/// from [`InstallOperation::data_length`] — the payload's own, usually XZ,
+/// compressed size — therefore underestimates it badly on partitions whose
+/// payload data compresses much better than lz4 (kernel modules in
+/// `vendor_dlkm`, for example). An undersized COW makes the apply pass run
+/// past the end of the COW image and fail with
+/// `ErrorCode::kDownloadOperationExecutionError`.
+///
+/// Full payloads leave `dst_length` unset and describe the destination with
+/// `dst_extents`, so the destination size has to come from the extents.
+fn estimate_cow_size(operations: &[InstallOperation], block_size: u64) -> u64 {
+    /// `CowOperation` header plus its compression header.
+    const COW_OP_HEADER_BYTES: u64 = 32;
+    /// COW image header/footer and alignment slack.
+    const COW_FIXED_OVERHEAD: u64 = 4 << 20;
+    if block_size == 0 {
+        return COW_FIXED_OVERHEAD;
+    }
+    let mut dst_blocks = 0u64;
+    let mut replaced_blocks = 0u64;
+    for op in operations {
+        let blocks = op
+            .dst_extents
+            .iter()
+            .map(|extent| extent.num_blocks.unwrap_or(0))
+            .fold(0u64, u64::saturating_add);
+        dst_blocks = dst_blocks.saturating_add(blocks);
+        if matches!(
+            op.r#type(),
+            Type::Replace | Type::ReplaceBz | Type::ReplaceXz
+        ) {
+            replaced_blocks = replaced_blocks.saturating_add(blocks);
+        }
+    }
+    let replaced = replaced_blocks.saturating_mul(block_size);
+    // lz4's worst case expands by ~0.8%; 1/16 leaves room for framing.
+    dst_blocks
+        .saturating_mul(COW_OP_HEADER_BYTES)
+        .saturating_add(replaced)
+        .saturating_add(replaced / 16)
+        .saturating_add(COW_FIXED_OVERHEAD)
+}
+
 /// Parse an Android `build.prop` into key/value pairs. Quoted values lose
 /// their quotes; unknown/malformed lines are ignored.
 fn parse_build_props(text: &str) -> BTreeMap<String, String> {
@@ -626,23 +676,12 @@ where
                     filesystem_type: reference_partition.filesystem_type.clone(),
                     postinstall_optional: reference_partition.postinstall_optional,
                     version: reference_partition.version.clone(),
-                    // VABC needs a COW size per partition; derive a bound from
-                    // the ops we just generated (the reference's estimate is
-                    // for its own, much larger payload).
-                    estimate_cow_size: Some({
-                        // VABC sizes the COW from the blocks it must write.
-                        // The delta carries whole-partition source-copy ops, so
-                        // dst extents cover the partition; only the carried
-                        // blobs actually land in the COW. A generous multiple
-                        // plus a floor keeps the total under the device's free
-                        // space while covering compression expansion.
-                        let data: u64 = delta
-                            .operations
-                            .iter()
-                            .map(|op| op.data_length.unwrap_or(0))
-                            .sum();
-                        (data * 8 + delta.operations.len() as u64 * 256 + (32 << 20)).min(size)
-                    }),
+                    // VABC sizes the COW from the blocks the device has to
+                    // write, not from the carried payload blobs.
+                    estimate_cow_size: Some(estimate_cow_size(
+                        &delta.operations,
+                        u64::from(block_size),
+                    )),
                     old_partition_info: delta.old_hash.map(|hash| PartitionInfo {
                         size: Some(old_size),
                         hash: Some(hash.to_vec()),
@@ -681,17 +720,12 @@ where
                     postinstall_optional: reference_partition.postinstall_optional,
                     version: reference_partition.version.clone(),
                     // VABC snapshots need a COW size; the reference's estimate
-                    // is for its own (much larger) payload, so derive a bound
-                    // from the ops we just wrote.
-                    estimate_cow_size: Some(
-                        encoded
-                            .operations
-                            .iter()
-                            .map(|op| op.dst_length.unwrap_or(0).max(op.data_length.unwrap_or(0)))
-                            .sum::<u64>()
-                            .saturating_mul(2)
-                            .saturating_add(4 << 20),
-                    ),
+                    // is for its own payload, so derive a bound from the ops we
+                    // just wrote.
+                    estimate_cow_size: Some(estimate_cow_size(
+                        &encoded.operations,
+                        u64::from(block_size),
+                    )),
                     new_partition_info: Some(PartitionInfo {
                         size: Some(size),
                         hash: Some(encoded.hash.to_vec()),
@@ -924,6 +958,69 @@ mod tests {
             false,
             &[data],
         ));
+    }
+
+    #[test]
+    fn cow_estimate_follows_destination_blocks_not_payload_blobs() {
+        use dynobox_payload::payload::proto::Extent;
+
+        let block = 4096u64;
+        // vendor_dlkm from the A17 build5 payload that failed to apply: its
+        // REPLACE_XZ operations carry 20,974,944 bytes of XZ data but cover
+        // 116,355,072 bytes of destination.
+        let ops = vec![InstallOperation {
+            r#type: Type::ReplaceXz as i32,
+            data_length: Some(20_974_944),
+            dst_extents: vec![Extent {
+                start_block: Some(0),
+                num_blocks: Some(116_355_072 / block),
+            }],
+            ..Default::default()
+        }];
+        let dst = 28_407 * block;
+        let estimate = estimate_cow_size(&ops, block);
+        assert_eq!(dst, 116_355_072);
+        assert!(
+            estimate >= dst,
+            "VABC COW must at least hold every destination block: {estimate} < {dst}"
+        );
+        // ... and comfortably more than the old blob-based bound that made
+        // update_engine run off the end of a 48,242,688-byte COW image.
+        assert!(estimate > 48_242_688, "{estimate}");
+        assert!(estimate < dst * 2, "{estimate}");
+
+        // A block-copying delta writes only one COW header per block.
+        let copies = vec![InstallOperation {
+            r#type: Type::SourceCopy as i32,
+            dst_extents: vec![Extent {
+                start_block: Some(0),
+                num_blocks: Some(13_311_881_216 / block),
+            }],
+            ..Default::default()
+        }];
+        let copied = 13_311_881_216 / block;
+        let estimate = estimate_cow_size(&copies, block);
+        assert_eq!(estimate, copied * 32 + (4 << 20));
+        assert!(estimate < copied * block / 32, "{estimate}");
+    }
+
+    #[test]
+    fn cow_estimate_counts_headers_for_zero_filled_blocks() {
+        use dynobox_payload::payload::proto::Extent;
+
+        let block = 4096u64;
+        let ops = vec![InstallOperation {
+            r#type: Type::Zero as i32,
+            dst_extents: vec![Extent {
+                start_block: Some(0),
+                num_blocks: Some(131_072),
+            }],
+            ..Default::default()
+        }];
+        // dataext in the A17 payload is mostly ZERO; its COW footprint is
+        // headers only, not the 512 MiB partition size.
+        assert_eq!(estimate_cow_size(&ops, block), 131_072 * 32 + (4 << 20));
+        assert_eq!(estimate_cow_size(&ops, 0), 4 << 20);
     }
 
     #[test]
