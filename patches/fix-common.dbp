@@ -1,6 +1,6 @@
 
 name = "fix-common"
-description = "Crash and behavior repairs: hidden-apps NPE, storage stats, third-party Recents, LE Audio, the ZuiMessage screens, the freeform sidebar's window type, and the vendor seccomp, SELinux, SafeCenter kill-policy and missing-provider repairs."
+description = "Crash and behavior repairs: hidden-apps NPE, storage stats, third-party Recents, LE Audio, the ZuiMessage screens, the freeform sidebar's window type, the theme switch that aborted on an immutable overlay, and the vendor seccomp, SELinux, SafeCenter kill-policy and missing-provider repairs."
 
 [[op]]
 kind = "nop_invoke"
@@ -1625,4 +1625,32 @@ proto = "([Ljava/lang/Object;)Ljava/lang/Object;"
 [[op.replacement]]
 from = "6e 54 0f 04 12 43 0c 01 1b 02 b3 43 01 00 6e 30 cb 0c 21 00 0a 00 28 0e"
 to = "12 00 28 18 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"
+expected = 1
+
+# The theme engine enables one overlay per multitheme app (safecenter, clock,
+# calendar, mms). A17 ships no theme overlay for com.zui.mms, so the lookup
+# fails and the code falls back to disabling whichever overlay is enabled on
+# that target. A preinstalled static RRO (a translation overlay) is immutable,
+# setEnabled returns false, and that false cancels the whole theme switch, so
+# local themes never apply. Treat the disable as done: the target keeps its
+# current overlay and the theme proceeds. The invoke keeps its register shape
+# and the move-result becomes an unconditional true.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/framework/services.jar"
+class = "Lcom/zui/server/ThemeService;"
+method = "enableThemeNeededOverlay"
+proto = "(Ljava/lang/String;)Z"
+
+[[op.symbol]]
+name = "set_enabled"
+kind = "method"
+class = "Landroid/content/om/IOverlayManager;"
+method = "setEnabled"
+proto = "(Ljava/lang/String;ZI)Z"
+
+[[op.replacement]]
+from = "72 40 ${set_enabled:u16} 75 31 0a 05"
+to = "72 40 ${set_enabled:u16} 75 31 12 15"
 expected = 1

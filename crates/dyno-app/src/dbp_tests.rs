@@ -1000,7 +1000,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(uc.ops.len(), 85);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 37);
+    assert_eq!(fc.ops.len(), 38);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 5);
@@ -1442,6 +1442,61 @@ fn bundled_fix_common_lockscreen_date_uses_description_pattern() {
             assert_eq!(value, "EEEE MMMM d");
         }
         other => panic!("unexpected lockscreen date op: {other:?}"),
+    }
+}
+
+/// A17 ships no theme overlay for `com.zui.mms`, so the theme engine falls back
+/// to disabling whichever overlay is enabled on that target. A preinstalled
+/// translation overlay is an immutable static RRO, `setEnabled` returns false,
+/// and that false cancels the whole theme switch. The replacement keeps the
+/// invoke and turns the `move-result` into `const/4 v5, #1` (two bytes), so a
+/// failed disable no longer aborts the switch.
+#[test]
+fn bundled_fix_common_ignores_unremovable_theme_overlay() {
+    let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+    let op = fc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::MethodCodePatch { class, method, .. }
+                    if class == "Lcom/zui/server/ThemeService;"
+                        && method == "enableThemeNeededOverlay")
+        })
+        .expect("theme overlay op");
+    match op {
+        DbpOp::MethodCodePatch {
+            partition,
+            file,
+            proto,
+            symbols,
+            replacements,
+            ..
+        } => {
+            assert_eq!(partition, "system");
+            assert_eq!(file, "system/framework/services.jar");
+            assert_eq!(proto, "(Ljava/lang/String;)Z");
+            assert!(symbols.iter().any(|symbol| {
+                matches!(symbol, DbpCodeSymbol::Method { name, class, method, proto }
+                        if name == "set_enabled"
+                            && class == "Landroid/content/om/IOverlayManager;"
+                            && method == "setEnabled"
+                            && proto == "(Ljava/lang/String;ZI)Z")
+            }));
+            assert_eq!(replacements.len(), 1);
+            let replacement = &replacements[0];
+            assert_eq!(
+                replacement.from.split_whitespace().count(),
+                replacement.to.split_whitespace().count(),
+                "size-preserving replacement"
+            );
+            assert!(replacement.from.contains("${set_enabled:u16}"));
+            assert!(replacement.from.ends_with("0a 05"), "move-result v5");
+            assert!(
+                replacement.to.ends_with("12 15"),
+                "const/4 v5, #1 replaces the move-result"
+            );
+        }
+        other => panic!("unexpected theme overlay op: {other:?}"),
     }
 }
 
