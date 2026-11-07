@@ -4241,45 +4241,31 @@ fn prepare_repack_stage(
     let mut copied_xml = 0usize;
     let mut copied_super = 0usize;
     let mut transfers = TransferStats::default();
-    // Split-super chunks are normally named `super_*.img`, but some OEM
-    // rawprogram XMLs name them after the logical partitions themselves. Copy
-    // every filename the `label="super"` records reference so those layouts
-    // reach the repack stage too.
-    let declared_super_chunks = super_chunk_filenames(base_input_dir);
 
+    // Pass 1: rawprogram XMLs. Apply rewrites a rawprogram XML when a split
+    // partition's vendor chunk layout no longer fits the payload image. Prefer
+    // that staged copy so repack's super rewrite layers on top of it instead
+    // of reverting to the vendor XML.
     for entry in std::fs::read_dir(base_input_dir)? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
             continue;
         }
-
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        let copy_to_stage = (name.starts_with("rawprogram") && name.ends_with(".xml"))
-            || (name.ends_with(".img")
-                && (name.starts_with("super_")
-                    || declared_super_chunks.contains(&name.to_ascii_lowercase())));
-
-        if copy_to_stage {
-            // Apply rewrites a rawprogram XML when a split partition's vendor
-            // chunk layout no longer fits the payload image. Prefer the staged
-            // copy so repack's super rewrite layers on top of it instead of
-            // reverting to the vendor XML.
-            let staged = image_dir.join(name);
-            let source = if staged.is_file() { &staged } else { &path };
-            transfers.record(materialize_file_with_fallback(
-                source,
-                &stage_dir.join(name),
-            )?);
-            if name.ends_with(".xml") {
-                copied_xml += 1;
-            } else {
-                copied_super += 1;
-            }
+        if !(name.starts_with("rawprogram") && name.ends_with(".xml")) {
+            continue;
         }
+        let staged = image_dir.join(name);
+        let source = if staged.is_file() { &staged } else { &path };
+        transfers.record(materialize_file_with_fallback(
+            source,
+            &stage_dir.join(name),
+        )?);
+        copied_xml += 1;
     }
 
     if copied_xml == 0 {
@@ -4288,6 +4274,37 @@ fn prepare_repack_stage(
             base_input_dir.display()
         );
     }
+
+    // Pass 2: the one super chunk the repack parser reads its metadata from.
+    // The data chunks are rebuilt from the partition images in `image_dir`, so
+    // staging every source chunk only copied the whole super (tens of GiB on
+    // real firmware) for nothing.
+    let metadata_chunk = dynobox_xml::XmlCatalog::from_dir(stage_dir)
+        .ok()
+        .and_then(|catalog| {
+            catalog
+                .group_for("super")
+                .map(|group| group.records().into_iter().cloned().collect::<Vec<_>>())
+        })
+        .map(|records| {
+            dynobox_super::repack_metadata_chunk_filename(&records, &[image_dir, base_input_dir])
+        })
+        .transpose()?
+        .flatten();
+    if let Some(name) = metadata_chunk {
+        let staged = image_dir.join(&name);
+        let source = if staged.is_file() {
+            staged
+        } else {
+            base_input_dir.join(&name)
+        };
+        transfers.record(materialize_file_with_fallback(
+            &source,
+            &stage_dir.join(&name),
+        )?);
+        copied_super += 1;
+    }
+
     if copied_super == 0 {
         anyhow::bail!(
             "No super chunk images found in {}.",

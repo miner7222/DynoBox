@@ -9,7 +9,9 @@ pub use extractor::{
     PartitionProgressCallback, extract_partition_images, extract_partition_images_with_progress,
 };
 pub use metadata::*;
-pub use parser::{parse_super_layout, parse_super_layout_for_repack};
+pub use parser::{
+    parse_super_layout, parse_super_layout_for_repack, repack_metadata_chunk_filename,
+};
 pub use repack::repack_super_image;
 
 pub fn component_scope() -> &'static str {

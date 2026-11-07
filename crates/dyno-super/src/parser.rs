@@ -536,6 +536,21 @@ pub fn parse_super_layout(
     })
 }
 
+/// Basename of the super chunk [`parse_super_layout_for_repack`] would read as
+/// its metadata source, searching `dirs` in order and reusing the parser's own
+/// ordering rules. Repack rebuilds the data chunks from partition images, so
+/// only this single metadata chunk has to be staged next to the XMLs.
+pub fn repack_metadata_chunk_filename(
+    super_records: &[PartitionRecord],
+    dirs: &[&Path],
+) -> Result<Option<String>> {
+    let usable = ordered_usable_super_records(super_records)?;
+    Ok(usable
+        .into_iter()
+        .find(|record| dirs.iter().any(|dir| dir.join(&record.filename).is_file()))
+        .map(|record| record.filename))
+}
+
 /// Parse the layout a repack needs: geometry + partition metadata (read from
 /// the first flash chunk) and that chunk's flash placement.
 ///

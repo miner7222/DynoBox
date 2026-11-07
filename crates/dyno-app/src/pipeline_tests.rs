@@ -1751,8 +1751,8 @@ fn format_unix_timestamp_utc_epoch() {
 
 /// OEM rawprogram files sometimes declare the split-super chunks under the
 /// logical partition names instead of `super_*.img` (e.g. ALLDOCUBE U880).
-/// The repack stage must stage those declared chunks so the metadata chunk
-/// survives, while the patched standalone image wins for the data ones.
+/// Repack only has to stage the metadata chunk; the data chunks are rebuilt
+/// from the patched standalone images.
 #[test]
 fn prepare_repack_stage_copies_declared_super_chunks_with_partition_names() {
     let temp = tempdir().unwrap();
@@ -1778,7 +1778,10 @@ fn prepare_repack_stage_copies_declared_super_chunks_with_partition_names() {
 
     let stats = prepare_repack_stage(&base, &images, &stage).unwrap();
     assert_eq!(stats.xml_count, 1);
-    assert_eq!(stats.super_count, 2, "both declared chunks must be staged");
+    assert_eq!(
+        stats.super_count, 1,
+        "only the metadata chunk needs to be staged; data chunks are rebuilt from images"
+    );
     assert_eq!(fs::read(stage.join("super_empty.img")).unwrap()[0], 0);
     assert_eq!(
         fs::read(stage.join("system.img")).unwrap()[0],
