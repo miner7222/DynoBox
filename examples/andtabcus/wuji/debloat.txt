@@ -1,3 +1,4 @@
+product:/app/DeviceStatisticsService/
 product:/app/LTHD/
 product:/app/xiangbb/
 product:/etc/permissions/services.cn.google.xml
