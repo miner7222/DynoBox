@@ -1000,7 +1000,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(uc.ops.len(), 85);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 31);
+    assert_eq!(fc.ops.len(), 32);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 5);
@@ -1016,6 +1016,35 @@ fn bundled_dbp_files_inventory() {
     let fw = load_dbp(&patches_dir().join("fix-wuji.dbp")).expect("fix-wuji.dbp");
     assert_eq!(fw.name, "fix-wuji");
     assert_eq!(fw.ops.len(), 1);
+}
+
+/// The qsap QAPE service is killed with SIGSYS when its seccomp policy omits lseek; reuse a comment line to add it without growing the file.
+#[test]
+fn bundled_fix_common_qsap_seccomp_repair() {
+    let fc = load_dbp(&patches_dir().join("fix-common.dbp")).unwrap();
+
+    let qsap = fc
+        .ops
+        .iter()
+        .find(|op| {
+            matches!(op, DbpOp::TextReplace { file, .. }
+                if file == "etc/seccomp_policy/qsap_qapeservice.policy")
+        })
+        .expect("qsap seccomp text_replace");
+    match qsap {
+        DbpOp::TextReplace {
+            partition,
+            from,
+            to,
+            ..
+        } => {
+            assert_eq!(partition, "vendor");
+            assert_eq!(from, "# added for atoll\n");
+            assert_eq!(from.len(), to.len());
+            assert!(to.starts_with("lseek: 1\n"));
+        }
+        other => panic!("unexpected qsap op: {other:?}"),
+    }
 }
 
 /// A17's "Built-in Data SIM Card" OOBE page only advances through the TianXi

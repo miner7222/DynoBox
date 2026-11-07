@@ -1546,3 +1546,21 @@ node_id = 0x7f0b0c6d
 attribute = "breakStrategy"
 value = 1
 expected = 2
+
+# --- Vendor policy gaps under the newer framework ---------------------------------------
+#
+# The vendor image can be older than the framework, so a few vendor
+# policies predate the accesses the newer services expect. These are size-preserving
+# text edits: every replacement is byte-for-byte the same length, which keeps
+# the ext4 inode and dm-verity regeneration on the existing fast path.
+
+# qsap_qapeservice is killed with SIGSYS because its seccomp policy is the only
+# qsap policy without lseek; init restarts it every few seconds and
+# flags_health_check resets server-configurable flags on each crash loop.
+# Reuse the policy's own comment line as the insertion point.
+[[op]]
+kind = "text_replace"
+partition = "vendor"
+file = "etc/seccomp_policy/qsap_qapeservice.policy"
+from = "# added for atoll\n"
+to = "lseek: 1\n########\n"
