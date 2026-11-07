@@ -1406,6 +1406,7 @@ where
     let mut written_bytes: u64 = 0;
     let mut ops_seconds = 0.0f64;
     let mut digest_seconds = 0.0f64;
+    let mut unpack_seconds = 0.0f64;
 
     recreate_dir_safe(out_dir, &[input])?;
 
@@ -1466,7 +1467,7 @@ where
                     events,
                     MessageLevel::Info,
                     format!(
-                        "apply: {} dynamic images missing; extracting from super",
+                        "apply: {} dynamic images have no standalone source; unpacking from super only if a payload op needs it",
                         missing_dynamic_count
                     ),
                 );
@@ -1705,7 +1706,13 @@ where
                 src_path = input.join(&filename);
             }
 
-            if !src_path.exists() {
+            // The lazy auto-unpack exists only to provide a source image for
+            // payload ops that read the old partition. A full OTA carries no
+            // source extents (`old_size == 0`) and patches every extent with
+            // REPLACE ops, so extracting the partition from super would copy
+            // the whole old image and never read it. Keep the extraction for
+            // incremental payloads / real source reads.
+            if !src_path.exists() && p_info.old_size > 0 {
                 if let Some(layout) = &super_layout {
                     if layout.find_partition(&p_info.name).is_some() {
                         let cached_path = cached_dynamic_path.unwrap();
@@ -1726,6 +1733,7 @@ where
                             // The helper emits its own ItemStarted with the
                             // real partition name, so we no longer need the
                             // pre-emitted placeholder.
+                            let unpack_started = std::time::Instant::now();
                             let extracted = extract_partition_images_with_progress_events(
                                 events,
                                 StageKind::AutoUnpack,
@@ -1734,6 +1742,7 @@ where
                                 Some(std::slice::from_ref(&p_info.name)),
                                 1,
                             )?;
+                            unpack_seconds += unpack_started.elapsed().as_secs_f64();
                             if let Some(path) = extracted.get(&p_info.name) {
                                 filename = format!("{}.img", p_info.name);
                                 out_path = out_dir.join(&filename);
@@ -1803,13 +1812,14 @@ where
         events,
         MessageLevel::Info,
         format!(
-            "apply: payload data {:.1} GiB, wrote {:.1} GiB in {:.1}s ({:.0} MiB/s; ops {:.1}s, digest {:.1}s)",
+            "apply: payload data {:.1} GiB, wrote {:.1} GiB in {:.1}s ({:.0} MiB/s; ops {:.1}s, digest {:.1}s, unpack {:.1}s)",
             gibibytes(payload_bytes),
             gibibytes(written_bytes),
             elapsed,
             throughput,
             ops_seconds,
-            digest_seconds
+            digest_seconds,
+            unpack_seconds
         ),
     );
 
