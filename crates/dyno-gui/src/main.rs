@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
-use egui::{CentralPanel, ScrollArea};
+use egui::ScrollArea;
 use egui_extras::DatePickerButton;
 use jiff::civil::Date;
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,10 @@ enum Mode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FormSnapshot {
     schema_version: u32,
+    /// RFC 3339 timestamp of when this snapshot was saved. Older entries
+    /// deserialize with an empty string.
+    #[serde(default)]
+    created_at: String,
     mode: Mode,
     input: Option<PathBuf>,
     output: Option<PathBuf>,
@@ -117,6 +121,7 @@ impl FormSnapshot {
     fn capture(gui: &DynoGui) -> Self {
         Self {
             schema_version: HISTORY_SCHEMA_VERSION,
+            created_at: jiff::Timestamp::now().to_string(),
             mode: gui.mode,
             input: gui.input.clone(),
             output: gui.output.clone(),
@@ -185,6 +190,16 @@ impl FormSnapshot {
         self.restore_form(&mut gui);
         gui.build_args().join(" ")
     }
+
+    /// Equality for de-duplication: the save timestamp must not make two
+    /// otherwise identical forms look different.
+    fn same_form(&self, other: &Self) -> bool {
+        let mut a = self.clone();
+        let mut b = other.clone();
+        a.created_at.clear();
+        b.created_at.clear();
+        a == b
+    }
 }
 
 #[derive(Default)]
@@ -207,7 +222,11 @@ impl RunHistory {
     }
 
     fn insert(&mut self, snapshot: FormSnapshot) {
-        if let Some(index) = self.entries.iter().position(|entry| entry == &snapshot) {
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|entry| entry.same_form(&snapshot))
+        {
             self.entries.remove(index);
         }
         self.entries.insert(0, snapshot);
@@ -272,6 +291,26 @@ impl Mode {
             Mode::Ota => "OTA",
         }
     }
+
+    fn description(self) -> &'static str {
+        match self {
+            Mode::Apply => "Unpack, apply OTA zip(s), then optionally resign and repack.",
+            Mode::Unpack => "Extract payload, super, and partition images.",
+            Mode::Resign => "Sign partitions with custom keys, patches, and overlays.",
+            Mode::Repack => "Rebuild partition images and super/payload.",
+            Mode::Ota => "Generate a full or incremental signed OTA package.",
+        }
+    }
+
+    fn all() -> [Mode; 5] {
+        [
+            Mode::Apply,
+            Mode::Unpack,
+            Mode::Resign,
+            Mode::Repack,
+            Mode::Ota,
+        ]
+    }
 }
 
 struct DynoGui {
@@ -323,6 +362,8 @@ struct DynoGui {
 
     history: RunHistory,
     history_open: bool,
+    history_filter: String,
+    reset_confirm: bool,
     overlay_manager_open: bool,
     patch_manager_open: bool,
     missing_paths: MissingPaths,
@@ -375,6 +416,8 @@ impl Default for DynoGui {
             command_copied: false,
             history: RunHistory::default(),
             history_open: false,
+            history_filter: String::new(),
+            reset_confirm: false,
             overlay_manager_open: false,
             patch_manager_open: false,
             missing_paths: MissingPaths::default(),
@@ -389,6 +432,69 @@ impl DynoGui {
             Mode::Resign => true,
             Mode::Apply | Mode::Unpack => self.do_resign,
             Mode::Repack | Mode::Ota => false,
+        }
+    }
+
+    /// True when a flag will wait for input in the terminal.
+    fn has_interactive_flags(&self) -> bool {
+        self.resign_active()
+            && ((self.fuck_lgsi && self.fuck_lgsi_config.is_none())
+                || (self.debloat && self.debloat_list.is_none()))
+    }
+
+    /// The argv the current form would launch, prefixed with the CLI name.
+    fn preview_command(&self) -> String {
+        let mut out = String::from("dynobox");
+        for arg in self.build_args() {
+            out.push(' ');
+            out.push_str(&arg);
+        }
+        out
+    }
+
+    /// Reset every form field while keeping the current mode and history.
+    fn reset_form(&mut self) {
+        let mode = self.mode;
+        let history = std::mem::take(&mut self.history);
+        let history_open = self.history_open;
+        *self = Self::default();
+        self.mode = mode;
+        self.history = history;
+        self.history_open = history_open;
+        self.reset_confirm = false;
+    }
+
+    fn apply_shortcuts(&mut self, ctx: &egui::Context) {
+        let (run, history, mode) = ctx.input(|i| {
+            let run = i.modifiers.command && i.key_pressed(egui::Key::Enter);
+            let history = i.modifiers.command && i.key_pressed(egui::Key::H);
+            let mut mode = None;
+            if i.modifiers.alt {
+                for (index, key) in [
+                    egui::Key::Num1,
+                    egui::Key::Num2,
+                    egui::Key::Num3,
+                    egui::Key::Num4,
+                    egui::Key::Num5,
+                ]
+                .iter()
+                .enumerate()
+                {
+                    if i.key_pressed(*key) {
+                        mode = Some(Mode::all()[index]);
+                    }
+                }
+            }
+            (run, history, mode)
+        });
+        if let Some(mode) = mode {
+            self.mode = mode;
+        }
+        if history {
+            self.history_open = !self.history_open;
+        }
+        if run && self.validate_for_run().is_ok() {
+            self.run_in_terminal();
         }
     }
 
@@ -442,9 +548,8 @@ impl DynoGui {
                 if self.do_repack {
                     a.push("--repack".into());
                 }
-                if self.info {
-                    a.push("--info".into());
-                }
+                // `--info` is an Apply/Unpack-only toggle in the GUI; do not
+                // leak a stale value into a Resign command.
                 self.push_resign_args(&mut a);
             }
             Mode::Repack => {
@@ -591,13 +696,15 @@ impl DynoGui {
             self.last_status = Some(Err(msg));
             return;
         }
+        self.missing_paths = MissingPaths::classify(&FormSnapshot::capture(self));
         let exe = Self::locate_dynobox_exe();
         let args = self.build_args();
         match spawn_in_terminal(&exe, &args) {
             Ok(()) => {
                 self.history.insert(FormSnapshot::capture(self));
                 self.last_command = Some(format!("{} {}", exe.display(), args.join(" ")));
-                self.last_status = None;
+                self.last_status =
+                    Some(Ok("Launched in terminal — check the console window.".into()));
             }
             Err(e) => self.last_status = Some(Err(format!("Spawn failed: {e}"))),
         }
@@ -633,112 +740,36 @@ impl DynoGui {
 }
 
 impl eframe::App for DynoGui {
+    #[allow(deprecated)]
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // `CentralPanel` paints the egui theme's `window_fill`
-        // background and claims all remaining space. Drawing straight
-        // onto the root `ui` skipped that fill, so eframe's clear
-        // colour (near-black) bled through and made the text
-        // unreadable.
-        CentralPanel::default().show_inside(ui, |ui| {
-            ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let row_h = ui.text_style_height(&egui::TextStyle::Heading);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), row_h),
-                        egui::Layout::left_to_right(egui::Align::BOTTOM),
-                        |ui| {
-                            ui.heading("DynoBox");
-                            ui.label(
-                                egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                                    .weak()
-                                    .size(14.0),
-                            );
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::BOTTOM),
-                                |ui| {
-                                    if ui.button("🕘").on_hover_text("Run history").clicked() {
-                                        self.history_open = true;
-                                    }
-                                },
-                            );
-                        },
-                    );
-                    ui.separator();
+        self.apply_shortcuts(ui.ctx());
 
-                    // Mode selector
-                    ui.horizontal(|ui| {
-                        ui.label("Mode:");
-                        egui::ComboBox::from_id_salt("mode")
-                            .selected_text(self.mode.label())
-                            .show_ui(ui, |ui| {
-                                for m in [
-                                    Mode::Apply,
-                                    Mode::Unpack,
-                                    Mode::Resign,
-                                    Mode::Repack,
-                                    Mode::Ota,
-                                ] {
-                                    ui.selectable_value(&mut self.mode, m, m.label());
-                                }
-                            });
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            // One container width for the header, action bar, and body so the
+            // right edge stays aligned when the window grows.
+            let content_w = (ui.available_width() - 4.0).min(760.0);
+            ui.set_max_width(content_w);
+
+            self.render_top_bar(ui);
+            ui.separator();
+            self.render_action_bar(ui);
+            ui.separator();
+            if self.history_open {
+                self.render_history(ui);
+            } else {
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_max_width(content_w);
+                        self.render_form(ui);
                     });
-
-                    ui.separator();
-
-                    if matches!(self.mode, Mode::Ota) {
-                        self.ota_section(ui);
-                        ui.separator();
-                        self.run_button(ui);
-                        return;
-                    }
-
-                    self.io_picker(ui, "Input", true);
-                    self.io_picker(ui, "Output", false);
-                    self.integrity_key_picker(ui);
-
-                    ui.separator();
-
-                    match self.mode {
-                        Mode::Apply => self.apply_section(ui),
-                        Mode::Unpack | Mode::Resign | Mode::Repack | Mode::Ota => {}
-                    }
-
-                    if !matches!(self.mode, Mode::Repack) {
-                        self.info_section(ui);
-                        ui.separator();
-                        self.resign_section(ui);
-                    }
-
-                    match self.mode {
-                        Mode::Apply | Mode::Unpack => {
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.do_repack, "repack");
-                                ui.checkbox(&mut self.do_complete, "--complete");
-                            });
-                        }
-                        Mode::Resign => {
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut self.do_repack, "repack");
-                            });
-                        }
-                        Mode::Repack | Mode::Ota => {}
-                    }
-
-                    // In Repack mode the section above is empty, so its
-                    // separator already divides the Run button.
-                    if !matches!(self.mode, Mode::Repack) {
-                        ui.separator();
-                    }
-                    self.run_button(ui);
-                });
+            }
         });
-        self.history_window(ui.ctx());
+
         self.command_window(ui.ctx());
         self.overlay_manager_window(ui.ctx());
         self.patch_manager_window(ui.ctx());
+        self.reset_window(ui.ctx());
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
@@ -768,53 +799,124 @@ impl DynoGui {
         self.history_open = false;
     }
 
-    fn history_window(&mut self, ctx: &egui::Context) {
-        if !self.history_open {
-            return;
-        }
-        let mut open = self.history_open;
+    fn render_history(&mut self, ui: &mut egui::Ui) {
+        let mode = self.mode;
         let mut load = None;
         let mut delete = None;
-        let mode = self.mode;
-        // Fixed id: the title changes with the mode, and the window should
-        // keep its place and size when the mode does.
-        egui::Window::new(format!("Run history: {}", mode.label()))
-            .id(egui::Id::new("run-history"))
-            .open(&mut open)
-            .default_size([480.0, 400.0])
-            .show(ctx, |ui| {
-                if self.history.for_mode(mode).next().is_none() {
-                    ui.label(
-                        egui::RichText::new(format!("No previous {} runs", mode.label())).weak(),
-                    );
-                    return;
-                }
-                ScrollArea::vertical().show(ui, |ui| {
-                    for (index, entry) in self.history.for_mode(mode) {
-                        ui.horizontal_top(|ui| {
-                            let command = entry.command_line();
-                            let command_width = (ui.available_width() - 32.0).max(120.0);
-                            if ui
-                                .add_sized(
-                                    [command_width, 0.0],
-                                    egui::Button::new(
-                                        egui::RichText::new(command).monospace().small(),
-                                    )
-                                    .wrap(),
+        let mut copy = None;
+        // The inline view lives inside the panel, so its own available width is
+        // the trustworthy one; cap it so the column does not stretch on wide
+        // windows.
+        let content_w = ui.available_width().min(680.0);
+        ui.set_max_width(content_w);
+
+        ui.horizontal(|ui| {
+            ui.heading("Run history");
+            ui.label(egui::RichText::new(mode.label()).small().weak());
+            if ui
+                .small_button("Back to form")
+                .on_hover_text("Close history (Ctrl+H)")
+                .clicked()
+            {
+                self.history_open = false;
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            let clear_w = if self.history_filter.is_empty() {
+                0.0
+            } else {
+                56.0
+            };
+            let filter_w = (content_w - 64.0 - clear_w).max(120.0);
+            ui.add_sized(
+                [filter_w, 24.0],
+                egui::TextEdit::singleline(&mut self.history_filter)
+                    .hint_text("folder, key, or patch..."),
+            );
+            if !self.history_filter.is_empty() && ui.small_button("Clear").clicked() {
+                self.history_filter.clear();
+            }
+        });
+        ui.separator();
+
+        let filter = self.history_filter.to_lowercase();
+        let entries: Vec<(usize, FormSnapshot)> = self
+            .history
+            .for_mode(mode)
+            .filter(|(_, entry)| {
+                filter.is_empty()
+                    || entry.command_line().to_lowercase().contains(&filter)
+                    || history_title(entry).to_lowercase().contains(&filter)
+            })
+            .map(|(index, entry)| (index, entry.clone()))
+            .collect();
+
+        if entries.is_empty() {
+            ui.label(egui::RichText::new("No matching runs").weak());
+            return;
+        }
+
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for (index, entry) in entries {
+                    egui::Frame::group(ui.style())
+                        .fill(egui::Color32::from_rgb(250, 251, 253))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgb(216, 222, 228),
+                        ))
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            // `Frame` adds its own margins; using the inner
+                            // available width keeps the right border on screen.
+                            ui.set_width(ui.available_width());
+                            let title = format!("#{}  {}", index + 1, history_title(&entry));
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&title).strong()).truncate(),
+                            )
+                            .on_hover_text(&title);
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Load").clicked() {
+                                    load = Some(entry.clone());
+                                }
+                                if ui.small_button("Copy").clicked() {
+                                    copy = Some(entry.command_line());
+                                }
+                                if ui.small_button("Remove").clicked() {
+                                    delete = Some(index);
+                                }
+                            });
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(history_badges(&entry)).small().weak(),
                                 )
-                                .on_hover_text("Load these options")
-                                .clicked()
-                            {
-                                load = Some(entry.clone());
-                            }
-                            if ui.small_button("🗑").on_hover_text("Delete").clicked() {
-                                delete = Some(index);
-                            }
+                                .wrap_mode(egui::TextWrapMode::Wrap),
+                            );
+                            egui::CollapsingHeader::new(
+                                egui::RichText::new("Show full command").small(),
+                            )
+                            .id_salt(("history-command", index))
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(entry.command_line())
+                                            .monospace()
+                                            .small(),
+                                    )
+                                    .wrap_mode(egui::TextWrapMode::Wrap),
+                                );
+                            });
                         });
-                    }
-                });
+                    ui.add_space(4.0);
+                }
             });
-        self.history_open = open;
+
+        if let Some(command) = copy {
+            ui.ctx().copy_text(command);
+        }
         if let Some(index) = delete {
             self.history.delete(index);
         } else if let Some(snapshot) = load {
@@ -827,24 +929,33 @@ impl DynoGui {
             return;
         }
         let mut open = self.command_open;
-        let command = self.last_command.clone().unwrap_or_default();
-        egui::Window::new("Command")
+        let args = self.build_args();
+        let command = self.preview_command();
+        egui::Window::new("Command preview")
             .open(&mut open)
-            .default_size([560.0, 160.0])
+            .default_size([620.0, 420.0])
+            .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Copy").clicked() {
+                    if ui.button("Copy full command").clicked() {
                         ui.ctx().copy_text(command.clone());
                         self.command_copied = true;
                     }
                     if self.command_copied {
                         ui.label(egui::RichText::new("copied to clipboard").weak().small());
                     }
+                    ui.label(
+                        egui::RichText::new(format!("{} args", args.len()))
+                            .weak()
+                            .small(),
+                    );
                 });
-                ui.add_space(6.0);
-                ui.style_mut().interaction.selectable_labels = true;
+                ui.separator();
                 ScrollArea::vertical().show(ui, |ui| {
-                    ui.label(egui::RichText::new(&command).monospace().small());
+                    ui.label(egui::RichText::new("dynobox").monospace().strong());
+                    for arg in &args {
+                        ui.label(egui::RichText::new(arg).monospace().small());
+                    }
                 });
             });
         self.command_open = open;
@@ -858,45 +969,49 @@ impl DynoGui {
         let mut remove = None;
         egui::Window::new("Overlay APKs (--add-overlay)")
             .open(&mut open)
-            .default_size([560.0, 320.0])
+            .default_size([600.0, 360.0])
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} APK(s)", self.add_overlays.len())).strong(),
+                    );
+                    if !self.add_overlays.is_empty() && ui.small_button("Clear all").clicked() {
+                        self.add_overlays.clear();
+                    }
+                });
+                ui.separator();
                 if self.add_overlays.is_empty() {
                     ui.label(egui::RichText::new("No overlay APKs added").weak());
                 } else {
-                    ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                        for (i, p) in self.add_overlays.iter().enumerate() {
+                    ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        for (index, path) in self.add_overlays.iter().enumerate() {
                             ui.horizontal(|ui| {
-                                if ui.small_button("🗑").on_hover_text("Remove").clicked() {
-                                    remove = Some(i);
+                                if ui.small_button("Remove").on_hover_text("Remove").clicked() {
+                                    remove = Some(index);
                                 }
-                                let text = p.display().to_string();
-                                drag_scroll_path(
+                                path_display(
                                     ui,
-                                    &text,
-                                    &format!("add-overlay-{i}"),
-                                    self.missing_paths.contains(p),
+                                    Some(path),
+                                    self.missing_paths.contains(path),
+                                    "",
+                                    320.0,
                                 );
                             });
                         }
                     });
                 }
                 ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("➕ Add overlay").clicked()
-                        && let Some(paths) = list_dialog(&self.add_overlays)
-                            .add_filter("Android package", &["apk"])
-                            .pick_files()
-                    {
-                        for p in paths {
-                            if !self.add_overlays.contains(&p) {
-                                self.add_overlays.push(p);
-                            }
+                if ui.button("Add files...").clicked()
+                    && let Some(paths) = list_dialog(&self.add_overlays)
+                        .add_filter("Android package", &["apk"])
+                        .pick_files()
+                {
+                    for path in paths {
+                        if !self.add_overlays.contains(&path) {
+                            self.add_overlays.push(path);
                         }
                     }
-                    if !self.add_overlays.is_empty() && ui.button("Clear").clicked() {
-                        self.add_overlays.clear();
-                    }
-                });
+                }
             });
         self.overlay_manager_open = open;
         if let Some(index) = remove {
@@ -912,45 +1027,50 @@ impl DynoGui {
         let mut remove = None;
         egui::Window::new("External patches (--plus)")
             .open(&mut open)
-            .default_size([560.0, 320.0])
+            .default_size([600.0, 360.0])
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("{} patch(es)", self.plus_patches.len()))
+                            .strong(),
+                    );
+                    if !self.plus_patches.is_empty() && ui.small_button("Clear all").clicked() {
+                        self.plus_patches.clear();
+                    }
+                });
+                ui.separator();
                 if self.plus_patches.is_empty() {
                     ui.label(egui::RichText::new("No external patches added").weak());
                 } else {
-                    ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                        for (i, p) in self.plus_patches.iter().enumerate() {
+                    ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                        for (index, path) in self.plus_patches.iter().enumerate() {
                             ui.horizontal(|ui| {
-                                if ui.small_button("🗑").on_hover_text("Remove").clicked() {
-                                    remove = Some(i);
+                                if ui.small_button("Remove").on_hover_text("Remove").clicked() {
+                                    remove = Some(index);
                                 }
-                                let text = p.display().to_string();
-                                drag_scroll_path(
+                                path_display(
                                     ui,
-                                    &text,
-                                    &format!("plus-dbp-{i}"),
-                                    self.missing_paths.contains(p),
+                                    Some(path),
+                                    self.missing_paths.contains(path),
+                                    "",
+                                    320.0,
                                 );
                             });
                         }
                     });
                 }
                 ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button("➕ Add .dbp").clicked()
-                        && let Some(paths) = list_dialog(&self.plus_patches)
-                            .add_filter("DynoBox patch", &["dbp"])
-                            .pick_files()
-                    {
-                        for p in paths {
-                            if !self.plus_patches.contains(&p) {
-                                self.plus_patches.push(p);
-                            }
+                if ui.button("Add .dbp files...").clicked()
+                    && let Some(paths) = list_dialog(&self.plus_patches)
+                        .add_filter("DynoBox patch", &["dbp"])
+                        .pick_files()
+                {
+                    for path in paths {
+                        if !self.plus_patches.contains(&path) {
+                            self.plus_patches.push(path);
                         }
                     }
-                    if !self.plus_patches.is_empty() && ui.button("Clear").clicked() {
-                        self.plus_patches.clear();
-                    }
-                });
+                }
             });
         self.patch_manager_open = open;
         if let Some(index) = remove {
@@ -958,437 +1078,753 @@ impl DynoGui {
         }
     }
 
-    fn io_picker(&mut self, ui: &mut egui::Ui, label: &str, is_input: bool) {
-        ui.horizontal(|ui| {
-            ui.label(format!("{label}:"));
-            let current = if is_input { &self.input } else { &self.output };
-            if ui.button("📁").clicked()
-                && let Some(p) = folder_dialog(current.as_deref()).pick_folder()
-            {
-                if is_input {
-                    self.input = Some(p);
-                } else {
-                    self.output = Some(p);
-                }
-            }
-            let current = if is_input { &self.input } else { &self.output };
-            let text = current
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "—".to_string());
-            let missing = is_input
-                && current
-                    .as_deref()
-                    .is_some_and(|path| self.missing_paths.contains(path));
-            drag_scroll_path(
-                ui,
-                &text,
-                if is_input { "io-input" } else { "io-output" },
-                missing,
-            );
-        });
+    fn reset_window(&mut self, ctx: &egui::Context) {
+        if !self.reset_confirm {
+            return;
+        }
+        egui::Window::new("Reset form?")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Clear every field in the current form?");
+                ui.label(
+                    egui::RichText::new("History entries are kept.")
+                        .weak()
+                        .small(),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Reset").clicked() {
+                        self.reset_form();
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.reset_confirm = false;
+                    }
+                });
+            });
     }
 
-    fn integrity_key_picker(&mut self, ui: &mut egui::Ui) {
+    fn render_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label("Manifest signing key:");
-            if ui.button("📁").clicked()
-                && let Some(path) = file_dialog(self.integrity_key.as_deref())
-                    .add_filter("PEM private key", &["pem"])
-                    .pick_file()
-            {
-                self.integrity_key = Some(path);
-            }
-            if self.integrity_key.is_some() && ui.small_button("✖").clicked() {
-                self.integrity_key = None;
-            }
-        });
-        if let Some(path) = &self.integrity_key {
-            drag_scroll_path(
-                ui,
-                &path.display().to_string(),
-                "integrity-signing-key-path",
-                self.missing_paths.contains(path),
-            );
-        } else {
+            ui.heading("DynoBox");
             ui.label(
-                egui::RichText::new("Optional — unsigned SHA-256 manifest is always generated")
+                egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                     .weak()
                     .small(),
             );
+            ui.add_space(12.0);
+            if ui
+                .button(format!(
+                    "History ({})",
+                    self.history.for_mode(self.mode).count()
+                ))
+                .on_hover_text("Show saved runs for this mode (Ctrl+H)")
+                .clicked()
+            {
+                self.history_open = true;
+            }
+            if ui
+                .button(if self.reset_confirm {
+                    "Confirm reset"
+                } else {
+                    "Reset"
+                })
+                .on_hover_text("Clear all form fields")
+                .clicked()
+            {
+                self.reset_confirm = true;
+            }
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            for mode in Mode::all() {
+                let response = ui
+                    .selectable_label(self.mode == mode, mode.label())
+                    .on_hover_text(format!("Alt+{}", mode_number(mode)));
+                if response.clicked() {
+                    self.mode = mode;
+                }
+            }
+        });
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(self.mode.description())
+                    .small()
+                    .color(egui::Color32::from_rgb(89, 99, 110)),
+            )
+            .truncate(),
+        )
+        .on_hover_text(self.mode.description());
+    }
+
+    fn render_action_bar(&mut self, ui: &mut egui::Ui) {
+        let validation = self.validate_for_run();
+        let args = self.build_args();
+        let command = self.preview_command();
+        let can_run = validation.is_ok();
+
+        let mut status = match &validation {
+            Ok(()) => "Ready".to_string(),
+            Err(message) => format!("! {message}"),
+        };
+        if validation.is_ok() && self.has_interactive_flags() {
+            status.push_str(" · interactive");
+        }
+        if let Some(last) = &self.last_status {
+            status.push_str(" · ");
+            status.push_str(match last {
+                Ok(message) | Err(message) => message,
+            });
+        }
+
+        ui.horizontal(|ui| {
+            let status_color = if validation.is_ok() {
+                egui::Color32::from_rgb(26, 127, 55)
+            } else {
+                egui::Color32::from_rgb(207, 34, 46)
+            };
+            if validation.is_ok() {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 4.0, status_color);
+            }
+            let status_display = truncate_command(&status, 28);
+            ui.label(
+                egui::RichText::new(&status_display)
+                    .strong()
+                    .small()
+                    .color(status_color),
+            )
+            .on_hover_text(&status);
+
+            let run = ui
+                .add_enabled(
+                    can_run,
+                    egui::Button::new(egui::RichText::new("▶ Run").strong()),
+                )
+                .on_hover_text("Run in terminal (Ctrl+Enter)");
+            if run.clicked() {
+                self.run_in_terminal();
+            }
+            if ui
+                .small_button(format!("Args ({})", args.len()))
+                .on_hover_text("Inspect the full argv before running")
+                .clicked()
+            {
+                self.command_open = true;
+                self.command_copied = false;
+            }
+            if ui
+                .small_button("Copy")
+                .on_hover_text("Copy the full command line")
+                .clicked()
+            {
+                ui.ctx().copy_text(command.clone());
+            }
+        });
+        ui.add_space(2.0);
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(truncate_command(&command, 96))
+                    .monospace()
+                    .small()
+                    .color(egui::Color32::from_rgb(89, 99, 110)),
+            )
+            .truncate(),
+        )
+        .on_hover_text(&command);
+    }
+
+    fn render_form(&mut self, ui: &mut egui::Ui) {
+        if matches!(self.mode, Mode::Ota) {
+            self.render_ota_form(ui);
+            return;
+        }
+
+        self.render_core_io(ui);
+        if matches!(self.mode, Mode::Apply) {
+            self.render_ota_zips(ui);
+        }
+        if matches!(self.mode, Mode::Apply | Mode::Unpack) {
+            self.render_info_toggle(ui);
+        }
+        if matches!(self.mode, Mode::Apply | Mode::Unpack | Mode::Resign) {
+            self.render_resign_group(ui);
+        }
+        match self.mode {
+            Mode::Apply | Mode::Unpack => self.render_repack_complete(ui),
+            Mode::Resign => self.render_repack_only(ui),
+            Mode::Repack => self.render_repack_info(ui),
+            Mode::Ota => {}
         }
     }
 
-    fn apply_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("OTA zips").strong());
-        if ui.button("+ Add zip(s)").clicked()
-            && let Some(files) = list_dialog(&self.ota_zips)
-                .add_filter("ZIP", &["zip"])
-                .pick_files()
-        {
-            self.ota_zips.extend(files);
+    fn render_core_io(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "CORE I/O");
+        egui::Grid::new("core_io_grid")
+            .num_columns(2)
+            .min_col_width(115.0)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Input *").strong());
+                path_control(
+                    ui,
+                    &mut self.input,
+                    PathKind::Folder,
+                    "io-input",
+                    &self.missing_paths,
+                    "Required",
+                );
+                ui.end_row();
+
+                ui.label("Output");
+                path_control(
+                    ui,
+                    &mut self.output,
+                    PathKind::Folder,
+                    "io-output",
+                    &self.missing_paths,
+                    "Optional",
+                );
+                ui.end_row();
+
+                ui.label("Manifest key");
+                path_control(
+                    ui,
+                    &mut self.integrity_key,
+                    PathKind::Open("PEM private key", &["pem"]),
+                    "integrity-key",
+                    &self.missing_paths,
+                    "Optional",
+                );
+                ui.end_row();
+            });
+    }
+
+    fn render_ota_zips(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("OTA ZIPS *").strong().size(12.5));
+            ui.add_space(8.0);
+            if ui.button("+ Add zip(s)").clicked()
+                && let Some(files) = list_dialog(&self.ota_zips)
+                    .add_filter("ZIP", &["zip"])
+                    .pick_files()
+            {
+                self.ota_zips.extend(files);
+            }
+            ui.label(
+                egui::RichText::new(format!("{} file(s)", self.ota_zips.len()))
+                    .small()
+                    .weak(),
+            );
+        });
+        if self.ota_zips.is_empty() {
+            ui.label(
+                egui::RichText::new("Required — add at least one OTA zip.")
+                    .small()
+                    .color(egui::Color32::from_rgb(207, 34, 46)),
+            );
+            return;
         }
-        // Drag-and-drop reorder. `☰` handle uses `Ui::dnd_drag_source`
-        // (payload = original index); the whole row is a
-        // `Ui::dnd_drop_zone`. The resulting index swap is applied to
-        // `self.ota_zips` so `build_args` emits the new order.
+
         let mut to_remove: Option<usize> = None;
         let mut drag_from: Option<usize> = None;
         let mut drop_to: Option<usize> = None;
-        for (i, z) in self.ota_zips.iter().enumerate() {
+        for (index, zip) in self.ota_zips.iter().enumerate() {
             let frame = egui::Frame::default().inner_margin(2.0);
             let (_, dropped) = ui.dnd_drop_zone::<usize, _>(frame, |ui| {
                 ui.horizontal(|ui| {
-                    if ui.small_button("✖").clicked() {
-                        to_remove = Some(i);
+                    if ui.small_button("Remove").clicked() {
+                        to_remove = Some(index);
                     }
-                    ui.dnd_drag_source(egui::Id::new(("ota-zip-handle", i)), i, |ui| {
-                        ui.label(egui::RichText::new("☰").monospace());
+                    ui.dnd_drag_source(egui::Id::new(("ota-zip-handle", index)), index, |ui| {
+                        ui.label(egui::RichText::new("::").monospace().weak());
                     })
                     .response
                     .on_hover_text("Drag to reorder");
-                    drag_scroll_path(
-                        ui,
-                        &z.display().to_string(),
-                        &format!("ota-zip-{i}"),
-                        self.missing_paths.contains(z),
+                    let budget = (ui.available_width() - 8.0).clamp(120.0, 360.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(budget, 24.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            path_display(
+                                ui,
+                                Some(zip),
+                                self.missing_paths.contains(zip),
+                                "",
+                                320.0,
+                            );
+                        },
                     );
                 });
             });
             if let Some(payload) = dropped {
                 drag_from = Some(*payload);
-                drop_to = Some(i);
+                drop_to = Some(index);
             }
         }
-        if let Some(i) = to_remove {
-            self.ota_zips.remove(i);
-        } else if let (Some(f), Some(t)) = (drag_from, drop_to)
-            && f != t
-            && f < self.ota_zips.len()
+        if let Some(index) = to_remove {
+            self.ota_zips.remove(index);
+        } else if let (Some(from), Some(to)) = (drag_from, drop_to)
+            && from != to
+            && from < self.ota_zips.len()
         {
-            let item = self.ota_zips.remove(f);
-            let target = if t > f { t - 1 } else { t };
+            let item = self.ota_zips.remove(from);
+            let target = if to > from { to - 1 } else { to };
             let target = target.min(self.ota_zips.len());
             self.ota_zips.insert(target, item);
         }
-        ui.separator();
     }
 
-    fn ota_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Custom OTA (ota generate)").strong());
-        let missing = &self.missing_paths;
-        let ota = &mut self.ota;
-        path_row(
-            ui,
-            "Source build:",
-            &mut ota.source,
-            PathKind::Folder,
-            "ota-source",
-            missing,
-        )
-        .on_hover_text("Build now on the device, exactly as flashed. Leave empty for a full OTA");
-        path_row(
-            ui,
-            "Target build:",
-            &mut ota.target,
-            PathKind::Folder,
-            "ota-target",
-            missing,
-        )
-        .on_hover_text("Build to install");
-        path_row(
-            ui,
-            "Reference OTA:",
-            &mut ota.reference,
-            PathKind::Open("ZIP", &["zip"]),
-            "ota-reference",
-            missing,
-        )
-        .on_hover_text("Lenovo OTA that updates to the target's stock build");
-        path_row(
-            ui,
-            "Signing key:",
-            &mut ota.key,
-            PathKind::Open("PEM / DER key", &["key", "pem", "der", "pk8"]),
-            "ota-key",
-            missing,
-        );
-        path_row(
-            ui,
-            "Certificate:",
-            &mut ota.cert,
-            PathKind::Open("PEM / DER certificate", &["crt", "pem", "der", "x509"]),
-            "ota-cert",
-            missing,
-        );
-        path_row(
-            ui,
-            "Output zip:",
-            &mut ota.output,
-            PathKind::Save("ZIP", &["zip"]),
-            "ota-output",
-            missing,
-        )
-        .on_hover_text("Must not exist yet");
-
-        let has_source = ota.source.is_some();
-        ui.add_enabled_ui(has_source, |ui| {
-            ui.checkbox(&mut ota.delta, "--delta").on_hover_text(
-                "Diff source and target block by block even with a Lenovo incremental \
-                 reference, e.g. when both builds share one stock build",
+    fn render_info_toggle(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.info, "--info");
+            ui.label(
+                egui::RichText::new("Write blobs.txt + lgsi_features.json to the output.")
+                    .small()
+                    .weak(),
             );
         });
-        ui.checkbox(&mut ota.allow_avb_mismatch, "--allow-avb-mismatch")
+    }
+
+    fn render_repack_complete(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.do_repack, "Repack images");
+            ui.checkbox(&mut self.do_complete, "--complete");
+        });
+        ui.label(
+            egui::RichText::new("Rebuild partition images and the final super/payload.")
+                .small()
+                .weak(),
+        );
+    }
+
+    fn render_repack_only(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.checkbox(&mut self.do_repack, "Repack images after resign");
+    }
+
+    fn render_repack_info(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        section_header(ui, "REPACK");
+        ui.label(
+            egui::RichText::new(
+                "Rebuilds partition images and super/payload from the unpacked input directory.",
+            )
+            .small()
+            .weak(),
+        );
+    }
+
+    fn render_resign_group(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        let active = self.resign_active();
+        let dedicated = matches!(self.mode, Mode::Resign);
+        egui::Frame::group(ui.style())
+            .fill(if active {
+                egui::Color32::from_rgb(246, 248, 250)
+            } else {
+                egui::Color32::from_rgb(250, 251, 253)
+            })
+            .stroke(egui::Stroke::new(
+                1.0,
+                egui::Color32::from_rgb(216, 222, 228),
+            ))
+            .inner_margin(10.0)
+            .show(ui, |ui| {
+                // Pin the frame content width; otherwise a wide child can push
+                // the right border past the panel edge.
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    if dedicated {
+                        ui.label(egui::RichText::new("RESIGN OPTIONS").strong().size(12.5));
+                    } else {
+                        ui.checkbox(
+                            &mut self.do_resign,
+                            egui::RichText::new("Resign partitions").strong().size(13.0),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    let key = if let Some(path) = &self.key_path {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "file".to_string())
+                    } else if self.key.trim().is_empty() {
+                        "default".to_string()
+                    } else {
+                        self.key.trim().to_string()
+                    };
+                    let summary = if active {
+                        format!(
+                            "{key} · {} ovl · {} dbp",
+                            self.add_overlays.len(),
+                            self.plus_patches.len()
+                        )
+                    } else {
+                        format!("off · key: {key}")
+                    };
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(summary)
+                                .small()
+                                .color(egui::Color32::from_rgb(89, 99, 110)),
+                        )
+                        .truncate(),
+                    );
+                });
+
+                if !active {
+                    return;
+                }
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    label_cell(ui, egui::RichText::new("Signing key").strong());
+                    if ui.button("Browse...").clicked()
+                        && let Some(path) = file_dialog(self.key_path.as_deref()).pick_file()
+                    {
+                        self.key_path = Some(path);
+                    }
+                    if let Some(path) = self.key_path.clone() {
+                        let is_missing = self.missing_paths.contains(&path);
+                        let avail = (ui.available_width() - 30.0).clamp(80.0, 220.0);
+                        path_display(ui, Some(&path), is_missing, "", avail);
+                        if ui
+                            .add_sized([22.0, 22.0], egui::Button::new("×"))
+                            .on_hover_text("Clear key file and use the alias")
+                            .clicked()
+                        {
+                            self.key_path = None;
+                        }
+                    } else {
+                        ui.add_sized(
+                            [170.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.key).hint_text("testkey_rsa4096"),
+                        );
+                    }
+                });
+                ui.label(
+                    egui::RichText::new("Alias or key file; defaults to testkey_rsa4096.")
+                        .small()
+                        .weak(),
+                );
+                ui.checkbox(
+                    &mut self.force,
+                    "--force (re-sign already signed partitions)",
+                );
+
+                let has_overrides = !self.rollback.trim().is_empty()
+                    || !self.boot_spl.trim().is_empty()
+                    || !self.vendor_spl.trim().is_empty()
+                    || !self.system_spl.trim().is_empty();
+                let header = if has_overrides {
+                    "Anti-Rollback & SPL Overrides (configured)"
+                } else {
+                    "Anti-Rollback & SPL Overrides (optional)"
+                };
+                egui::CollapsingHeader::new(egui::RichText::new(header).size(12.0))
+                    .id_salt("resign-spl-overrides")
+                    .default_open(has_overrides)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            label_cell(ui, "Rollback (Unix ts)");
+                            ui.add_sized(
+                                [130.0, 24.0],
+                                egui::TextEdit::singleline(&mut self.rollback)
+                                    .hint_text("Unix seconds"),
+                            );
+                        });
+                        spl_row(
+                            ui,
+                            "Boot SPL",
+                            &mut self.boot_spl,
+                            &mut self.boot_spl_date,
+                            "boot-spl-picker",
+                        );
+                        spl_row(
+                            ui,
+                            "Vendor SPL",
+                            &mut self.vendor_spl,
+                            &mut self.vendor_spl_date,
+                            "vendor-spl-picker",
+                        );
+                        spl_row(
+                            ui,
+                            "System SPL",
+                            &mut self.system_spl,
+                            &mut self.system_spl_date,
+                            "system-spl-picker",
+                        );
+                        if ui
+                            .small_button("Sync Boot -> All")
+                            .on_hover_text("Copy the boot SPL into vendor and system")
+                            .clicked()
+                        {
+                            self.vendor_spl = self.boot_spl.clone();
+                            self.system_spl = self.boot_spl.clone();
+                        }
+                    });
+
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("Modifications & Patches")
+                        .strong()
+                        .size(12.0),
+                );
+
+                ui.checkbox(&mut self.fuck_lgsi, "--fuck-lgsi");
+                if self.fuck_lgsi {
+                    ui.horizontal(|ui| {
+                        label_cell(ui, "Config JSON");
+                        if ui.button("Browse...").clicked()
+                            && let Some(path) = file_dialog(self.fuck_lgsi_config.as_deref())
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                        {
+                            self.fuck_lgsi_config = Some(path);
+                        }
+                        let mut clear = false;
+                        if let Some(path) = &self.fuck_lgsi_config {
+                            path_display(
+                                ui,
+                                Some(path),
+                                self.missing_paths.contains(path),
+                                "",
+                                320.0,
+                            );
+                            if ui.small_button("×").on_hover_text("Clear config").clicked() {
+                                clear = true;
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("(interactive — Enter in the console)")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                        if clear {
+                            self.fuck_lgsi_config = None;
+                        }
+                    });
+                    if self.fuck_lgsi_config.is_none() {
+                        ui.label(
+                            egui::RichText::new(
+                                "Interactive: waits for Enter in the console window.",
+                            )
+                            .small()
+                            .color(egui::Color32::from_rgb(154, 103, 0)),
+                        );
+                    }
+                }
+
+                ui.checkbox(&mut self.debloat, "--debloat");
+                if self.debloat {
+                    ui.horizontal(|ui| {
+                        label_cell(ui, "List file");
+                        if ui.button("Browse...").clicked()
+                            && let Some(path) = file_dialog(self.debloat_list.as_deref())
+                                .add_filter("Text", &["txt"])
+                                .pick_file()
+                        {
+                            self.debloat_list = Some(path);
+                        }
+                        let mut clear = false;
+                        if let Some(path) = &self.debloat_list {
+                            path_display(
+                                ui,
+                                Some(path),
+                                self.missing_paths.contains(path),
+                                "",
+                                320.0,
+                            );
+                            if ui.small_button("×").on_hover_text("Clear list").clicked() {
+                                clear = true;
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("(interactive — edit debloat.txt in console)")
+                                    .small()
+                                    .weak(),
+                            );
+                        }
+                        if clear {
+                            self.debloat_list = None;
+                        }
+                    });
+                    if self.debloat_list.is_none() {
+                        ui.label(
+                            egui::RichText::new(
+                                "Interactive: edits debloat.txt in the console window.",
+                            )
+                            .small()
+                            .color(egui::Color32::from_rgb(154, 103, 0)),
+                        );
+                    }
+                }
+
+                ui.checkbox(&mut self.add_spoof_enabled, "--add-spoof");
+                if self.add_spoof_enabled {
+                    ui.horizontal(|ui| {
+                        label_cell(ui, "Spoof JSON");
+                        if ui.button("Browse...").clicked()
+                            && let Some(path) = file_dialog(self.add_spoof.as_deref())
+                                .add_filter("JSON", &["json"])
+                                .pick_file()
+                        {
+                            self.add_spoof = Some(path);
+                        }
+                        let mut clear = false;
+                        if let Some(path) = &self.add_spoof {
+                            path_display(
+                                ui,
+                                Some(path),
+                                self.missing_paths.contains(path),
+                                "",
+                                320.0,
+                            );
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("Clear spoof JSON")
+                                .clicked()
+                            {
+                                clear = true;
+                            }
+                        } else {
+                            ui.label(
+                                egui::RichText::new("Required")
+                                    .small()
+                                    .color(egui::Color32::from_rgb(207, 34, 46)),
+                            );
+                        }
+                        if clear {
+                            self.add_spoof = None;
+                        }
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.add_overlays_enabled, "Overlays (--add-overlay)");
+                    ui.label(
+                        egui::RichText::new(format!("{} APKs", self.add_overlays.len()))
+                            .small()
+                            .weak(),
+                    );
+                    if ui.small_button("Manage...").clicked() {
+                        self.overlay_manager_open = true;
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.plus_patches_enabled, "Patches (--plus)");
+                    ui.label(
+                        egui::RichText::new(format!("{} .dbp", self.plus_patches.len()))
+                            .small()
+                            .weak(),
+                    );
+                    if ui.small_button("Manage...").clicked() {
+                        self.patch_manager_open = true;
+                    }
+                });
+            });
+    }
+
+    fn render_ota_form(&mut self, ui: &mut egui::Ui) {
+        self.render_ota_io(ui);
+        self.render_ota_options(ui);
+    }
+
+    fn render_ota_io(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "OTA I/O & SIGNING KEYS");
+        path_row(
+            ui,
+            "Source build",
+            &mut self.ota.source,
+            PathKind::Folder,
+            "ota-source",
+            &self.missing_paths,
+            "Optional (full OTA)",
+        );
+        path_row(
+            ui,
+            "Target build *",
+            &mut self.ota.target,
+            PathKind::Folder,
+            "ota-target",
+            &self.missing_paths,
+            "Required",
+        );
+        path_row(
+            ui,
+            "Reference OTA *",
+            &mut self.ota.reference,
+            PathKind::Open("ZIP", &["zip"]),
+            "ota-reference",
+            &self.missing_paths,
+            "Required",
+        );
+        path_row(
+            ui,
+            "Signing key *",
+            &mut self.ota.key,
+            PathKind::Open("PEM / DER key", &["key", "pem", "der", "pk8"]),
+            "ota-key",
+            &self.missing_paths,
+            "Required",
+        );
+        path_row(
+            ui,
+            "Certificate *",
+            &mut self.ota.cert,
+            PathKind::Open("PEM / DER certificate", &["crt", "pem", "der", "x509"]),
+            "ota-cert",
+            &self.missing_paths,
+            "Required",
+        );
+        path_row(
+            ui,
+            "Output zip *",
+            &mut self.ota.output,
+            PathKind::Save("ZIP", &["zip"]),
+            "ota-output",
+            &self.missing_paths,
+            "Required (new file)",
+        );
+    }
+
+    fn render_ota_options(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "OTA GENERATION OPTIONS");
+        let has_source = self.ota.source.is_some();
+        ui.add_enabled_ui(has_source, |ui| {
+            ui.checkbox(&mut self.ota.delta, "--delta")
+                .on_hover_text("Diff source and target block by block");
+        });
+        if !has_source {
+            ui.label(
+                egui::RichText::new("--delta requires a source build.")
+                    .small()
+                    .weak(),
+            );
+        }
+        ui.checkbox(&mut self.ota.allow_avb_mismatch, "--allow-avb-mismatch")
             .on_hover_text("Package partitions even if they fail AVB checks");
-        let kind = match (has_source, ota.delta) {
+        ui.horizontal(|ui| {
+            ui.label("Exclude:");
+            ui.add_sized(
+                [220.0, 24.0],
+                egui::TextEdit::singleline(&mut self.ota.exclude).hint_text("abl, xbl"),
+            );
+        });
+        let kind = match (has_source, self.ota.delta) {
             (false, _) => "Full OTA: installs over any build of the device.",
             (true, true) => "Incremental OTA as a block-level delta.",
             (true, false) => {
-                "Incremental OTA: reuses a Lenovo incremental reference's operations, \
-                 or diffs block by block when the reference is a full OTA."
+                "Incremental OTA: reuses a Lenovo incremental reference, or diffs block by block."
             }
         };
-        ui.horizontal(|ui| {
-            ui.label("Exclude:");
-            ui.add(egui::TextEdit::singleline(&mut ota.exclude).hint_text("abl, xbl"))
-                .on_hover_text(
-                    "Physical partitions to leave out (comma or space separated); \
-                     the updated slot keeps its current images",
-                );
-        });
-        ui.label(egui::RichText::new(kind).weak().small());
-    }
-
-    fn info_section(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Unpack options").strong());
-        ui.checkbox(&mut self.info, "--info")
-            .on_hover_text("Write blobs.txt + lgsi_features.json into the output");
-        ui.label(
-            egui::RichText::new(
-                "Read-only inventory of the unpacked partitions (no resign needed).",
-            )
-            .weak()
-            .small(),
-        );
-    }
-
-    fn resign_section(&mut self, ui: &mut egui::Ui) {
-        // In Apply / Unpack modes resign is opt-in; the toggle lives at
-        // the top of this same section, above the options it enables.
-        // (Resign mode always runs the stage, so it needs no toggle.)
-        if matches!(self.mode, Mode::Apply | Mode::Unpack) {
-            ui.checkbox(&mut self.do_resign, "resign");
-        }
-        let active = self.resign_active();
-        ui.add_enabled_ui(active, |ui| {
-            ui.label(egui::RichText::new("Resign options").strong());
-
-            ui.horizontal(|ui| {
-                ui.label("--key:");
-                ui.add(egui::TextEdit::singleline(&mut self.key).hint_text("testkey_rsa4096"));
-                if ui.button("📁").clicked()
-                    && let Some(p) = file_dialog(self.key_path.as_deref()).pick_file()
-                {
-                    self.key_path = Some(p);
-                }
-                let mut clear_key = false;
-                if let Some(p) = &self.key_path {
-                    if ui.small_button("✖").clicked() {
-                        clear_key = true;
-                    }
-                    drag_scroll_path(
-                        ui,
-                        &p.display().to_string(),
-                        "key-path",
-                        self.missing_paths.contains(p),
-                    );
-                }
-                if clear_key {
-                    self.key_path = None;
-                }
-            });
-
-            ui.checkbox(&mut self.force, "--force");
-
-            ui.horizontal(|ui| {
-                ui.label("Rollback (Unix ts):");
-                ui.text_edit_singleline(&mut self.rollback);
-            });
-
-            spl_row(
-                ui,
-                "Boot SPL:",
-                &mut self.boot_spl,
-                &mut self.boot_spl_date,
-                "boot-spl-picker",
-            );
-            spl_row(
-                ui,
-                "Vendor SPL:",
-                &mut self.vendor_spl,
-                &mut self.vendor_spl_date,
-                "vendor-spl-picker",
-            );
-            spl_row(
-                ui,
-                "System SPL:",
-                &mut self.system_spl,
-                &mut self.system_spl_date,
-                "system-spl-picker",
-            );
-
-            ui.checkbox(&mut self.fuck_lgsi, "--fuck-lgsi");
-            ui.add_enabled_ui(self.fuck_lgsi, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Config JSON:");
-                    if ui.button("📁").clicked()
-                        && let Some(p) = file_dialog(self.fuck_lgsi_config.as_deref())
-                            .add_filter("JSON", &["json"])
-                            .pick_file()
-                    {
-                        self.fuck_lgsi_config = Some(p);
-                    }
-                    let text = self
-                        .fuck_lgsi_config
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "(interactive — Enter in terminal)".to_string());
-                    let missing = self
-                        .fuck_lgsi_config
-                        .as_deref()
-                        .is_some_and(|path| self.missing_paths.contains(path));
-                    drag_scroll_path(ui, &text, "fuck-lgsi-config", missing);
-                });
-            });
-
-            ui.checkbox(&mut self.debloat, "--debloat");
-            ui.add_enabled_ui(self.debloat, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("List file:");
-                    if ui.button("📁").clicked()
-                        && let Some(p) = file_dialog(self.debloat_list.as_deref())
-                            .add_filter("Text", &["txt"])
-                            .pick_file()
-                    {
-                        self.debloat_list = Some(p);
-                    }
-                    let text = self
-                        .debloat_list
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| {
-                            "(interactive — edit debloat.txt in terminal)".to_string()
-                        });
-                    let missing = self
-                        .debloat_list
-                        .as_deref()
-                        .is_some_and(|path| self.missing_paths.contains(path));
-                    drag_scroll_path(ui, &text, "debloat-list", missing);
-                });
-            });
-
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.add_overlays_enabled, "")
-                    .on_hover_text("Apply the --add-overlay list during resign");
-                let overlays_missing = self
-                    .add_overlays
-                    .iter()
-                    .any(|p| self.missing_paths.contains(p));
-                let mut overlay_text =
-                    egui::RichText::new(format!("{} overlay(s)", self.add_overlays.len()));
-                if overlays_missing {
-                    overlay_text = overlay_text.color(egui::Color32::LIGHT_RED);
-                }
-                if ui
-                    .link(overlay_text)
-                    .on_hover_text(
-                        "Manage the --add-overlay list: static RRO APKs inserted into \
-                         vendor.img:/overlay/ during resign (no mount). The \
-                         partition's dm-verity is regenerated and re-signed.",
-                    )
-                    .clicked()
-                {
-                    self.overlay_manager_open = true;
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.add_spoof_enabled, "--add-spoof")
-                    .on_hover_text(
-                        "Install the zygote preload (libspoof.so, the per-app config \
-                         from this JSON list, and DT_NEEDED entries in app_process64 \
-                         and bootanimation) into system.img during resign",
-                    );
-                if ui.button("📁").clicked()
-                    && let Some(p) = file_dialog(self.add_spoof.as_deref())
-                        .add_filter("JSON", &["json"])
-                        .pick_file()
-                {
-                    self.add_spoof = Some(p);
-                }
-                if let Some(path) = &self.add_spoof {
-                    let text = path.display().to_string();
-                    let missing = self.missing_paths.contains(path);
-                    drag_scroll_path(ui, &text, "add-spoof", missing);
-                    if ui.small_button("✖").clicked() {
-                        self.add_spoof = None;
-                    }
-                }
-            });
-
-            ui.add_space(12.0);
-
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut self.plus_patches_enabled, "")
-                    .on_hover_text("Apply the --plus list during resign");
-                let patches_missing = self
-                    .plus_patches
-                    .iter()
-                    .any(|p| self.missing_paths.contains(p));
-                let mut patch_text =
-                    egui::RichText::new(format!("{} patch(es)", self.plus_patches.len()));
-                if patches_missing {
-                    patch_text = patch_text.color(egui::Color32::LIGHT_RED);
-                }
-                if ui
-                    .link(patch_text)
-                    .on_hover_text(
-                        "Manage the --plus list: external .dbp patches applied to files \
-                         inside the partition images during resign.",
-                    )
-                    .clicked()
-                {
-                    self.patch_manager_open = true;
-                }
-            });
-        });
-    }
-
-    fn run_button(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if ui.button("▶ Run in terminal").clicked() {
-                self.run_in_terminal();
-            }
-            if self.last_command.is_some()
-                && ui
-                    .link("command")
-                    .on_hover_text("Show the last launched command line")
-                    .clicked()
-            {
-                self.command_open = true;
-                self.command_copied = false;
-            }
-        });
-        if let Some(status) = &self.last_status {
-            match status {
-                Ok(msg) => {
-                    ui.label(egui::RichText::new(msg).weak().small());
-                }
-                Err(msg) => {
-                    ui.label(egui::RichText::new(msg).color(egui::Color32::LIGHT_RED));
-                }
-            }
-        }
+        ui.label(egui::RichText::new(kind).small().weak());
     }
 }
 
@@ -1438,8 +1874,7 @@ enum PathKind {
     Save(&'static str, &'static [&'static str]),
 }
 
-/// A labelled path field: a picker button, a clear button once set, and
-/// the path itself (red when a restored history entry points nowhere).
+/// A labelled path field: fixed-width label + Browse + tail-first path + clear.
 fn path_row(
     ui: &mut egui::Ui,
     label: &str,
@@ -1447,10 +1882,24 @@ fn path_row(
     kind: PathKind,
     id_salt: &str,
     missing: &MissingPaths,
-) -> egui::Response {
+    placeholder: &str,
+) {
     ui.horizontal(|ui| {
-        ui.label(label);
-        if ui.button("📁").clicked() {
+        label_cell(ui, label);
+        path_control(ui, value, kind, id_salt, missing, placeholder);
+    });
+}
+
+fn path_control(
+    ui: &mut egui::Ui,
+    value: &mut Option<PathBuf>,
+    kind: PathKind,
+    _id_salt: &str,
+    missing: &MissingPaths,
+    placeholder: &str,
+) {
+    ui.horizontal(|ui| {
+        if ui.button("Browse...").clicked() {
             let current = value.as_deref();
             let picked = match kind {
                 PathKind::Folder => folder_dialog(current).pick_folder(),
@@ -1461,75 +1910,244 @@ fn path_row(
                     .add_filter(name, extensions)
                     .save_file(),
             };
-            if picked.is_some() {
-                *value = picked;
+            if let Some(path) = picked {
+                *value = Some(path);
             }
         }
-        if value.is_some() && ui.small_button("✖").clicked() {
+
+        let is_missing = value.as_deref().is_some_and(|path| missing.contains(path));
+        // Hard width: a long path must never widen the row, and the clear
+        // button stays at a predictable spot instead of floating to the edge.
+        let budget = (ui.ctx().content_rect().width() - 320.0).clamp(120.0, 300.0);
+        path_display(ui, value.as_deref(), is_missing, placeholder, budget);
+        if value.is_some()
+            && ui
+                .add_sized([22.0, 22.0], egui::Button::new("×"))
+                .on_hover_text("Clear path")
+                .clicked()
+        {
             *value = None;
         }
-        let text = value
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "—".to_string());
-        let is_missing = value.as_deref().is_some_and(|p| missing.contains(p));
-        drag_scroll_path(ui, &text, id_salt, is_missing);
-    })
-    .response
+    });
 }
 
-/// Render a single-line monospace path that the user can scroll
-/// horizontally by dragging when the text overflows the available
-/// width. Replaces `Label::truncate()` for path display so a long
-/// `D:\Git\…\input.zip` no longer hides the filename behind an
-/// ellipsis. Hover surfaces the full string as a tooltip too.
-fn drag_scroll_path(ui: &mut egui::Ui, text: &str, id_salt: &str, missing: bool) {
-    let row_h = ui.text_style_height(&egui::TextStyle::Body);
-    egui::ScrollArea::horizontal()
-        .id_salt(id_salt)
-        .max_height(row_h)
-        .auto_shrink([false, true])
-        .scroll_source(egui::scroll_area::ScrollSource::ALL)
-        .show(ui, |ui| {
-            let mut rich_text = egui::RichText::new(text).monospace();
-            if missing {
-                rich_text = rich_text.color(egui::Color32::LIGHT_RED);
-            }
-            ui.add(
-                egui::Label::new(rich_text)
-                    .wrap_mode(egui::TextWrapMode::Extend)
-                    .selectable(true),
+fn path_display(
+    ui: &mut egui::Ui,
+    path: Option<&Path>,
+    missing: bool,
+    placeholder: &str,
+    width: f32,
+) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, 24.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            path_display_inner(ui, path, missing, placeholder, width);
+        },
+    );
+}
+
+/// Show the last two path segments (`parent/leaf`) so two folders named
+/// `out` or `target` remain distinguishable, and fall back to the leaf when
+/// the pair does not fit the budget.
+fn short_path_label(path: &Path, max_chars: usize) -> String {
+    let full = path.display().to_string();
+    let Some(leaf) = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+    else {
+        return truncate_command(&full, max_chars);
+    };
+    let parent = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty());
+    let combined = match parent {
+        Some(parent) => format!("{parent}{}{leaf}", std::path::MAIN_SEPARATOR),
+        None => leaf.clone(),
+    };
+    if combined.chars().count() <= max_chars {
+        combined
+    } else {
+        truncate_command(&leaf, max_chars)
+    }
+}
+
+fn path_display_inner(
+    ui: &mut egui::Ui,
+    path: Option<&Path>,
+    missing: bool,
+    placeholder: &str,
+    max_width: f32,
+) {
+    let Some(path) = path else {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(placeholder)
+                    .small()
+                    .color(egui::Color32::from_rgb(130, 140, 150)),
             )
-            .on_hover_text(text);
-        });
+            .truncate(),
+        );
+        return;
+    };
+
+    let full = path.display().to_string();
+    let max_chars = ((max_width / 7.5) as usize).clamp(14, 56);
+    let text = short_path_label(path, max_chars);
+    let color = if missing {
+        egui::Color32::from_rgb(207, 34, 46)
+    } else {
+        egui::Color32::from_rgb(31, 35, 40)
+    };
+
+    let response = ui
+        .add(
+            egui::Label::new(
+                egui::RichText::new(text)
+                    .monospace()
+                    .strong()
+                    .size(12.5)
+                    .color(color),
+            )
+            .truncate(),
+        )
+        .on_hover_text(&full);
+
+    response.context_menu(|ui| {
+        if ui.button("Copy full path").clicked() {
+            ui.ctx().copy_text(full.clone());
+            ui.close();
+        }
+        if ui.button("Open in file manager").clicked() {
+            open_in_file_manager(path);
+            ui.close();
+        }
+    });
 }
 
-/// Shared row layout for the boot/vendor SPL fields: text input with
-/// `YYYY-MM-DD` placeholder + a calendar popup that writes the picked
-/// date into the same string when changed. `show_icon(false)` drops
-/// the auto-appended `📆` glyph so only our explicit `📅` icon shows.
+fn open_in_file_manager(path: &Path) {
+    #[cfg(target_os = "windows")]
+    let program = "explorer";
+    #[cfg(target_os = "macos")]
+    let program = "open";
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let program = "xdg-open";
+
+    let _ = std::process::Command::new(program).arg(path).spawn();
+}
+
+fn truncate_command(command: &str, max_chars: usize) -> String {
+    if command.chars().count() <= max_chars {
+        command.to_string()
+    } else {
+        let head: String = command.chars().take(max_chars).collect();
+        format!("{head}...")
+    }
+}
+
+fn history_title(entry: &FormSnapshot) -> String {
+    let input = entry
+        .input
+        .as_deref()
+        .map(|path| short_path_label(path, 24))
+        .unwrap_or_else(|| "—".to_string());
+    let output = entry
+        .output
+        .as_deref()
+        .map(|path| short_path_label(path, 24))
+        .unwrap_or_else(|| "auto".to_string());
+    format!("{input} -> {output}")
+}
+
+fn history_badges(entry: &FormSnapshot) -> String {
+    let mut parts = vec![entry.mode.label().to_string()];
+    if matches!(entry.mode, Mode::Apply) {
+        parts.push(format!("{} OTA", entry.ota_zips.len()));
+    }
+    if entry.do_resign {
+        let key = if entry.key.trim().is_empty() {
+            "default"
+        } else {
+            entry.key.trim()
+        };
+        parts.push(format!("resign: {key}"));
+    }
+    if entry.add_overlays_enabled && !entry.add_overlays.is_empty() {
+        parts.push(format!("{} overlays", entry.add_overlays.len()));
+    }
+    if entry.plus_patches_enabled && !entry.plus_patches.is_empty() {
+        parts.push(format!("{} patches", entry.plus_patches.len()));
+    }
+    if entry.do_repack {
+        parts.push("repack".to_string());
+    }
+    if entry.do_complete {
+        parts.push("--complete".to_string());
+    }
+    if !entry.created_at.is_empty() {
+        // RFC 3339 is long; show `YYYY-MM-DD HH:MM` so the rest of the badge
+        // line stays readable.
+        let short = entry
+            .created_at
+            .get(..16)
+            .unwrap_or(&entry.created_at)
+            .replace('T', " ");
+        parts.push(short);
+    }
+    parts.join(" · ")
+}
+
+fn mode_number(mode: Mode) -> usize {
+    match mode {
+        Mode::Apply => 1,
+        Mode::Unpack => 2,
+        Mode::Resign => 3,
+        Mode::Repack => 4,
+        Mode::Ota => 5,
+    }
+}
+
+fn label_cell(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(115.0, 24.0),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            // `allocate_ui_with_layout` only caps max_rect; force both bounds
+            // so every row's control starts at the same x.
+            ui.set_width(115.0);
+            ui.add(egui::Label::new(text).truncate());
+        },
+    );
+}
+
+fn section_header(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new(text).strong().size(12.5));
+    ui.add_space(2.0);
+}
+
+/// Shared row layout for the boot/vendor SPL fields: fixed-width text input
+/// with a `[Pick]` button that opens the date picker.
 fn spl_row(ui: &mut egui::Ui, label: &str, value: &mut String, date: &mut Date, id_salt: &str) {
     ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::TextEdit::singleline(value).hint_text("YYYY-MM-DD"));
-        // Seed the date picker from the text field before showing
-        // the popup. Without this, a user who typed `2024-12-01` and
-        // then opened the picker (still pinned to the struct's
-        // default `2026-01-01`) would have their typed value
-        // overwritten the instant they clicked any new day, because
-        // the picker's `*date` would jump from default -> clicked-day
-        // (not from typed-day -> clicked-day).
+        label_cell(ui, label);
+        ui.add_sized(
+            [105.0, 24.0],
+            egui::TextEdit::singleline(value).hint_text("YYYY-MM-DD"),
+        );
         if let Ok(parsed) = parse_spl_date(value.trim()) {
             *date = parsed;
         }
-        let prev = *date;
+        let previous = *date;
         ui.add(
             DatePickerButton::new(date)
                 .id_salt(id_salt)
-                .format("📅")
+                .format("Pick")
                 .show_icon(false),
         );
-        if *date != prev {
+        if *date != previous {
             *value = format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day());
         }
     });
@@ -1745,7 +2363,7 @@ mod tests {
             snapshot.restore_form(&mut restored);
 
             assert_eq!(snapshot.command_line(), original.build_args().join(" "));
-            assert_eq!(FormSnapshot::capture(&restored), snapshot);
+            assert!(FormSnapshot::capture(&restored).same_form(&snapshot));
             assert_eq!(restored.boot_spl_date, Date::constant(2024, 1, 2));
             assert_eq!(restored.vendor_spl_date, Date::constant(2024, 3, 4));
             assert_eq!(restored.system_spl_date, Date::constant(2024, 5, 6));
@@ -1753,8 +2371,8 @@ mod tests {
     }
 
     #[test]
-    fn info_flag_is_emitted_in_apply_unpack_and_resign_modes() {
-        for mode in [Mode::Apply, Mode::Unpack, Mode::Resign] {
+    fn info_flag_is_emitted_in_apply_and_unpack_modes() {
+        for mode in [Mode::Apply, Mode::Unpack] {
             let mut gui = populated_gui(mode);
             gui.info = true;
             let args = gui.build_args();
@@ -1763,6 +2381,12 @@ mod tests {
                 "{mode:?} should emit --info, got: {args:?}"
             );
         }
+        let mut resign = populated_gui(Mode::Resign);
+        resign.info = true;
+        assert!(
+            !resign.build_args().contains(&"--info".to_string()),
+            "Resign mode must not emit the Apply/Unpack-only --info flag"
+        );
         let mut off = populated_gui(Mode::Apply);
         off.info = false;
         assert!(
