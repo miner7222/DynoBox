@@ -1753,3 +1753,35 @@ proto = "(Ljava/lang/CharSequence;)Z"
 from = "22 01 ${builder:u16} 70 10 ${builder_init:u16} 01 00 1a 02 ${grid_log:u16} 6e 20 ${builder_append:u16} 21 00 6e 20 ${builder_append:u16} 01 00 6e 10 ${builder_string:u16} 01 00 0c 01 1a 02 ${log_tag:u16} 71 20 ${log_i:u16} 12 00"
 to = "6e 10 ${content_resolver:u16} 03 00 0c 01 1a 02 ${extra_key:u16} 71 20 ${system_get_string:u16} 21 00 0c 01 71 10 ${text_empty:u16} 01 00 0a 02 38 02 04 00 07 10 28 3b 1a 02 ${log_tag:u16} 00 00 00 00"
 expected = 1
+
+# Saving a split-screen pair from Recents aborts before the workspace item is
+# written. The ZUI shell reports its own snap-position encoding (the split
+# bounds carry values such as 1271 for a left/right split), and
+# `saveAppPair` guards on the AOSP `SplitScreenConstants.isPersistentSnapPosition`
+# (0..7) first: the check fails, the code logs "Tried to save an app pair
+# with illegal snapPosition" and returns. The value is not a one-off either -
+# it is what `GroupedTaskView.getSnapPosition()` returns for every ZUI group,
+# and it is what the same controller passes back to
+# `SystemUiProxy.startCombinationAnimationIfPossible` when the saved pair is
+# launched, so the shell understands it. Answer the guard with true and keep
+# the register: `move-result v13` still reads a boolean and the following
+# `if-nez v13` never branches, so the pair is saved with the shell's own value.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/android/quickstep/split/AppPairsController;"
+method = "saveAppPair"
+proto = "(Lcom/android/quickstep/views/GroupedTaskView;)V"
+
+[[op.symbol]]
+name = "persistent_snap"
+kind = "method"
+class = "Lcom/android/wm/shell/shared/split/SplitScreenConstants;"
+method = "isPersistentSnapPosition"
+proto = "(I)Z"
+
+[[op.replacement]]
+from = "71 10 ${persistent_snap:u16} 0c 00 0a 0d"
+to = "12 1d 00 00 00 00 00 00"
+expected = 1
