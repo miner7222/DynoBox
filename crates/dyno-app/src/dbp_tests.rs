@@ -1000,7 +1000,7 @@ fn bundled_dbp_files_inventory() {
     assert_eq!(uc.ops.len(), 85);
     let fc = load_dbp(&patches_dir().join("fix-common.dbp")).expect("fix-common.dbp");
     assert_eq!(fc.name, "fix-common");
-    assert_eq!(fc.ops.len(), 38);
+    assert_eq!(fc.ops.len(), 39);
     let wj = load_dbp(&patches_dir().join("debloat-wuji.dbp")).expect("debloat-wuji.dbp");
     assert_eq!(wj.name, "debloat-wuji");
     assert_eq!(wj.ops.len(), 5);
@@ -3947,8 +3947,8 @@ fn bundled_recents_paths_match_existing_systemui_and_launcher_patches() {
     }
     assert_eq!(systemui_ops, 2);
     assert_eq!(
-        launcher_ops, 6,
-        "1 RecentsActivity guard + 5 ForceStopTask kill-policy ops"
+        launcher_ops, 7,
+        "1 RecentsActivity guard + 5 ForceStopTask kill-policy ops + the default grid key guard"
     );
 }
 

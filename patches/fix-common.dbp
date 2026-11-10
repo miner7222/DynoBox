@@ -1654,3 +1654,102 @@ proto = "(Ljava/lang/String;ZI)Z"
 from = "72 40 ${set_enabled:u16} 75 31 0a 05"
 to = "72 40 ${set_enabled:u16} 75 31 12 15"
 expected = 1
+
+# The launcher keeps its grid size in two places: the per-user
+# `current_layout_config_key` preference and the global
+# `extra_new_layout_config` system setting. `setCurrentLayoutConfigKey`
+# mirrors every grid change into both, but it writes the preference through
+# device-protected storage while the user is locked, so after unlock
+# `getCurrentLayoutConfigKey` can read a credential-protected file with no key
+# and fall back to the config default (6x4). It then sees that default differ
+# from `extra_new_layout_config`, and because the user is unlocked it rewrites
+# the system setting down to the default: the grid shrinks and the workspace
+# migration repacks every icon. The trimmed log statement below is replaced
+# with a guard that answers `getDefaultConfigKey` -- the fallback the
+# preference read passes when the key is absent -- with
+# `extra_new_layout_config` while that setting is set. Only the missing-key
+# fallback changes; the mismatch branch above (`sKey` wins when unlocked,
+# `extra` wins when locked) and the work-mode grid handling keep their stock
+# shape, so a grid written by `settCurrentLayoutConfigKeyForWorkMode` still
+# gets repaired out of extra instead of leaking into the personal grid.
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiLauncher/ZuiLauncher.apk"
+class = "Lcom/zui/launcher/util/SettingsValue;"
+method = "getDefaultConfigKey"
+proto = "(Landroid/content/Context;)Ljava/lang/String;"
+
+[[op.symbol]]
+name = "grid_log"
+kind = "string"
+value = "=========>read default grid layout: "
+
+[[op.symbol]]
+name = "log_tag"
+kind = "string"
+value = "testBackup"
+
+[[op.symbol]]
+name = "extra_key"
+kind = "string"
+value = "extra_new_layout_config"
+
+[[op.symbol]]
+name = "builder"
+kind = "type"
+descriptor = "Ljava/lang/StringBuilder;"
+
+[[op.symbol]]
+name = "builder_init"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "<init>"
+proto = "()V"
+
+[[op.symbol]]
+name = "builder_append"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "append"
+proto = "(Ljava/lang/String;)Ljava/lang/StringBuilder;"
+
+[[op.symbol]]
+name = "builder_string"
+kind = "method"
+class = "Ljava/lang/StringBuilder;"
+method = "toString"
+proto = "()Ljava/lang/String;"
+
+[[op.symbol]]
+name = "log_i"
+kind = "method"
+class = "Landroid/util/Log;"
+method = "i"
+proto = "(Ljava/lang/String;Ljava/lang/String;)I"
+
+[[op.symbol]]
+name = "content_resolver"
+kind = "method"
+class = "Landroid/content/Context;"
+method = "getContentResolver"
+proto = "()Landroid/content/ContentResolver;"
+
+[[op.symbol]]
+name = "system_get_string"
+kind = "method"
+class = "Landroid/provider/Settings$System;"
+method = "getString"
+proto = "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;"
+
+[[op.symbol]]
+name = "text_empty"
+kind = "method"
+class = "Landroid/text/TextUtils;"
+method = "isEmpty"
+proto = "(Ljava/lang/CharSequence;)Z"
+
+[[op.replacement]]
+from = "22 01 ${builder:u16} 70 10 ${builder_init:u16} 01 00 1a 02 ${grid_log:u16} 6e 20 ${builder_append:u16} 21 00 6e 20 ${builder_append:u16} 01 00 6e 10 ${builder_string:u16} 01 00 0c 01 1a 02 ${log_tag:u16} 71 20 ${log_i:u16} 12 00"
+to = "6e 10 ${content_resolver:u16} 03 00 0c 01 1a 02 ${extra_key:u16} 71 20 ${system_get_string:u16} 21 00 0c 01 71 10 ${text_empty:u16} 01 00 0a 02 38 02 04 00 07 10 28 3b 1a 02 ${log_tag:u16} 00 00 00 00"
+expected = 1
