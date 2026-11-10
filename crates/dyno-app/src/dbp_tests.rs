@@ -994,7 +994,7 @@ fn patches_dir() -> std::path::PathBuf {
 fn bundled_dbp_files_inventory() {
     let dc = load_dbp(&patches_dir().join("debloat-common.dbp")).expect("debloat-common.dbp");
     assert_eq!(dc.name, "debloat-common");
-    assert_eq!(dc.ops.len(), 97);
+    assert_eq!(dc.ops.len(), 99);
     let uc = load_dbp(&patches_dir().join("unlock-common.dbp")).expect("unlock-common.dbp");
     assert_eq!(uc.name, "unlock-common");
     assert_eq!(uc.ops.len(), 83);

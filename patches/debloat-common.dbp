@@ -1013,6 +1013,68 @@ target_method = "setAutoConnectionSwitch"
 proto = "(Z)V"
 anchor_string = "2"
 
+# With smart SMS pinned off above, the first-run CTA that asks the user to
+# turn it on ("Enable 'Smart SMS'", xmms_cta_title/xmms_cta_warning) has
+# nothing left to enable: its positive button would only re-run the pinned
+# writer. AntiSpamDialogActivity exists solely for that prompt and builds the
+# dialog from onCreate, then again from onConfigurationChanged. Finish the
+# activity at both call sites instead of drawing the dialog: the launch window
+# closes immediately and no prompt appears. The invoke keeps its 35c shape
+# (invoke-direct -> invoke-virtual, same {v0}).
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/zui/antispamsettings/AntiSpamDialogActivity;"
+method = "onCreate"
+proto = "(Landroid/os/Bundle;)V"
+
+[[op.symbol]]
+name = "show_tip"
+kind = "method"
+class = "Lcom/android/messaging/zui/antispamsettings/AntiSpamDialogActivity;"
+method = "showAntiSpamDig"
+proto = "()V"
+
+[[op.symbol]]
+name = "finish"
+kind = "method"
+class = "Landroid/app/Activity;"
+method = "finish"
+proto = "()V"
+
+[[op.replacement]]
+from = "70 10 ${show_tip:u16} 00 00"
+to = "6e 10 ${finish:u16} 00 00"
+expected = 1
+
+[[op]]
+kind = "method_code_patch"
+partition = "system"
+file = "system/priv-app/ZuiMessage/ZuiMessage.apk"
+class = "Lcom/android/messaging/zui/antispamsettings/AntiSpamDialogActivity;"
+method = "onConfigurationChanged"
+proto = "(Landroid/content/res/Configuration;)V"
+
+[[op.symbol]]
+name = "show_tip"
+kind = "method"
+class = "Lcom/android/messaging/zui/antispamsettings/AntiSpamDialogActivity;"
+method = "showAntiSpamDig"
+proto = "()V"
+
+[[op.symbol]]
+name = "finish"
+kind = "method"
+class = "Landroid/app/Activity;"
+method = "finish"
+proto = "()V"
+
+[[op.replacement]]
+from = "70 10 ${show_tip:u16} 00 00"
+to = "6e 10 ${finish:u16} 00 00"
+expected = 1
+
 # The call-classification rows only work through the Tencent number service
 # (com.ted.number) that the Wuji build debloats, so the six category switches
 # on the call interception settings screen are disabled: setEnabled replaces
